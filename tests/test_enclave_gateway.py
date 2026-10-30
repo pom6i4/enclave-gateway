@@ -158,7 +158,7 @@ class LoopbackControlChannel:
 
         # 4. Pre-check in push_file
         if "Write-Output 'MISS'" in inner_cmd:
-            m_dst = re.search(r"\$dst = '([^']+)'", inner_cmd)
+            m_dst = re.search(r"ExpandEnvironmentVariables\('([^']+)'\)", inner_cmd) or re.search(r"\$dst = '([^']+)'", inner_cmd)
             dst_path = m_dst.group(1) if m_dst else ""
             if dst_path in self.bastion_files:
                 existing = self.bastion_files[dst_path]
@@ -169,7 +169,7 @@ class LoopbackControlChannel:
 
         # 5. Parallel striped assembly in push_file
         if "$stripeWorker =" in inner_cmd and "VERIFIED:" in inner_cmd:
-            m_dst = re.search(r"\$dst = '([^']+)'", inner_cmd)
+            m_dst = re.search(r"ExpandEnvironmentVariables\('([^']+)'\)", inner_cmd) or re.search(r"\$dst = '([^']+)'", inner_cmd)
             m_tx = re.search(r"\$tmp = \"\$dst\.tmp_(tx_[^\"]+)\"", inner_cmd)
             m_changed = re.search(r"\$changed = @\(([0-9,]*)\)", inner_cmd)
             m_bsize = re.search(r"AddArgument\(\[int64\](\d+)\)", inner_cmd)
@@ -203,7 +203,7 @@ class LoopbackControlChannel:
 
         # 6. Parallel striped stage in pull_file
         if "$stageWorker =" in inner_cmd and "SHA256:" in inner_cmd:
-            m_src = re.search(r"\$src = '([^']+)'", inner_cmd)
+            m_src = re.search(r"ExpandEnvironmentVariables\('([^']+)'\)", inner_cmd) or re.search(r"\$src = '([^']+)'", inner_cmd)
             m_bsize = re.search(r"\$blockSize = \[int64\](\d+)", inner_cmd)
             m_tx = re.search(r"pull_(tx_[0-9_a-f]+)\.bin", inner_cmd)
             src_path = m_src.group(1) if m_src else ""
@@ -336,6 +336,10 @@ targets:
 
             key_res = engine.bootstrap_ssh_key("app01")
             self.assertEqual(key_res.exit_code, 0)
+
+            clean_meta = engine.clean_session()
+            self.assertTrue(clean_meta["appliance_cleaned"])
+            self.assertTrue(clean_meta["bastion_cleaned"])
 
     def test_block_manifest_and_sha256(self) -> None:
         with TemporaryDirectory() as tmp:

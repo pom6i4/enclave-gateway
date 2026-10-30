@@ -74,7 +74,7 @@ def build_parallel_striped_assemble_ps(
 
     return f"""
 $vfsSpool = '{vfs_spool}'
-$dst = '{bastion_dest_path}'
+$dst = [Environment]::ExpandEnvironmentVariables('{bastion_dest_path}')
 $tmp = "$dst.tmp_{tx_id}"
 $parent = Split-Path -Parent $dst
 if ($parent -and -not (Test-Path $parent)) {{ New-Item -ItemType Directory -Force -Path $parent | Out-Null }}
@@ -176,7 +176,7 @@ def build_parallel_striped_stage_ps(
     """Build PowerShell script that stages a file from Bastion to VFS spool using parallel striped RunspacePool I/O."""
     streams = max(1, int(parallel_streams))
     return f"""
-$src = '{bastion_src_path}'
+$src = [Environment]::ExpandEnvironmentVariables('{bastion_src_path}')
 if (-not (Test-Path $src)) {{ Write-Error "Source file not found: $src"; exit 1 }}
 $item = Get-Item $src
 $fileSize = [int64]$item.Length
@@ -355,7 +355,7 @@ exit 124
 
         # Step 1: Fast pre-check if identical file already exists on Bastion
         check_ps = f"""
-$dst = '{bastion_dest_path}'
+$dst = [Environment]::ExpandEnvironmentVariables('{bastion_dest_path}')
 if (Test-Path $dst) {{
     $item = Get-Item $dst
     if ($item.Length -eq {file_size}) {{

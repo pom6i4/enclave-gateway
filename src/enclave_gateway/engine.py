@@ -493,6 +493,54 @@ Write-Output ("DIAG_CLOCK:" + $epoch + ":UDP:" + [int]$udpPol)
             "checks": checks,
         }
 
+    def clean_session(self, *, actor: str = "cli") -> dict[str, Any]:
+        """Purge transient spool chunks, staging files, and idle multiplexed sockets across tiers."""
+        tx_id = generate_tx_id()
+        started = time.monotonic()
+
+        bastion_clean_ps = """
+if ($Global:EnclaveMuxSockets) {
+    foreach ($k in @($Global:EnclaveMuxSockets.Keys)) {
+        try { $Global:EnclaveMuxSockets[$k].Client.Close() } catch {}
+    }
+    $Global:EnclaveMuxSockets.Clear()
+}
+$stageDir = Join-Path $env:LOCALAPPDATA 'EnclaveGateway\\stage'
+if (Test-Path $stageDir) {
+    Get-ChildItem -Path $stageDir -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+}
+Write-Output 'BASTION_CLEAN_OK'
+"""
+        bastion_res = self.rdp_vfs.exec_bastion(bastion_clean_ps, timeout_sec=20.0)
+
+        spool = self.config.bastion.appliance_spool_dir
+        appliance_clean_ps = f"""
+$spool = '{spool}'
+if (Test-Path $spool) {{
+    Get-ChildItem -Path $spool -Include '*.tmp', 'req_*.json', 'res_*.json', 'chunk_*.bin', 'pull_*.bin' -File -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+}}
+Write-Output 'APPLIANCE_CLEAN_OK'
+"""
+        app_res = self.control.exec_powershell(appliance_clean_ps, timeout_sec=15.0)
+
+        duration_ms = int((time.monotonic() - started) * 1000)
+        self.recorder.record(
+            tx_id=tx_id,
+            actor=actor,
+            operation="clean",
+            node="@all",
+            summary="Purge transient spool and staging files across Appliance and Bastion",
+            exit_code=0 if (bastion_res.exit_code == 0 and app_res.exit_code == 0) else 1,
+            duration_ms=duration_ms,
+        )
+        return {
+            "tx_id": tx_id,
+            "appliance_cleaned": app_res.exit_code == 0,
+            "bastion_cleaned": bastion_res.exit_code == 0,
+            "duration_ms": duration_ms,
+        }
+
     def query_database(
         self,
         node: str,

@@ -57,6 +57,15 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "enclave_clean",
+        "description": "Purge transient spool chunks, staging files, and open multiplexed sockets across Appliance and Bastion.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "node_exec",
         "description": "Execute a shell/PowerShell script on '@appliance', '@bastion', or a configured TargetNode with Base64 transport and secret scrubbing.",
         "inputSchema": {
@@ -248,6 +257,10 @@ class McpJsonRpcServer:
                 actor="mcp",
             )
             return self._exec_to_tool_result(req_id, res)
+
+        if tool_name == "enclave_clean":
+            clean_data = self.engine.clean_session(actor="mcp")
+            return self._tool_result(req_id, json.dumps(clean_data, indent=2))
 
         if tool_name == "node_exec":
             res = self.engine.exec_node(

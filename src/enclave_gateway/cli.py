@@ -135,6 +135,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Re-inject Bastion domain credentials into the interactive session.",
     )
 
+    sub.add_parser(
+        "clean",
+        help="Purge transient spool chunks, staging files, and open multiplexed sockets across tiers.",
+    )
+
     p_reset = sub.add_parser(
         "reset", help="Restore the Appliance disk to its golden qcow2 snapshot."
     )
@@ -306,6 +311,11 @@ def main(argv: list[str] | None = None) -> int:
         if res.stderr:
             print(res.stderr, file=sys.stderr)
         return res.exit_code
+
+    if args.command == "clean":
+        summary = engine.clean_session(actor="cli")
+        print(json.dumps(summary, indent=2, ensure_ascii=False))
+        return 0
 
     if args.command == "reset":
         engine.hypervisor.restore_snapshot(args.snapshot)

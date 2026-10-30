@@ -1,9 +1,9 @@
 param(
     [string]$SourceSpool = "\\tsclient\C\EnclaveGateway\spool",
-    [string]$InstallDir = "$env:LOCALAPPDATA\EnclaveGateway"
+    [string]$InstallDir = "$env:LOCALAPPDATA\EnclaveGateway",
+    [switch]$RegisterStartup
 )
 
-Set-ExecutionPolicy Bypass -Scope Process -Force
 if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 }
@@ -14,8 +14,11 @@ if (Test-Path $workerSrc) {
     Copy-Item $workerSrc $workerDst -Force
 }
 
-$runReg = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-$launchCmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$workerDst`" -SpoolDir `"$SourceSpool`""
-Set-ItemProperty -Path $runReg -Name "EnclaveBastionWorker" -Value $launchCmd
+# Only touch HKCU Run registry key if explicitly requested (-RegisterStartup), avoiding unnecessary EDR autorun alerts
+if ($RegisterStartup) {
+    $runReg = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+    $launchCmd = "powershell.exe -NoProfile -File `"$workerDst`" -SpoolDir `"$SourceSpool`""
+    Set-ItemProperty -Path $runReg -Name "EnclaveBastionWorker" -Value $launchCmd
+}
 
 & $workerDst -SpoolDir $SourceSpool

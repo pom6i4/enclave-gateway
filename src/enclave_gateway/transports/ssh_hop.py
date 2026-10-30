@@ -63,7 +63,7 @@ def _wrap_with_askpass_ps(inner_ps: str, ssh_password: str, token_id: str) -> st
     bat_b64 = base64.b64encode(bat_content.encode("utf-8")).decode("ascii")
 
     return f"""
-$askDir = Join-Path $env:TEMP 'enclave_gw_sec'
+$askDir = Join-Path $env:LOCALAPPDATA 'EnclaveGateway\\stage'
 if (-not (Test-Path $askDir)) {{ New-Item -ItemType Directory -Force -Path $askDir | Out-Null }}
 $askCmd = Join-Path $askDir 'ask_{token_id}.cmd'
 try {{
@@ -73,7 +73,10 @@ try {{
     $env:DISPLAY = 'localhost:0.0'
 {inner_ps}
 }} finally {{
-    Remove-Item $askCmd -Force -ErrorAction SilentlyContinue
+    if (Test-Path $askCmd) {{
+        [IO.File]::WriteAllBytes($askCmd, (New-Object byte[] 64))
+        Remove-Item $askCmd -Force -ErrorAction SilentlyContinue
+    }}
     Remove-Item Env:\\SSH_ASKPASS -ErrorAction SilentlyContinue
     Remove-Item Env:\\SSH_ASKPASS_REQUIRE -ErrorAction SilentlyContinue
 }}
@@ -104,7 +107,7 @@ def build_powershell_ssh_hop_script(
         clean_pw = sudo_password.rstrip("\r\n")
         pw_b64 = base64.b64encode((clean_pw + "\n").encode("utf-8")).decode("ascii")
         core_ps = f"""
-$secDir = Join-Path $env:TEMP 'enclave_gw_sec'
+$secDir = Join-Path $env:LOCALAPPDATA 'EnclaveGateway\\stage'
 if (-not (Test-Path $secDir)) {{ New-Item -ItemType Directory -Force -Path $secDir | Out-Null }}
 $secFile = Join-Path $secDir 's_{token_id}.bin'
 try {{
@@ -112,7 +115,10 @@ try {{
     cmd.exe /c "type `"$secFile`" | ssh.exe -T {opts_str} {target_uri} `{remote_cmd}`"
     exit $LASTEXITCODE
 }} finally {{
-    Remove-Item $secFile -Force -ErrorAction SilentlyContinue
+    if (Test-Path $secFile) {{
+        [IO.File]::WriteAllBytes($secFile, (New-Object byte[] 64))
+        Remove-Item $secFile -Force -ErrorAction SilentlyContinue
+    }}
 }}
 """
         return _wrap_with_askpass_ps(core_ps, ssh_password, token_id)
@@ -169,7 +175,7 @@ class SshHopExecutor:
     ) -> str:
         """Two-hop verified file delivery: Host -> Hop staging -> SCP -> TargetNode (with optional sudo mv)."""
         stage_id = secrets.token_hex(6)
-        hop_stage = f"C:\\Windows\\Temp\\egw_stage_{stage_id}_{local_path.name}"
+        hop_stage = f"%LOCALAPPDATA%\\EnclaveGateway\\stage\\egw_stage_{stage_id}_{local_path.name}"
         expected_sha = self._push_hop(local_path, hop_stage, timeout_sec)
 
         scp_opts = _build_ssh_common_opts(
@@ -182,7 +188,7 @@ class SshHopExecutor:
         )
 
         scp_core_ps = f"""
-$stage = '{hop_stage}'
+$stage = [Environment]::ExpandEnvironmentVariables('{hop_stage}')
 try {{
     scp.exe {scp_opts} $stage '{node.user}@{node.host}:{remote_tmp}'
     if ($LASTEXITCODE -ne 0) {{ Write-Error 'SCP transfer to target node failed'; exit 1 }}
@@ -237,7 +243,7 @@ echo "VERIFIED:$sha"
     ) -> str:
         """Two-hop verified file retrieval: TargetNode -> SCP -> Hop staging -> Host (with optional sudo staging)."""
         stage_id = secrets.token_hex(6)
-        hop_stage = f"C:\\Windows\\Temp\\egw_pull_{stage_id}_{local_path.name}"
+        hop_stage = f"%LOCALAPPDATA%\\EnclaveGateway\\stage\\egw_pull_{stage_id}_{local_path.name}"
         remote_src = f"/tmp/.egw_pull_{stage_id}" if as_root else remote_path
 
         if as_root:
@@ -264,7 +270,10 @@ chmod 600 '{remote_src}'
             node, port_flag="-P", has_ssh_password=bool(ssh_password)
         )
         scp_core_ps = f"""
-scp.exe {scp_opts} '{node.user}@{node.host}:{remote_src}' '{hop_stage}'
+$stage = [Environment]::ExpandEnvironmentVariables('{hop_stage}')
+$stageParent = Split-Path -Parent $stage
+if ($stageParent -and -not (Test-Path $stageParent)) {{ New-Item -ItemType Directory -Force -Path $stageParent | Out-Null }}
+scp.exe {scp_opts} '{node.user}@{node.host}:{remote_src}' $stage
 if ($LASTEXITCODE -ne 0) {{ Write-Error 'SCP pull from target node failed'; exit 1 }}
 """
         scp_ps = _wrap_with_askpass_ps(scp_core_ps, ssh_password, stage_id)
@@ -277,7 +286,8 @@ if ($LASTEXITCODE -ne 0) {{ Write-Error 'SCP pull from target node failed'; exit
             return self._pull_hop(hop_stage, local_path, timeout_sec)
         finally:
             self._exec_hop(
-                f"Remove-Item '{hop_stage}' -Force -ErrorAction SilentlyContinue", 30.0
+                f"Remove-Item ([Environment]::ExpandEnvironmentVariables('{hop_stage}')) -Force -ErrorAction SilentlyContinue",
+                30.0,
             )
             if as_root:
                 self.exec_node(
