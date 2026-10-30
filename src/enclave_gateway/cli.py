@@ -6,12 +6,16 @@ import argparse
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 from enclave_gateway import __version__
 from enclave_gateway.config import EnclaveConfig
 from enclave_gateway.engine import EnclaveEngine
 from enclave_gateway.mcp_server.server import McpJsonRpcServer
+from enclave_gateway.provision.builder import ApplianceProvisioner, ProvisionOptions
 from enclave_gateway.transports.rdp_vfs import RdpVfsTunnelServer
+from enclave_gateway.transports.socks5_mux import Socks5VfsServer
+from enclave_gateway.tui.dashboard import run_interactive_top
 
 
 def _parse_copy_spec(spec: str) -> tuple[str | None, str]:
@@ -39,9 +43,72 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command", required=True)
 
+    p_init = sub.add_parser(
+        "init",
+        help="Generate Autounattend.xml, provisioning scripts, and optional qcow2 disk for the Appliance VM.",
+    )
+    p_init.add_argument(
+        "--output-dir",
+        default="./build/provision",
+        help="Directory where Autounattend.xml and seed scripts will be written.",
+    )
+    p_init.add_argument(
+        "--arch",
+        choices=["auto", "arm64", "x86_64"],
+        default="auto",
+        help="Target guest architecture.",
+    )
+    p_init.add_argument(
+        "--disk-size-gb",
+        type=int,
+        default=64,
+        help="Size of the qcow2 disk in GiB when --create-disk is used.",
+    )
+    p_init.add_argument(
+        "--win-iso",
+        default="",
+        help="Optional path to Windows 11 installation ISO.",
+    )
+    p_init.add_argument(
+        "--virtio-iso",
+        default="",
+        help="Optional path to virtio-win drivers ISO.",
+    )
+    p_init.add_argument(
+        "--create-disk",
+        action="store_true",
+        help="Create disk.qcow2 (and efi_vars.fd on ARM64) if not already present.",
+    )
+    p_init.add_argument(
+        "--force-disk",
+        action="store_true",
+        help="Overwrite existing disk.qcow2 when used with --create-disk.",
+    )
+    p_init.add_argument(
+        "--launch-installer",
+        action="store_true",
+        help="Immediately launch QEMU with the unattended seed and ISO drives attached.",
+    )
+
     sub.add_parser("up", help="Start the Appliance VM and verify tunnel readiness.")
     sub.add_parser("down", help="Gracefully stop the Appliance VM via ACPI powerdown.")
     sub.add_parser("status", help="Display health telemetry across Appliance, VPN, Bastion, and Targets.")
+
+    p_top = sub.add_parser(
+        "top",
+        help="Interactive TUI dashboard monitoring Host -> Appliance -> Bastion -> TargetNodes.",
+    )
+    p_top.add_argument(
+        "--once",
+        action="store_true",
+        help="Render a single TUI snapshot to stdout and exit.",
+    )
+    p_top.add_argument(
+        "--interval",
+        type=float,
+        default=2.0,
+        help="Refresh interval in seconds (default: 2.0).",
+    )
 
     p_heal = sub.add_parser(
         "heal",
@@ -99,6 +166,27 @@ def build_parser() -> argparse.ArgumentParser:
         "spec",
         help="Tunnel specification in format <local_port>:<target_host_or_node>:<target_port>.",
     )
+    p_tun.add_argument(
+        "--single-exchange",
+        action="store_true",
+        help="Use stateless single request/response exchange instead of stateful TCP multiplexing.",
+    )
+
+    p_socks = sub.add_parser(
+        "socks5",
+        help="Start a bidirectional RFC 1928 SOCKS5 multiplexer over RdpVfsTransport.",
+    )
+    p_socks.add_argument(
+        "--bind",
+        default="127.0.0.1",
+        help="Local address to bind the SOCKS5 server (default: 127.0.0.1).",
+    )
+    p_socks.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Local TCP port for SOCKS5 proxy (defaults to appliance.socks5_port).",
+    )
 
     p_sec = sub.add_parser(
         "secret", help="Store or inspect credentials in the native OS Keychain."
@@ -134,6 +222,30 @@ def main(argv: list[str] | None = None) -> int:
         server.serve_stdio()
         return 0
 
+    if args.command == "init":
+        admin_pw = (
+            engine.vault.get("ENCLAVE_APPLIANCE_PASSWORD") or "Enclave#Appliance2026"
+        )
+        opts = ProvisionOptions(
+            arch=args.arch,
+            admin_password=admin_pw,
+            computer_name=cfg.appliance.name[:15],
+            disk_size_gb=args.disk_size_gb,
+            win_iso_path=args.win_iso,
+            virtio_iso_path=args.virtio_iso,
+        )
+        provisioner = ApplianceProvisioner(cfg)
+        manifest = provisioner.prepare_bundle(
+            Path(args.output_dir),
+            opts,
+            create_disk=args.create_disk,
+            force_disk=args.force_disk,
+        )
+        print(json.dumps(manifest, indent=2, ensure_ascii=False))
+        if args.launch_installer:
+            subprocess.run(manifest["qemu_install_command"], check=True)
+        return 0
+
     if args.command == "up":
         pid = engine.hypervisor.start()
         print(f"Appliance '{cfg.appliance.name}' is running (PID {pid}).")
@@ -148,6 +260,11 @@ def main(argv: list[str] | None = None) -> int:
         st = engine.status()
         print(json.dumps(st, indent=2, ensure_ascii=False))
         return 0
+
+    if args.command == "top":
+        return run_interactive_top(
+            engine, interval_sec=args.interval, once=args.once
+        )
 
     if args.command == "heal":
         res = engine.heal(update_credentials=args.update_credentials, actor="cli")
@@ -225,16 +342,39 @@ def main(argv: list[str] | None = None) -> int:
             cfg.targets[parts[1]].host if parts[1] in cfg.targets else parts[1]
         )
         target_port = int(parts[2])
+        mode_str = "single-exchange" if args.single_exchange else "multiplexed"
         print(
-            f"Listening on 127.0.0.1:{local_port} -> relaying via RdpVfsTransport to {target_host}:{target_port}..."
+            f"Listening on 127.0.0.1:{local_port} -> relaying ({mode_str}) via RdpVfsTransport to {target_host}:{target_port}..."
         )
         server = RdpVfsTunnelServer(
-            engine.rdp_vfs, local_port, target_host, target_port
+            engine.rdp_vfs,
+            local_port,
+            target_host,
+            target_port,
+            multiplexed=not args.single_exchange,
         )
         try:
             server.serve_forever()
         except KeyboardInterrupt:
             server.stop()
+        return 0
+
+    if args.command == "socks5":
+        port = args.port if args.port is not None else cfg.appliance.socks5_port
+        aliases = {name: spec.host for name, spec in cfg.targets.items()}
+        print(
+            f"SOCKS5 multiplexer listening on {args.bind}:{port} -> routing via RdpVfsTransport..."
+        )
+        socks_srv = Socks5VfsServer(
+            engine.rdp_vfs,
+            bind_host=args.bind,
+            bind_port=port,
+            target_aliases=aliases,
+        )
+        try:
+            socks_srv.serve_forever()
+        except KeyboardInterrupt:
+            socks_srv.stop()
         return 0
 
     if args.command == "secret":

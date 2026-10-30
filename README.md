@@ -13,7 +13,7 @@ Connecting modern developer workstations (**macOS on Apple Silicon `M1–M5`**, 
 ```text
 ┌───────────────────────────────────────────────────────────────────────────────────┐
 │ Host Environment (macOS HVF / Linux KVM / Windows WHPX or Direct)                 │
-│   CLI: egw (up | down | status | heal | reset | exec | cp | tunnel | mcp)         │
+│   CLI: egw (init | up | down | status | top | heal | exec | cp | tunnel | socks5) │
 │   MCP Server: JSON-RPC 2.0 over stdio (enclave_status, node_exec, node_transfer…) │
 │   Security: OS Keychain Vault + Blind Secret Injection + Output Secret Scrubber   │
 └───────────────────┬───────────────────────────────────────────┬───────────────────┘
@@ -57,18 +57,22 @@ Connecting modern developer workstations (**macOS on Apple Silicon `M1–M5`**, 
    * **In-Process `BastionWorker`**: executes payloads inside a warm PowerShell runspace (`& ([scriptblock]::Create(...))`) in `~200–350 ms` without spawning child `powershell.exe` processes (avoiding `AMSI` startup overhead and false-positive behavioral alerts from endpoint security suites).
    * **Concurrency-Safe Envelopes**: pairs `req_<tx_id>.json` and `res_<tx_id>.json` with separated Base64-encoded `stdout` and `stderr` streams.
 
-3. **Accelerated File Delivery (`Block-Level Delta Sync` + Stream Compression)**
+3. **Accelerated File Delivery (`Block-Level Delta Sync` + `Parallel Striped I/O`)**
    * Standard `[MS-RDPEFS]` single-stream file transfers are bottlenecked by RDP flow control (~140 KB/s).
-   * `egw cp` computes a **4 MB block-level `SHA-256` manifest** on both ends, compresses changed blocks with `zlib`, and transmits **only modified blocks** across the RDP channel, verifying full-file `SHA-256` integrity before atomic rename.
+   * `egw cp` computes a **4 MB block-level `SHA-256` manifest** on both ends, compresses changed blocks with `zlib`, and reads/writes stripes in parallel via a warm PowerShell `RunspacePool` on `BastionWorker` (`Parallel Striped I/O`), verifying full-file `SHA-256` integrity before atomic rename.
 
-4. **TCP-over-RDP-VFS Tunneling (`egw tunnel`)**
-   * Exposes internal enclave web interfaces, APIs, and databases directly on the Host (`127.0.0.1:<port>`) even when only `TCP 3389` is reachable on the Bastion.
+4. **Bidirectional `SOCKS5` & `TCP-over-RDP-VFS` Multiplexer (`egw socks5` / `egw tunnel`)**
+   * Exposes internal enclave web interfaces, APIs, and databases directly on the Host (`127.0.0.1:<port>`) or through a standards-compliant **RFC 1928 `SOCKS5` proxy** (`egw socks5`) with automatic `TargetNode` alias resolution even when only `TCP 3389` is reachable on the Bastion.
 
-5. **Zero-Escaping Multi-Hop SSH & Ephemeral `sudo` Injection**
+5. **Automated Unattended Appliance Provisioning (`egw init`) & Interactive TUI (`egw top`)**
+   * `egw init` generates architecture-aware (`arm64` / `x86_64`) `Autounattend.xml` and post-install provisioning media with `VirtIO` drivers, `QEMU Guest Agent`, `MTU=1350`, and silent `ViPNet Client` installation.
+   * `egw top` renders a live terminal dashboard tracking `Host -> Appliance -> VPN -> Bastion -> TargetNodes` and recent `FlightRecorder` operations.
+
+6. **Zero-Escaping Multi-Hop SSH & Ephemeral `sudo` Injection**
    * Payloads destined for upstream Linux `TargetNodes` are Base64-encoded end-to-end and stripped of `CR` (`\r`) characters (`tr -d '\r'`), eliminating multi-shell quote escaping bugs and Windows PowerShell `CRLF` pipeline corruption.
    * Elevated `--sudo` operations inject credentials from the OS Keychain via ephemeral files deleted in a `finally` block—passwords never appear in command-line arguments or process tables.
 
-6. **Built-In Model Context Protocol (MCP) Server (`egw mcp`)**
+7. **Built-In Model Context Protocol (MCP) Server (`egw mcp`)**
    * Standards-compliant JSON-RPC 2.0 MCP server over `stdio` with zero external runtime dependencies.
    * Includes **Output Secret Scrubbing** (`[REDACTED]`) and **Destructive Command Guardrails** (`DROP`, `TRUNCATE`, `rm -rf /`, `shutdown` require explicit `confirm_destructive=True`).
 
@@ -113,9 +117,15 @@ egw secret set ENCLAVE_APP01_SUDO_PASSWORD "your-sudo-password"
 ### 3. CLI Usage
 
 ```bash
+# Generate unattended Windows 11 Appliance provisioning bundle (Autounattend.xml + VirtIO + QGA)
+egw init --output-dir ./build/provision --create-disk
+
 # Start Appliance VM and verify tunnel status
 egw up
 egw status
+
+# Launch live interactive TUI topology monitor (or --once for snapshot)
+egw top
 
 # Self-heal MTU=1350, UDP policy, interactive credentials, and Bastion RDP session
 egw heal --update-credentials
@@ -126,12 +136,15 @@ egw exec @bastion   "Get-NetTCPConnection -State Established"
 egw exec app01      "docker ps --format 'table {{.Names}}\t{{.Status}}'"
 egw exec app01 --sudo "systemctl status docker"
 
-# Transfer files with 4 MB block-level SHA-256 delta sync and end-to-end verification
+# Transfer files with 4 MB block-level SHA-256 delta sync, Parallel Striped I/O, and verification
 egw cp ./release.tar.gz app01:/tmp/release.tar.gz
 egw cp app01:/var/log/syslog ./syslog.txt
 
-# Tunnel local port 8443 to internal service 10.0.20.12:443 over RdpVfsTransport
+# Tunnel local port 8443 to internal service 10.0.20.12:443 over multiplexed RdpVfsTransport
 egw tunnel 8443:auth01:443
+
+# Start bidirectional RFC 1928 SOCKS5 multiplexer on 127.0.0.1:1080 over RdpVfsTransport
+egw socks5 --port 1080
 
 # Export Markdown audit report of session operations
 egw report

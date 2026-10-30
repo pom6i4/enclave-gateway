@@ -1,6 +1,7 @@
 param(
     [string]$SpoolDir = "\\tsclient\C\EnclaveGateway\spool",
-    [int]$PollIntervalMs = 180
+    [int]$PollIntervalMs = 150,
+    [int]$ParallelStreams = 4
 )
 
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
@@ -8,19 +9,44 @@ $ErrorActionPreference = "Continue"
 $startedAt = Get-Date
 $lastHeartbeat = [DateTime]::MinValue
 
-Write-Host "[BastionWorker] In-process RDP VFS agent started (PID $PID, Spool: $SpoolDir)"
+if (-not $Global:EnclaveMuxSockets) {
+    $Global:EnclaveMuxSockets = [hashtable]::Synchronized(@{})
+}
+
+if (-not $Global:EnclaveRunspacePool -or $Global:EnclaveRunspacePool.RunspacePoolStateInfo.State -ne "Opened") {
+    $maxStreams = [Math]::Max(1, $ParallelStreams)
+    $Global:EnclaveRunspacePool = [runspacefactory]::CreateRunspacePool(1, $maxStreams)
+    $Global:EnclaveRunspacePool.Open()
+}
+
+Write-Host "[BastionWorker] In-process RDP VFS agent started (PID $PID, Spool: $SpoolDir, ParallelStreams: $ParallelStreams)"
 
 while ($true) {
     try {
         if (Test-Path $SpoolDir) {
             $now = Get-Date
             if (($now - $lastHeartbeat).TotalSeconds -ge 2.0) {
+                # Reap idle multiplexed TCP sockets older than 300s of inactivity
+                $staleIds = @()
+                foreach ($k in $Global:EnclaveMuxSockets.Keys) {
+                    $entry = $Global:EnclaveMuxSockets[$k]
+                    if ($entry -and (($now - $entry.LastActive).TotalSeconds -gt 300)) {
+                        $staleIds += $k
+                    }
+                }
+                foreach ($sid in $staleIds) {
+                    try { $Global:EnclaveMuxSockets[$sid].Client.Close() } catch {}
+                    $Global:EnclaveMuxSockets.Remove($sid)
+                }
+
                 $uptimeSec = [int]($now - $startedAt).TotalSeconds
                 $stateObj = @{
                     pid                = $PID
                     user               = "$env:USERDOMAIN\$env:USERNAME"
                     hostname           = $env:COMPUTERNAME
                     uptime_sec         = $uptimeSec
+                    parallel_streams   = $ParallelStreams
+                    active_mux_streams = $Global:EnclaveMuxSockets.Count
                     last_heartbeat_utc = $now.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
                 }
                 $stateJson = ConvertTo-Json $stateObj -Compress
