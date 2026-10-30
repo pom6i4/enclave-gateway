@@ -96,12 +96,22 @@ class TargetNodeSpec:
 
 
 @dataclass(slots=True)
+class PortForwardSpec:
+    name: str
+    local_port: int
+    target_host: str
+    target_port: int
+    bind_host: str = "127.0.0.1"
+
+
+@dataclass(slots=True)
 class EnclaveConfig:
     profile: str = "default"
     appliance: ApplianceSpec = field(default_factory=ApplianceSpec)
     provider: ProviderSpec = field(default_factory=ProviderSpec)
     bastion: BastionSpec = field(default_factory=BastionSpec)
     targets: dict[str, TargetNodeSpec] = field(default_factory=dict)
+    forwards: dict[str, PortForwardSpec] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> EnclaveConfig:
@@ -109,6 +119,7 @@ class EnclaveConfig:
         prov_raw = dict(raw.get("provider") or {})
         bast_raw = dict(raw.get("bastion") or {})
         targets_raw = dict(raw.get("targets") or {})
+        forwards_raw = dict(raw.get("forwards") or {})
 
         targets: dict[str, TargetNodeSpec] = {}
         for t_name, t_cfg in targets_raw.items():
@@ -124,6 +135,28 @@ class EnclaveConfig:
                     ssh_key_path=str(t_cfg.get("ssh_key_path", "")),
                 )
 
+        forwards: dict[str, PortForwardSpec] = {}
+        for f_name, f_cfg in forwards_raw.items():
+            if isinstance(f_cfg, str) and f_cfg.count(":") == 2:
+                lport_s, thost_s, tport_s = f_cfg.split(":")
+                resolved_host = targets[thost_s].host if thost_s in targets else thost_s
+                forwards[f_name] = PortForwardSpec(
+                    name=f_name,
+                    local_port=int(lport_s),
+                    target_host=resolved_host,
+                    target_port=int(tport_s),
+                )
+            elif isinstance(f_cfg, dict):
+                raw_thost = str(f_cfg.get("target_host") or f_cfg.get("host", "10.0.20.11"))
+                resolved_host = targets[raw_thost].host if raw_thost in targets else raw_thost
+                forwards[f_name] = PortForwardSpec(
+                    name=f_name,
+                    local_port=int(f_cfg.get("local_port", 8080)),
+                    target_host=resolved_host,
+                    target_port=int(f_cfg.get("target_port") or f_cfg.get("port", 80)),
+                    bind_host=str(f_cfg.get("bind_host", "127.0.0.1")),
+                )
+
         return cls(
             profile=str(raw.get("profile", "default")),
             appliance=ApplianceSpec(
@@ -136,6 +169,7 @@ class EnclaveConfig:
                 **{k: v for k, v in bast_raw.items() if k in BastionSpec.__dataclass_fields__}
             ),
             targets=targets,
+            forwards=forwards,
         )
 
     @classmethod

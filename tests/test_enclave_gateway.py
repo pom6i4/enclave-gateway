@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
 import re
 import socket
@@ -44,7 +45,9 @@ from enclave_gateway.transports.socks5_mux import (
     SOCKS5_CMD_CONNECT,
     SOCKS5_REP_SUCCEEDED,
     SOCKS5_VERSION,
+    MultiPortForwardSupervisor,
     Socks5VfsServer,
+    pump_stdio_mux,
 )
 from enclave_gateway.transports.ssh_hop import (
     build_powershell_ssh_hop_script,
@@ -220,6 +223,14 @@ class LoopbackControlChannel:
                 chunk = src_bytes[idx * block_size : (idx + 1) * block_size]
                 self.files[f"C:\\EnclaveGateway\\spool\\pull_{tx_id}_{idx:05d}.bin"] = chunk
             return f"SHA256:{sha}:CHUNKS:{num_chunks}"
+
+        # 7. SSH hop execution with base64-encoded bash script
+        m_b64_sh = re.search(r"echo '([A-Za-z0-9+/=]+)' \| base64 -d", inner_cmd)
+        if m_b64_sh:
+            decoded_sh = base64.b64decode(m_b64_sh.group(1)).decode("utf-8", errors="replace")
+            m_ver = re.search(r"if \[ \"\$sha\" != '([0-9a-f]{64})' \]", decoded_sh)
+            if m_ver:
+                return f"VERIFIED:{m_ver.group(1)}"
 
         return f"BASTION_EXEC_OK:{inner_cmd}"
 
@@ -611,6 +622,109 @@ targets:
 
             report_md = recorder.export_markdown_report()
             self.assertIn("Enclave Gateway Session Report", report_md)
+
+    def test_stdio_proxy_ssh_config_forwards_watchdog_and_zero_disk_transit(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cfg = EnclaveConfig.from_dict(
+                {
+                    "profile": "dev-enclave",
+                    "appliance": {"hypervisor": "direct"},
+                    "targets": {
+                        "app01": {
+                            "host": "10.0.20.11",
+                            "port": 22,
+                            "user": "deploy",
+                            "via": "bastion",
+                            "ssh_key_path": "~/.ssh/id_ed25519",
+                        }
+                    },
+                    "forwards": {
+                        "pg_app": "0:app01:5432",
+                        "kc_https": {
+                            "local_port": 0,
+                            "target_host": "10.0.20.12",
+                            "target_port": 8443,
+                        },
+                    },
+                }
+            )
+            self.assertEqual(cfg.forwards["pg_app"].target_host, "10.0.20.11")
+            self.assertEqual(cfg.forwards["pg_app"].target_port, 5432)
+            self.assertEqual(cfg.forwards["kc_https"].target_port, 8443)
+
+            control = LoopbackControlChannel()
+            recorder = FlightRecorder(log_path=Path(tmp) / "audit.jsonl")
+            engine = EnclaveEngine(
+                config=cfg, recorder=recorder, control_override=control
+            )
+
+            # 1. Verify OpenSSH ProxyCommand config generator
+            ssh_cfg = engine.generate_ssh_config(prefix="enclave-")
+            self.assertIn("Host enclave-app01", ssh_cfg)
+            self.assertIn("ProxyCommand egw stdio-proxy %h %p", ssh_cfg)
+            self.assertIn("IdentityFile ~/.ssh/id_ed25519", ssh_cfg)
+
+            # 2. Verify pump_stdio_mux over RdpVfsTransport
+            in_buf = io.BytesIO(b"SSH-2.0-OpenSSH_Client\r\n")
+            out_buf = io.BytesIO()
+            rc = pump_stdio_mux(engine.rdp_vfs, "10.0.20.11", 22, in_buf, out_buf)
+            self.assertEqual(rc, 0)
+            self.assertEqual(
+                out_buf.getvalue(),
+                b"MUX_ECHO[10.0.20.11:22]:SSH-2.0-OpenSSH_Client\r\n",
+            )
+
+            # 3. Verify Zero-Disk VFS Transit (\\tsclient\C\EnclaveGateway\spool) + SSH stream fallback
+            local_payload = Path(tmp) / "release.tar.gz"
+            local_payload.write_bytes(b"ZERO_DISK_TRANSIT_PAYLOAD")
+            push_meta = engine.transfer_file(
+                "push",
+                local_payload,
+                "app01",
+                "/opt/app/release.tar.gz",
+                as_root=True,
+            )
+            self.assertEqual(push_meta["sha256"], compute_file_sha256(local_payload))
+            self.assertEqual(len(control.bastion_files), 0)
+            self.assertTrue(
+                any("egw_stage_" in k for k in control.files),
+                "Expected payload to stage directly in Appliance spool without writing to Bastion local disk",
+            )
+
+            # 4. Verify MultiPortForwardSupervisor
+            sup = MultiPortForwardSupervisor(
+                engine.rdp_vfs,
+                cfg.forwards,
+                socks5_port=0,
+                target_aliases={"app01": "10.0.20.11"},
+            )
+            sup.start()
+            try:
+                pg_srv = sup.tunnel_servers["pg_app"]
+                while pg_srv.local_port == 0:
+                    time.sleep(0.01)
+                with socket.create_connection(("127.0.0.1", pg_srv.local_port), timeout=5.0) as cli:
+                    cli.sendall(b"PG_PING")
+                    data = cli.recv(4096)
+                    self.assertEqual(data, b"MUX_ECHO[10.0.20.11:5432]:PG_PING")
+            finally:
+                sup.stop()
+
+            # 5. Verify autonomous self-healing watchdog (bounded run)
+            watch_hist = engine.watch(interval_sec=0.05, max_iterations=1)
+            self.assertEqual(len(watch_hist), 1)
+            self.assertTrue(watch_hist[0]["healthy"])
+
+            # 6. Verify Copy-on-Write (CoW) profile creation
+            provisioner = ApplianceProvisioner(cfg)
+            prof_manifest = provisioner.create_cow_profile(
+                "enclave-b",
+                base_disk=Path(tmp) / "base.qcow2",
+                output_dir=Path(tmp) / "profiles" / "enclave-b",
+                create_disk=False,
+            )
+            self.assertEqual(prof_manifest["profile"], "enclave-b")
+            self.assertTrue(Path(prof_manifest["profile_config"]).is_file())
 
 
 if __name__ == "__main__":

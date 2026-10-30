@@ -61,3 +61,11 @@ targets:
     via: bastion
     password_env: ENCLAVE_AUTH01_SSH_PASSWORD
     sudo_password_env: ENCLAVE_AUTH01_SUDO_PASSWORD
+
+# Declarative multi-port TCP forwards (`egw forward [--with-socks5]`)
+forwards:
+  postgres_app: "15432:app01:5432"
+  keycloak_https:
+    local_port: 18443
+    target_host: auth01
+    target_port: 8443

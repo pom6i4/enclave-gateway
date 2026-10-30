@@ -36,16 +36,18 @@ Connecting modern developer workstations (**macOS on Apple Silicon `M1–M5`**, 
    * Standard `[MS-RDPEFS]` single-stream file transfers are bottlenecked by RDP flow control (~140 KB/s).
    * `egw cp` computes a **4 MB block-level `SHA-256` manifest** on both ends, compresses changed blocks with `zlib`, and reads/writes stripes in parallel via a warm PowerShell `RunspacePool` on `BastionWorker` (`Parallel Striped I/O`), verifying full-file `SHA-256` integrity before atomic rename.
 
-4. **Bidirectional `SOCKS5` & `TCP-over-RDP-VFS` Multiplexer (`egw socks5` / `egw tunnel`)**
-   * Exposes internal enclave web interfaces, APIs, and databases directly on the Host (`127.0.0.1:<port>`) or through a standards-compliant **RFC 1928 `SOCKS5` proxy** (`egw socks5`) with automatic `TargetNode` alias resolution even when only `TCP 3389` is reachable on the Bastion.
+4. **Bidirectional `SOCKS5`, `OpenSSH ProxyCommand`, & Multi-Port Multiplexer (`egw socks5` / `egw forward` / `egw stdio-proxy`)**
+   * Exposes internal enclave web interfaces, APIs, and databases directly on the Host (`egw forward [--with-socks5]`, `egw tunnel`) or through a standards-compliant **RFC 1928 `SOCKS5` proxy** (`egw socks5`) with automatic `TargetNode` alias resolution even when only `TCP 3389` is reachable on the Bastion.
+   * Native **`OpenSSH ProxyCommand`** bridge (`egw stdio-proxy <host> <port>` + `egw ssh-config`) lets `ssh`, `scp`, `sftp`, `rsync`, `ansible`, and VS Code / Cursor Remote-SSH connect directly to `TargetNodes` over the RDP VFS channel.
 
-5. **Automated Unattended Appliance Provisioning (`egw init`) & Interactive TUI (`egw top`)**
-   * `egw init` generates architecture-aware (`arm64` / `x86_64`) `Autounattend.xml` and post-install provisioning media with `VirtIO` drivers, `QEMU Guest Agent`, `MTU=1350`, and silent `ViPNet Client` installation.
-   * `egw top` renders a live terminal dashboard tracking `Host -> Appliance -> VPN -> Bastion -> TargetNodes` and recent `FlightRecorder` operations.
+5. **Automated Unattended Provisioning (`egw init`), CoW Profiles (`egw profile`), Watchdog (`egw watch`), & Interactive TUI (`egw top`)**
+   * `egw init` generates architecture-aware (`arm64` / `x86_64`) `Autounattend.xml` and post-install provisioning media with `VirtIO` drivers, `QEMU Guest Agent`, `MTU=1350`, and silent `ViPNet Client` installation; `egw profile create <name>` provisions lightweight Copy-on-Write (`qcow2 -b`) overlays.
+   * `egw top` renders a live terminal dashboard tracking `Host -> Appliance -> VPN -> Bastion -> TargetNodes`, while `egw watch` runs an autonomous self-healing loop (`doctor --fix`).
 
-6. **Zero-Escaping Multi-Hop SSH & Ephemeral `sudo` Injection**
+6. **Zero-Disk VFS Transit, Pure-SSH Stream Fallback, & Ephemeral `sudo` Injection**
    * Payloads destined for upstream Linux `TargetNodes` are Base64-encoded end-to-end and stripped of `CR` (`\r`) characters (`tr -d '\r'`), eliminating multi-shell quote escaping bugs and Windows PowerShell `CRLF` pipeline corruption.
-   * Elevated `--sudo` operations inject credentials from the OS Keychain via ephemeral files deleted in a `finally` block—passwords never appear in command-line arguments or process tables.
+   * File transfers to `TargetNodes` (`via: bastion`) transit directly through `\\tsclient\C\EnclaveGateway\spool` without writing temporary staging copies onto the Bastion's local `C:` disk, and automatically fall back to pure `ssh.exe` streaming (`cat > ...`) if `scp` / `sftp-server` is disabled on a hardened target.
+   * Elevated `--sudo` operations inject credentials from the OS Keychain via zero-filled ephemeral files deleted in a `finally` block—passwords never appear in command-line arguments or process tables.
 
 7. **Built-In Model Context Protocol (MCP) Server (`egw mcp`)**
    * Standards-compliant JSON-RPC 2.0 MCP server over `stdio` with zero external runtime dependencies.
@@ -125,8 +127,15 @@ egw cp app01:/var/log/syslog ./syslog.txt
 # Tunnel local port 8443 to internal service 10.0.20.12:443 over multiplexed RdpVfsTransport
 egw tunnel 8443:auth01:443
 
-# Start bidirectional RFC 1928 SOCKS5 multiplexer on 127.0.0.1:1080 over RdpVfsTransport
-egw socks5 --port 1080
+# Concurrently start all declarative port forwards from enclave.yaml + SOCKS5 multiplexer
+egw forward --with-socks5
+
+# Generate ~/.ssh/config entries using `egw stdio-proxy %h %p` for native ssh/rsync/IDE Remote-SSH
+egw ssh-config >> ~/.ssh/config
+
+# Run autonomous self-healing watchdog (or purge session artifacts with `egw clean`)
+egw watch --interval 15
+egw clean
 
 # Export Markdown audit report of session operations
 egw report

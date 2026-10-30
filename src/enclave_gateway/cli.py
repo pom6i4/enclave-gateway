@@ -14,7 +14,11 @@ from enclave_gateway.engine import EnclaveEngine
 from enclave_gateway.mcp_server.server import McpJsonRpcServer
 from enclave_gateway.provision.builder import ApplianceProvisioner, ProvisionOptions
 from enclave_gateway.transports.rdp_vfs import RdpVfsTunnelServer
-from enclave_gateway.transports.socks5_mux import Socks5VfsServer
+from enclave_gateway.transports.socks5_mux import (
+    MultiPortForwardSupervisor,
+    Socks5VfsServer,
+    pump_stdio_mux,
+)
 from enclave_gateway.tui.dashboard import run_interactive_top
 
 
@@ -217,6 +221,87 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Local TCP port for SOCKS5 proxy (defaults to appliance.socks5_port).",
+    )
+
+    p_fwd = sub.add_parser(
+        "forward",
+        help="Concurrently run all declarative port forwards from enclave.yaml (and optional SOCKS5 proxy).",
+    )
+    p_fwd.add_argument(
+        "--with-socks5",
+        action="store_true",
+        help="Also start the SOCKS5 multiplexer in the same supervisor process.",
+    )
+    p_fwd.add_argument(
+        "--socks5-port",
+        type=int,
+        default=None,
+        help="Override local TCP port for SOCKS5 when --with-socks5 is used.",
+    )
+
+    p_stdio = sub.add_parser(
+        "stdio-proxy",
+        help="OpenSSH ProxyCommand stdio bridge over RdpVfsTransport (`egw stdio-proxy <host> <port>`).",
+    )
+    p_stdio.add_argument("host", help="Target host IP, FQDN, or TargetNode alias.")
+    p_stdio.add_argument("port", type=int, help="Target TCP port.")
+
+    p_sshcfg = sub.add_parser(
+        "ssh-config",
+        help="Generate an OpenSSH ~/.ssh/config block using `egw stdio-proxy %h %p`.",
+    )
+    p_sshcfg.add_argument(
+        "--prefix",
+        default="enclave-",
+        help="Host alias prefix for generated SSH config entries (default: enclave-).",
+    )
+
+    p_watch = sub.add_parser(
+        "watch",
+        help="Autonomous self-healing watchdog that monitors health and heals drift automatically.",
+    )
+    p_watch.add_argument(
+        "--interval",
+        type=float,
+        default=15.0,
+        help="Seconds between health checks (default: 15.0).",
+    )
+    p_watch.add_argument(
+        "--max-iterations",
+        type=int,
+        default=None,
+        help="Optional maximum number of check cycles before exiting.",
+    )
+    p_watch.add_argument(
+        "--probe-targets",
+        action="store_true",
+        help="Also probe TargetNodes over SSH during each watchdog cycle.",
+    )
+
+    p_prof = sub.add_parser(
+        "profile",
+        help="Create Copy-on-Write (CoW) qcow2 overlay profiles for multi-enclave isolation.",
+    )
+    p_prof_sub = p_prof.add_subparsers(dest="profile_action", required=True)
+    p_prof_create = p_prof_sub.add_parser(
+        "create",
+        help="Create a new Copy-on-Write qcow2 overlay profile backed by the base Appliance image.",
+    )
+    p_prof_create.add_argument("name", help="Profile name (e.g. prod-enclave).")
+    p_prof_create.add_argument(
+        "--base-disk",
+        default=None,
+        help="Optional path to the read-only backing qcow2 image.",
+    )
+    p_prof_create.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional directory for the overlay disk and profile YAML.",
+    )
+    p_prof_create.add_argument(
+        "--create-disk",
+        action="store_true",
+        help="Invoke qemu-img to create the qcow2 CoW overlay disk immediately.",
     )
 
     p_sec = sub.add_parser(
@@ -429,6 +514,86 @@ def main(argv: list[str] | None = None) -> int:
         except KeyboardInterrupt:
             socks_srv.stop()
         return 0
+
+    if args.command == "forward":
+        if not cfg.forwards and not args.with_socks5:
+            print(
+                "Error: no 'forwards:' configured in enclave.yaml (and --with-socks5 not specified).",
+                file=sys.stderr,
+            )
+            return 1
+        socks_port: int | None = None
+        if args.with_socks5:
+            socks_port = (
+                args.socks5_port
+                if args.socks5_port is not None
+                else cfg.appliance.socks5_port
+            )
+        aliases = {name: spec.host for name, spec in cfg.targets.items()}
+        for f_name, f_spec in cfg.forwards.items():
+            print(
+                f"Forward [{f_name}] listening on {f_spec.bind_host}:{f_spec.local_port} -> {f_spec.target_host}:{f_spec.target_port}"
+            )
+        if socks_port is not None:
+            print(
+                f"SOCKS5 multiplexer listening on 127.0.0.1:{socks_port} -> routing via RdpVfsTransport"
+            )
+        sup = MultiPortForwardSupervisor(
+            engine.rdp_vfs,
+            cfg.forwards,
+            socks5_port=socks_port,
+            target_aliases=aliases,
+        )
+        try:
+            sup.serve_forever()
+        except KeyboardInterrupt:
+            sup.stop()
+        return 0
+
+    if args.command == "stdio-proxy":
+        resolved_host = (
+            cfg.targets[args.host].host if args.host in cfg.targets else args.host
+        )
+        return pump_stdio_mux(
+            engine.rdp_vfs,
+            resolved_host,
+            args.port,
+            sys.stdin.buffer,
+            sys.stdout.buffer,
+        )
+
+    if args.command == "ssh-config":
+        sys.stdout.write(
+            engine.generate_ssh_config(config_path=args.config, prefix=args.prefix)
+        )
+        return 0
+
+    if args.command == "watch":
+        try:
+            history = engine.watch(
+                interval_sec=args.interval,
+                max_iterations=args.max_iterations,
+                probe_targets=args.probe_targets,
+            )
+            if args.max_iterations is not None:
+                print(json.dumps(history, indent=2, ensure_ascii=False))
+        except KeyboardInterrupt:
+            pass
+        return 0
+
+    if args.command == "profile":
+        if args.profile_action == "create":
+            provisioner = ApplianceProvisioner(cfg)
+            base_disk = Path(args.base_disk) if args.base_disk else None
+            out_dir = Path(args.output_dir) if args.output_dir else None
+            manifest = provisioner.create_cow_profile(
+                args.name,
+                base_disk=base_disk,
+                output_dir=out_dir,
+                create_disk=args.create_disk,
+            )
+            print(json.dumps(manifest, indent=2, ensure_ascii=False))
+            return 0
 
     if args.command == "secret":
         if args.action == "set":

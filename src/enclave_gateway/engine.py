@@ -51,16 +51,43 @@ class EnclaveEngine:
         self.rdp_vfs = RdpVfsTransport(self.control, self.config.bastion)
         self.bastion_ssh = SshHopExecutor(
             exec_hop_fn=self.rdp_vfs.exec_bastion,
-            push_hop_fn=lambda src, dst, timeout: self.rdp_vfs.push_file(
-                src, dst, use_delta=True, timeout_sec=timeout
-            ),
-            pull_hop_fn=self.rdp_vfs.pull_file,
+            push_hop_fn=self._push_bastion_vfs_stage,
+            pull_hop_fn=self._pull_bastion_vfs_stage,
+            stage_dir=self.config.bastion.bastion_spool_dir,
         )
         self.appliance_ssh = SshHopExecutor(
             exec_hop_fn=self.control.exec_powershell,
             push_hop_fn=self._push_to_appliance_with_sha,
             pull_hop_fn=self._pull_from_appliance_with_sha,
         )
+
+    def _push_bastion_vfs_stage(
+        self, local_path: Path, hop_stage: str, timeout: float
+    ) -> str:
+        vfs_root = self.config.bastion.bastion_spool_dir.rstrip("\\/")
+        if hop_stage.startswith(vfs_root):
+            filename = hop_stage.replace("/", "\\").rsplit("\\", 1)[-1]
+            app_spool_file = (
+                f"{self.config.bastion.appliance_spool_dir.rstrip('\\/')}\\{filename}"
+            )
+            return self._push_to_appliance_with_sha(local_path, app_spool_file, timeout)
+        return self.rdp_vfs.push_file(
+            local_path, hop_stage, use_delta=True, timeout_sec=timeout
+        )
+
+    def _pull_bastion_vfs_stage(
+        self, hop_stage: str, local_path: Path, timeout: float
+    ) -> str:
+        vfs_root = self.config.bastion.bastion_spool_dir.rstrip("\\/")
+        if hop_stage.startswith(vfs_root):
+            filename = hop_stage.replace("/", "\\").rsplit("\\", 1)[-1]
+            app_spool_file = (
+                f"{self.config.bastion.appliance_spool_dir.rstrip('\\/')}\\{filename}"
+            )
+            return self._pull_from_appliance_with_sha(
+                app_spool_file, local_path, timeout
+            )
+        return self.rdp_vfs.pull_file(hop_stage, local_path, timeout_sec=timeout)
 
     def _push_to_appliance_with_sha(
         self, local_path: Path, guest_path: str, _timeout: float
@@ -517,7 +544,7 @@ Write-Output 'BASTION_CLEAN_OK'
         appliance_clean_ps = f"""
 $spool = '{spool}'
 if (Test-Path $spool) {{
-    Get-ChildItem -Path $spool -Include '*.tmp', 'req_*.json', 'res_*.json', 'chunk_*.bin', 'pull_*.bin' -File -ErrorAction SilentlyContinue |
+    Get-ChildItem -Path $spool -Include '*.tmp', 'req_*.json', 'res_*.json', 'chunk_*.bin', 'pull_*.bin', 'egw_stage_*', 'egw_pull_*' -File -ErrorAction SilentlyContinue |
         Remove-Item -Force -ErrorAction SilentlyContinue
 }}
 Write-Output 'APPLIANCE_CLEAN_OK'
@@ -540,6 +567,56 @@ Write-Output 'APPLIANCE_CLEAN_OK'
             "bastion_cleaned": bastion_res.exit_code == 0,
             "duration_ms": duration_ms,
         }
+
+    def generate_ssh_config(
+        self,
+        *,
+        config_path: str | None = None,
+        prefix: str = "enclave-",
+    ) -> str:
+        """Generate an OpenSSH ~/.ssh/config block using `egw stdio-proxy %h %p`."""
+        cfg_flag = f" -c {shlex.quote(config_path)}" if config_path else ""
+        lines = [
+            f"# Enclave Gateway OpenSSH ProxyCommand Configuration (profile: {self.config.profile})"
+        ]
+        for name, spec in sorted(self.config.targets.items()):
+            host_alias = f"{prefix}{name}" if prefix else name
+            lines.extend(
+                [
+                    f"Host {host_alias}",
+                    f"    HostName {spec.host}",
+                    f"    Port {spec.port}",
+                    f"    User {spec.user}",
+                    f"    ProxyCommand egw{cfg_flag} stdio-proxy %h %p",
+                    "    StrictHostKeyChecking no",
+                    "    UserKnownHostsFile /dev/null",
+                ]
+            )
+            if spec.ssh_key_path:
+                lines.append(f"    IdentityFile {spec.ssh_key_path}")
+            lines.append("")
+        return "\n".join(lines).rstrip() + "\n"
+
+    def watch(
+        self,
+        *,
+        interval_sec: float = 15.0,
+        max_iterations: int | None = None,
+        probe_targets: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Autonomous self-healing watchdog loop that monitors health and heals drift."""
+        history: list[dict[str, Any]] = []
+        iteration = 0
+        while max_iterations is None or iteration < max_iterations:
+            diag = self.doctor(
+                fix=True, probe_targets=probe_targets, actor="watchdog"
+            )
+            history.append(diag)
+            iteration += 1
+            if max_iterations is not None and iteration >= max_iterations:
+                break
+            time.sleep(max(0.1, interval_sec))
+        return history
 
     def query_database(
         self,

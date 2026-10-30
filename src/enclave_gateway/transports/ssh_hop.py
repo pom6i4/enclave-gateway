@@ -138,10 +138,13 @@ class SshHopExecutor:
         exec_hop_fn: Callable[[str, float], ExecResult],
         push_hop_fn: Callable[[Path, str, float], str],
         pull_hop_fn: Callable[[str, Path, float], str],
+        *,
+        stage_dir: str = r"%LOCALAPPDATA%\EnclaveGateway\stage",
     ) -> None:
         self._exec_hop = exec_hop_fn
         self._push_hop = push_hop_fn
         self._pull_hop = pull_hop_fn
+        self.stage_dir = stage_dir.rstrip("\\/")
 
     def exec_node(
         self,
@@ -173,13 +176,16 @@ class SshHopExecutor:
         sudo_password: str = "",
         timeout_sec: float = 900.0,
     ) -> str:
-        """Two-hop verified file delivery: Host -> Hop staging -> SCP -> TargetNode (with optional sudo mv)."""
+        """Two-hop verified file delivery: Host -> VFS/Hop staging -> SCP (or SSH stream fallback) -> TargetNode."""
         stage_id = secrets.token_hex(6)
-        hop_stage = f"%LOCALAPPDATA%\\EnclaveGateway\\stage\\egw_stage_{stage_id}_{local_path.name}"
+        hop_stage = f"{self.stage_dir}\\egw_stage_{stage_id}_{local_path.name}"
         expected_sha = self._push_hop(local_path, hop_stage, timeout_sec)
 
         scp_opts = _build_ssh_common_opts(
             node, port_flag="-P", has_ssh_password=bool(ssh_password)
+        )
+        ssh_opts = _build_ssh_common_opts(
+            node, port_flag="-p", has_ssh_password=bool(ssh_password)
         )
         remote_tmp = (
             f"/tmp/.egw_stage_{stage_id}"
@@ -191,7 +197,10 @@ class SshHopExecutor:
 $stage = [Environment]::ExpandEnvironmentVariables('{hop_stage}')
 try {{
     scp.exe {scp_opts} $stage '{node.user}@{node.host}:{remote_tmp}'
-    if ($LASTEXITCODE -ne 0) {{ Write-Error 'SCP transfer to target node failed'; exit 1 }}
+    if ($LASTEXITCODE -ne 0) {{
+        cmd.exe /c "type `"$stage`" | ssh.exe -T {ssh_opts} {node.user}@{node.host} `"cat > '{remote_tmp}'`""
+        if ($LASTEXITCODE -ne 0) {{ Write-Error 'SCP and SSH stream transfer to target node failed'; exit 1 }}
+    }}
 }} finally {{
     Remove-Item $stage -Force -ErrorAction SilentlyContinue
 }}
@@ -241,9 +250,9 @@ echo "VERIFIED:$sha"
         sudo_password: str = "",
         timeout_sec: float = 600.0,
     ) -> str:
-        """Two-hop verified file retrieval: TargetNode -> SCP -> Hop staging -> Host (with optional sudo staging)."""
+        """Two-hop verified file retrieval: TargetNode -> SCP (or SSH stream fallback) -> VFS/Hop staging -> Host."""
         stage_id = secrets.token_hex(6)
-        hop_stage = f"%LOCALAPPDATA%\\EnclaveGateway\\stage\\egw_pull_{stage_id}_{local_path.name}"
+        hop_stage = f"{self.stage_dir}\\egw_pull_{stage_id}_{local_path.name}"
         remote_src = f"/tmp/.egw_pull_{stage_id}" if as_root else remote_path
 
         if as_root:
@@ -269,12 +278,19 @@ chmod 600 '{remote_src}'
         scp_opts = _build_ssh_common_opts(
             node, port_flag="-P", has_ssh_password=bool(ssh_password)
         )
+        ssh_opts = _build_ssh_common_opts(
+            node, port_flag="-p", has_ssh_password=bool(ssh_password)
+        )
         scp_core_ps = f"""
 $stage = [Environment]::ExpandEnvironmentVariables('{hop_stage}')
 $stageParent = Split-Path -Parent $stage
 if ($stageParent -and -not (Test-Path $stageParent)) {{ New-Item -ItemType Directory -Force -Path $stageParent | Out-Null }}
 scp.exe {scp_opts} '{node.user}@{node.host}:{remote_src}' $stage
-if ($LASTEXITCODE -ne 0) {{ Write-Error 'SCP pull from target node failed'; exit 1 }}
+if ($LASTEXITCODE -ne 0) {{
+    $b64 = ssh.exe -n -T {ssh_opts} {node.user}@{node.host} "base64 '{remote_src}' | tr -d '\\r\\n'"
+    if ($LASTEXITCODE -ne 0) {{ Write-Error 'SCP and SSH stream pull from target node failed'; exit 1 }}
+    [IO.File]::WriteAllBytes($stage, [Convert]::FromBase64String(($b64 | Out-String).Trim()))
+}}
 """
         scp_ps = _wrap_with_askpass_ps(scp_core_ps, ssh_password, stage_id)
         try:

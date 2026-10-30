@@ -416,3 +416,84 @@ class ApplianceProvisioner:
             fp.seek(64 * 1024 * 1024 - 1)
             fp.write(b"\x00")
         return True
+
+    def create_cow_profile(
+        self,
+        profile_name: str,
+        *,
+        base_disk: Path | None = None,
+        output_dir: Path | None = None,
+        create_disk: bool = False,
+    ) -> dict[str, Any]:
+        """Create a Copy-on-Write (CoW) qcow2 overlay profile and topology configuration."""
+        base_path = (
+            base_disk.expanduser().resolve()
+            if base_disk is not None
+            else self.config.appliance.resolved_disk_path
+        )
+        prof_dir = (
+            output_dir.expanduser().resolve()
+            if output_dir is not None
+            else base_path.parent / "profiles" / profile_name
+        )
+        prof_dir.mkdir(parents=True, exist_ok=True)
+
+        overlay_disk = prof_dir / f"{profile_name}.qcow2"
+        profile_yaml = prof_dir / f"enclave.{profile_name}.yaml"
+
+        qemu_img = shutil.which("qemu-img") or "/opt/homebrew/bin/qemu-img"
+        qemu_img_cmd = [
+            qemu_img,
+            "create",
+            "-f",
+            "qcow2",
+            "-b",
+            str(base_path),
+            "-F",
+            "qcow2",
+            str(overlay_disk),
+        ]
+
+        overlay_created = False
+        if create_disk:
+            self.hypervisor.create_profile_overlay(base_path, overlay_disk)
+            overlay_created = True
+
+        yaml_text = f"""# Enclave Gateway Copy-on-Write Profile ({profile_name})
+profile: {profile_name}
+
+appliance:
+  name: enclave-{profile_name}
+  hypervisor: {self.config.appliance.hypervisor}
+  arch: {self.config.appliance.arch}
+  cpus: {self.config.appliance.cpus}
+  memory_mb: {self.config.appliance.memory_mb}
+  disk_path: {overlay_disk}
+  efi_code_path: {self.config.appliance.efi_code_path}
+  efi_vars_path: {self.config.appliance.efi_vars_path}
+  golden_snapshot: {self.config.appliance.golden_snapshot}
+  mtu: {self.config.appliance.mtu}
+  socks5_port: {self.config.appliance.socks5_port}
+
+provider:
+  type: {self.config.provider.type}
+  adapter_name: {self.config.provider.adapter_name}
+  probe_host: {self.config.provider.probe_host}
+  probe_port: {self.config.provider.probe_port}
+
+bastion:
+  enabled: {str(self.config.bastion.enabled).lower()}
+  host: {self.config.bastion.host}
+  port: {self.config.bastion.port}
+  transport: {self.config.bastion.transport}
+"""
+        profile_yaml.write_text(yaml_text, encoding="utf-8")
+
+        return {
+            "profile": profile_name,
+            "base_disk": str(base_path),
+            "overlay_disk": str(overlay_disk),
+            "profile_config": str(profile_yaml),
+            "overlay_created": overlay_created,
+            "qemu_img_command": qemu_img_cmd,
+        }

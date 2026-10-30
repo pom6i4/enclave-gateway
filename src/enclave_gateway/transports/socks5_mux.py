@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import queue
 import socket
 import struct
 import threading
-from typing import Callable
+import time
+from typing import BinaryIO, Callable
 
-from enclave_gateway.transports.rdp_vfs import RdpVfsTransport, pump_multiplexed_socket
+from enclave_gateway.config import PortForwardSpec
+from enclave_gateway.transports.rdp_vfs import RdpVfsTransport, RdpVfsTunnelServer
 
 SOCKS5_VERSION = 0x05
 SOCKS5_AUTH_NONE = 0x00
@@ -197,3 +200,140 @@ class Socks5VfsServer:
             with self._lock:
                 self._active_connections -= 1
             conn.close()
+
+
+def pump_stdio_mux(
+    transport: RdpVfsTransport,
+    target_host: str,
+    target_port: int,
+    stdin_stream: BinaryIO,
+    stdout_stream: BinaryIO,
+    *,
+    stop_event: threading.Event | None = None,
+) -> int:
+    """Bridge binary stdin/stdout with a persistent multiplexed TCP connection (OpenSSH ProxyCommand)."""
+    conn_id = transport.mux_open(target_host, target_port)
+    in_queue: queue.Queue[bytes | None] = queue.Queue()
+
+    def _stdin_reader() -> None:
+        try:
+            read_fn = getattr(stdin_stream, "read1", None) or stdin_stream.read
+            while True:
+                chunk = read_fn(65536)
+                if not chunk:
+                    in_queue.put(None)
+                    break
+                in_queue.put(chunk)
+        except Exception:
+            in_queue.put(None)
+
+    reader_thread = threading.Thread(target=_stdin_reader, daemon=True)
+    reader_thread.start()
+
+    stdin_eof = False
+    try:
+        while stop_event is None or not stop_event.is_set():
+            tx_chunks: list[bytes] = []
+            if not stdin_eof:
+                try:
+                    item = in_queue.get(timeout=0.02)
+                    if item is None:
+                        stdin_eof = True
+                    else:
+                        tx_chunks.append(item)
+                        while True:
+                            try:
+                                more = in_queue.get_nowait()
+                                if more is None:
+                                    stdin_eof = True
+                                    break
+                                tx_chunks.append(more)
+                            except queue.Empty:
+                                break
+                except queue.Empty:
+                    pass
+
+            tx_payload = b"".join(tx_chunks)
+            rx_bytes, remote_eof = transport.mux_io(
+                conn_id,
+                tx_payload,
+                read_wait_ms=40 if tx_payload else 80,
+            )
+            if rx_bytes:
+                stdout_stream.write(rx_bytes)
+                stdout_stream.flush()
+
+            if remote_eof or (stdin_eof and not rx_bytes):
+                break
+        return 0
+    finally:
+        try:
+            transport.mux_close(conn_id)
+        except Exception:
+            pass
+
+
+class MultiPortForwardSupervisor:
+    """Concurrently runs multiple RdpVfsTunnelServer port forwards and an optional Socks5VfsServer."""
+
+    def __init__(
+        self,
+        transport: RdpVfsTransport,
+        forwards: dict[str, PortForwardSpec],
+        *,
+        socks5_port: int | None = None,
+        socks5_bind: str = "127.0.0.1",
+        target_aliases: dict[str, str] | None = None,
+    ) -> None:
+        self.transport = transport
+        self.forwards = dict(forwards)
+        self.tunnel_servers: dict[str, RdpVfsTunnelServer] = {}
+        for name, spec in self.forwards.items():
+            self.tunnel_servers[name] = RdpVfsTunnelServer(
+                transport,
+                spec.local_port,
+                spec.target_host,
+                spec.target_port,
+                multiplexed=True,
+            )
+        self.socks5_server: Socks5VfsServer | None = None
+        if socks5_port is not None:
+            self.socks5_server = Socks5VfsServer(
+                transport,
+                bind_host=socks5_bind,
+                bind_port=socks5_port,
+                target_aliases=target_aliases,
+            )
+        self._threads: list[threading.Thread] = []
+        self._stop_event = threading.Event()
+
+    def start(self) -> None:
+        for name, srv in self.tunnel_servers.items():
+            t = threading.Thread(
+                target=srv.serve_forever, name=f"egw-fwd-{name}", daemon=True
+            )
+            t.start()
+            self._threads.append(t)
+        if self.socks5_server is not None:
+            t_socks = threading.Thread(
+                target=self.socks5_server.serve_forever,
+                name="egw-socks5",
+                daemon=True,
+            )
+            t_socks.start()
+            self._threads.append(t_socks)
+
+    def serve_forever(self) -> None:
+        self.start()
+        try:
+            while not self._stop_event.is_set():
+                time.sleep(0.25)
+        finally:
+            self.stop()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        for srv in self.tunnel_servers.values():
+            srv.stop()
+        if self.socks5_server is not None:
+            self.socks5_server.stop()
