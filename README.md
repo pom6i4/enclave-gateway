@@ -10,38 +10,13 @@ Connecting modern developer workstations (**macOS on Apple Silicon `M1–M5`**, 
 
 **Enclave Gateway (`egw`)** replaces manual GUI clicking with an automated, cross-platform L3–L7 gateway and RPC pipeline:
 
-```text
-┌───────────────────────────────────────────────────────────────────────────────────┐
-│ Host Environment (macOS HVF / Linux KVM / Windows WHPX or Direct)                 │
-│   CLI: egw (init | up | down | status | top | heal | exec | cp | tunnel | socks5) │
-│   MCP Server: JSON-RPC 2.0 over stdio (enclave_status, node_exec, node_transfer…) │
-│   Security: OS Keychain Vault + Blind Secret Injection + Output Secret Scrubber   │
-└───────────────────┬───────────────────────────────────────────┬───────────────────┘
-                    │ virtio-serial (QEMU Guest Agent / QMP)    │ TCP 127.0.0.1
-                    ▼                                           ▼
-┌───────────────────────────────────────────────────────────────────────────────────┐
-│ Cryptographic Appliance VM (Isolated Guest OS + Golden qcow2 Snapshot)            │
-│   VPN Provider: InfoTeCS ViPNet Client 5 (WINTUN-ARM64.SYS / x64) or Custom VPN   │
-│   Network Tuning: Persistent MTU=1350 (PMTUD blackhole fix) + fClientDisableUDP=1 │
-│   SessionSupervisor: Interactive Session Credential Injector + mstsc Watchdog     │
-└───────────────────────────────────────┬───────────────────────────────────────────┘
-                                        │ RDP (TCP 3389, [MS-RDPEFS] rdpdr channel)
-                                        ▼
-┌───────────────────────────────────────────────────────────────────────────────────┐
-│ Bastion (Locked-Down Terminal Server / Jump Host — Only TCP 3389 Open)            │
-│   RdpVfsTransport Spool: \\tsclient\C\EnclaveGateway\spool                        │
-│   BastionWorker: Resident In-Process PowerShell Runspace Agent (~250ms latency)   │
-│     • Transactional JSON Envelopes: req_<tx_id>.json <-> res_<tx_id>.json         │
-│     • Block-Level SHA-256 Delta Sync + zlib Stream Compression                    │
-│     • TCP-over-RDP-VFS Socket Relay & Multi-Hop OpenSSH Client                    │
-└───────────────────┬───────────────────────────────────────────┬───────────────────┘
-                    │ OpenSSH / SCP (Base64 + CR-stripped)      │ TCP Relay
-                    ▼                                           ▼
-┌───────────────────────────────────────┐   ┌───────────────────────────────────────┐
-│ Upstream TargetNode (app01)           │   │ Upstream TargetNode (auth01)          │
-│ 10.0.20.11 (Linux / Docker / DB)      │   │ 10.0.20.12 (Internal Web / IAM / API) │
-└───────────────────────────────────────┘   └───────────────────────────────────────┘
-```
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/architecture-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/architecture-light.svg">
+    <img alt="Enclave Gateway L3–L7 Multi-Hop Architecture" src="docs/assets/architecture-dark.svg" width="100%">
+  </picture>
+</p>
 
 ---
 
