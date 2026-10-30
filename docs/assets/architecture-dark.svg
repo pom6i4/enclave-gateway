@@ -3,190 +3,187 @@
     <style>
       .font-sans { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
       .font-mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace; }
-      .title-main { font-size: 15px; font-weight: 700; fill: #F8FAFC; letter-spacing: 0.3px; }
-      .badge-top { font-size: 10.5px; font-weight: 600; fill: #38BDF8; }
-      .tier-title { font-size: 13px; font-weight: 700; fill: #F1F5F9; letter-spacing: 0.4px; }
-      .tier-sub { font-size: 11px; font-weight: 600; }
-      .card-title { font-size: 12.5px; font-weight: 700; fill: #F8FAFC; }
-      .card-line { font-size: 11px; fill: #94A3B8; }
-      .card-code { font-size: 10.3px; fill: #CBD5E1; }
-      .pill-text { font-size: 10.8px; font-weight: 600; }
-      .fw-text { font-size: 9.5px; font-weight: 700; fill: #F87171; letter-spacing: 0.6px; }
+      .title-main { font-size: 14.5px; font-weight: 700; fill: #F4F4F5; letter-spacing: 0.6px; }
+      .badge-top { font-size: 10.5px; font-weight: 500; fill: #A1A1AA; }
+      .tier-title { font-size: 12.5px; font-weight: 700; fill: #F4F4F5; letter-spacing: 0.6px; }
+      .tier-sub { font-size: 10.8px; font-weight: 500; fill: #A1A1AA; }
+      .card-title { font-size: 12px; font-weight: 700; fill: #E4E4E7; }
+      .card-line { font-size: 10.8px; fill: #71717A; }
+      .card-code { font-size: 10.3px; fill: #D4D4D8; }
+      .pill-text { font-size: 10.6px; font-weight: 500; fill: #E4E4E7; }
+      .pill-text-pinhole { font-size: 10.6px; font-weight: 600; fill: #FDE68A; }
+      .fw-text { font-size: 9.5px; font-weight: 700; fill: #EF4444; letter-spacing: 0.8px; }
     </style>
 
-    <pattern id="eng-grid-dark" width="24" height="24" patternUnits="userSpaceOnUse">
-      <path d="M 24 0 L 0 0 0 24" fill="none" stroke="#1E293B" stroke-width="0.7" stroke-opacity="0.65"/>
+    <pattern id="eng-grid-dark" width="20" height="20" patternUnits="userSpaceOnUse">
+      <path d="M 20 0 L 0 0 0 20" fill="none" stroke="#18181B" stroke-width="0.8"/>
     </pattern>
 
-    <linearGradient id="bg-grad-dark" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#090D16"/>
-      <stop offset="100%" stop-color="#0F172A"/>
-    </linearGradient>
-
-    <marker id="arrow-cyan" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#38BDF8"/>
+    <marker id="arrow-mono" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#A1A1AA"/>
     </marker>
-    <marker id="arrow-amber" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#F59E0B"/>
-    </marker>
-    <marker id="arrow-emerald" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#10B981"/>
-    </marker>
-    <marker id="arrow-purple" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#A855F7"/>
+    <marker id="arrow-pinhole" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#D97706"/>
     </marker>
   </defs>
 
-  <!-- Background Canvas -->
-  <rect x="2" y="2" width="836" height="786" rx="14" fill="url(#bg-grad-dark)" stroke="#334155" stroke-width="1.5"/>
-  <rect x="2" y="2" width="836" height="786" rx="14" fill="url(#eng-grid-dark)"/>
+  <!-- Outer Schematic Frame -->
+  <rect x="2" y="2" width="836" height="786" rx="6" fill="#0A0A0C" stroke="#27272A" stroke-width="1.5"/>
+  <rect x="2" y="2" width="836" height="786" rx="6" fill="url(#eng-grid-dark)"/>
 
-  <!-- Top Header Bar -->
-  <rect x="2" y="2" width="836" height="48" rx="14" fill="#0F172A" opacity="0.9"/>
-  <line x1="2" y1="50" x2="838" y2="50" stroke="#1E293B" stroke-width="1.5"/>
-  <circle cx="24" cy="26" r="5" fill="#38BDF8"/>
-  <text x="38" y="31" class="font-sans title-main">ENCLAVE GATEWAY (egw) — L3–L7 ARCHITECTURE</text>
-  <rect x="556" y="13" width="260" height="26" rx="6" fill="#0C2D48" stroke="#0284C7" stroke-width="1"/>
-  <text x="686" y="30" text-anchor="middle" class="font-mono badge-top">HVF / KVM / WHPX • [MS-RDPEFS] • MCP</text>
+  <!-- Top Specification Bar -->
+  <rect x="2" y="2" width="836" height="48" rx="6" fill="#111114"/>
+  <line x1="2" y1="50" x2="838" y2="50" stroke="#27272A" stroke-width="1.2"/>
+  <rect x="20" y="21" width="8" height="8" fill="#E4E4E7"/>
+  <text x="38" y="30" class="font-mono title-main">ENCLAVE GATEWAY (egw) // L3–L7 ARCHITECTURE</text>
+  <rect x="556" y="13" width="260" height="24" rx="3" fill="#18181B" stroke="#3F3F46" stroke-width="1"/>
+  <text x="686" y="29" text-anchor="middle" class="font-mono badge-top">HVF / KVM / WHPX • [MS-RDPEFS] • MCP</text>
 
   <!-- ===================================================================== -->
   <!-- TIER 1: HOST ENVIRONMENT                                              -->
   <!-- ===================================================================== -->
-  <rect x="24" y="64" width="792" height="136" rx="10" fill="#0F172A" fill-opacity="0.92" stroke="#0284C7" stroke-width="1.5"/>
-  <rect x="24" y="64" width="792" height="32" rx="10" fill="#082F49" fill-opacity="0.75"/>
-  <text x="42" y="85" class="font-sans tier-title">1. HOST WORKSTATION</text>
-  <text x="798" y="85" text-anchor="end" class="font-mono tier-sub" fill="#38BDF8">macOS arm64 (HVF) • Linux 6.8+ (KVM) • Windows (WHPX)</text>
+  <rect x="24" y="64" width="792" height="136" rx="4" fill="#111114" stroke="#3F3F46" stroke-width="1.2"/>
+  <rect x="24" y="64" width="792" height="30" rx="4" fill="#18181B"/>
+  <line x1="24" y1="94" x2="816" y2="94" stroke="#27272A" stroke-width="1"/>
+  <text x="40" y="84" class="font-mono tier-title">01 / HOST WORKSTATION</text>
+  <text x="800" y="84" text-anchor="end" class="font-mono tier-sub">macOS arm64 (HVF) • Linux 6.8+ (KVM) • Windows (WHPX)</text>
 
   <!-- Card 1.1: CLI -->
-  <rect x="40" y="106" width="242" height="82" rx="7" fill="#1E293B" fill-opacity="0.75" stroke="#334155" stroke-width="1"/>
-  <text x="54" y="126" class="font-sans card-title" fill="#38BDF8">CLI Orchestrator (egw)</text>
-  <text x="54" y="146" class="font-mono card-code">init | up | down | status | top</text>
-  <text x="54" y="164" class="font-mono card-code">exec | cp | tunnel | socks5 | heal</text>
-  <text x="54" y="180" class="font-sans card-line">Unified multi-tier command router</text>
+  <rect x="40" y="106" width="242" height="82" rx="3" fill="#141418" stroke="#27272A" stroke-width="1"/>
+  <text x="54" y="125" class="font-sans card-title">CLI Orchestrator (egw)</text>
+  <text x="54" y="145" class="font-mono card-code">init | up | down | status | top</text>
+  <text x="54" y="163" class="font-mono card-code">exec | cp | tunnel | socks5 | heal</text>
+  <text x="54" y="179" class="font-sans card-line">Unified multi-tier command router</text>
 
   <!-- Card 1.2: MCP Server -->
-  <rect x="299" y="106" width="242" height="82" rx="7" fill="#1E293B" fill-opacity="0.75" stroke="#334155" stroke-width="1"/>
-  <text x="313" y="126" class="font-sans card-title" fill="#38BDF8">MCP Server (JSON-RPC 2.0)</text>
-  <text x="313" y="146" class="font-mono card-code">enclave_status | enclave_heal</text>
-  <text x="313" y="164" class="font-mono card-code">node_exec | node_transfer | db</text>
-  <text x="313" y="180" class="font-sans card-line">Zero-dependency stdio protocol</text>
+  <rect x="299" y="106" width="242" height="82" rx="3" fill="#141418" stroke="#27272A" stroke-width="1"/>
+  <text x="313" y="125" class="font-sans card-title">MCP Server (JSON-RPC 2.0)</text>
+  <text x="313" y="145" class="font-mono card-code">enclave_status | enclave_heal</text>
+  <text x="313" y="163" class="font-mono card-code">node_exec | node_transfer | db</text>
+  <text x="313" y="179" class="font-sans card-line">Zero-dependency stdio protocol</text>
 
   <!-- Card 1.3: Security & Audit -->
-  <rect x="558" y="106" width="242" height="82" rx="7" fill="#1E293B" fill-opacity="0.75" stroke="#334155" stroke-width="1"/>
-  <text x="572" y="126" class="font-sans card-title" fill="#38BDF8">Security &amp; FlightRecorder</text>
-  <text x="572" y="146" class="font-mono card-code">SecretVault (OS Keychain + .env)</text>
-  <text x="572" y="164" class="font-mono card-code">SecretScrubber + SQL/RM Guard</text>
-  <text x="572" y="180" class="font-sans card-line">Audit trail in audit.jsonl</text>
+  <rect x="558" y="106" width="242" height="82" rx="3" fill="#141418" stroke="#27272A" stroke-width="1"/>
+  <text x="572" y="125" class="font-sans card-title">Security &amp; FlightRecorder</text>
+  <text x="572" y="145" class="font-mono card-code">SecretVault (OS Keychain + .env)</text>
+  <text x="572" y="163" class="font-mono card-code">SecretScrubber + SQL/RM Guard</text>
+  <text x="572" y="179" class="font-sans card-line">Audit trail in audit.jsonl</text>
 
   <!-- ===================================================================== -->
   <!-- CONNECTORS: HOST <-> APPLIANCE                                        -->
   <!-- ===================================================================== -->
-  <line x1="230" y1="200" x2="230" y2="254" stroke="#38BDF8" stroke-width="2" marker-start="url(#arrow-cyan)" marker-end="url(#arrow-cyan)"/>
-  <rect x="68" y="214" width="324" height="26" rx="13" fill="#090D16" stroke="#0284C7" stroke-width="1.2"/>
-  <text x="230" y="231" text-anchor="middle" class="font-mono pill-text" fill="#38BDF8">virtio-serial (QGA + QMP ControlChannel)</text>
+  <line x1="230" y1="200" x2="230" y2="254" stroke="#A1A1AA" stroke-width="1.5" marker-start="url(#arrow-mono)" marker-end="url(#arrow-mono)"/>
+  <rect x="68" y="215" width="324" height="24" rx="3" fill="#111114" stroke="#52525B" stroke-width="1"/>
+  <text x="230" y="231" text-anchor="middle" class="font-mono pill-text">virtio-serial (QGA + QMP ControlChannel)</text>
 
-  <line x1="610" y1="200" x2="610" y2="254" stroke="#A855F7" stroke-width="2" marker-start="url(#arrow-purple)" marker-end="url(#arrow-purple)"/>
-  <rect x="442" y="214" width="336" height="26" rx="13" fill="#090D16" stroke="#9333EA" stroke-width="1.2"/>
-  <text x="610" y="231" text-anchor="middle" class="font-mono pill-text" fill="#C084FC">TCP 127.0.0.1 (:1080 SOCKS5 / :13389 RDP)</text>
+  <line x1="610" y1="200" x2="610" y2="254" stroke="#A1A1AA" stroke-width="1.5" marker-start="url(#arrow-mono)" marker-end="url(#arrow-mono)"/>
+  <rect x="442" y="215" width="336" height="24" rx="3" fill="#111114" stroke="#52525B" stroke-width="1"/>
+  <text x="610" y="231" text-anchor="middle" class="font-mono pill-text">TCP 127.0.0.1 (:1080 SOCKS5 / :13389 RDP)</text>
 
   <!-- ===================================================================== -->
   <!-- TIER 2: CRYPTOGRAPHIC APPLIANCE VM                                    -->
   <!-- ===================================================================== -->
-  <rect x="24" y="256" width="792" height="140" rx="10" fill="#0F172A" fill-opacity="0.92" stroke="#6366F1" stroke-width="1.5"/>
-  <rect x="24" y="256" width="792" height="32" rx="10" fill="#1E1B4B" fill-opacity="0.8"/>
-  <text x="42" y="277" class="font-sans tier-title">2. CRYPTOGRAPHIC APPLIANCE VM (@appliance)</text>
-  <text x="798" y="277" text-anchor="end" class="font-mono tier-sub" fill="#818CF8">Isolated Guest OS • Golden qcow2 Snapshot</text>
+  <rect x="24" y="256" width="792" height="140" rx="4" fill="#111114" stroke="#3F3F46" stroke-width="1.2"/>
+  <rect x="24" y="256" width="792" height="30" rx="4" fill="#18181B"/>
+  <line x1="24" y1="286" x2="816" y2="286" stroke="#27272A" stroke-width="1"/>
+  <text x="40" y="276" class="font-mono tier-title">02 / CRYPTOGRAPHIC APPLIANCE VM (@appliance)</text>
+  <text x="800" y="276" text-anchor="end" class="font-mono tier-sub">Isolated Guest OS • Golden qcow2 Snapshot</text>
 
   <!-- Card 2.1: VPN Provider -->
-  <rect x="40" y="298" width="242" height="86" rx="7" fill="#1E293B" fill-opacity="0.75" stroke="#334155" stroke-width="1"/>
-  <text x="54" y="318" class="font-sans card-title" fill="#818CF8">VPN Crypto Provider</text>
-  <text x="54" y="338" class="font-mono card-code">InfoTeCS ViPNet Client 5 / Custom</text>
-  <text x="54" y="356" class="font-mono card-code">WINTUN-ARM64.SYS / x86_64 NDIS</text>
-  <text x="54" y="373" class="font-sans card-line">Host kernel stays 100% clean</text>
+  <rect x="40" y="298" width="242" height="86" rx="3" fill="#141418" stroke="#27272A" stroke-width="1"/>
+  <text x="54" y="317" class="font-sans card-title">VPN Crypto Provider</text>
+  <text x="54" y="337" class="font-mono card-code">InfoTeCS ViPNet Client 5 / Custom</text>
+  <text x="54" y="355" class="font-mono card-code">WINTUN-ARM64.SYS / x86_64 NDIS</text>
+  <text x="54" y="372" class="font-sans card-line">Host kernel stays 100% clean</text>
 
   <!-- Card 2.2: Network & PMTUD Fix -->
-  <rect x="299" y="298" width="242" height="86" rx="7" fill="#1E293B" fill-opacity="0.75" stroke="#334155" stroke-width="1"/>
-  <text x="313" y="318" class="font-sans card-title" fill="#818CF8">PMTUD &amp; RDP Policy Guard</text>
-  <text x="313" y="338" class="font-mono card-code">Persistent MTU = 1350 (Infotecs)</text>
-  <text x="313" y="356" class="font-mono card-code">fClientDisableUDP = 1 (Registry)</text>
-  <text x="313" y="373" class="font-sans card-line">Eliminates 60s UDP frame drops</text>
+  <rect x="299" y="298" width="242" height="86" rx="3" fill="#141418" stroke="#27272A" stroke-width="1"/>
+  <text x="313" y="317" class="font-sans card-title">PMTUD &amp; RDP Policy Guard</text>
+  <text x="313" y="337" class="font-mono card-code">Persistent MTU = 1350 (Infotecs)</text>
+  <text x="313" y="355" class="font-mono card-code">fClientDisableUDP = 1 (Registry)</text>
+  <text x="313" y="372" class="font-sans card-line">Eliminates 60s UDP frame drops</text>
 
   <!-- Card 2.3: Session Supervisor -->
-  <rect x="558" y="298" width="242" height="86" rx="7" fill="#1E293B" fill-opacity="0.75" stroke="#334155" stroke-width="1"/>
-  <text x="572" y="318" class="font-sans card-title" fill="#818CF8">SessionSupervisor &amp; Spool</text>
-  <text x="572" y="338" class="font-mono card-code">Interactive /it cmdkey Injector</text>
-  <text x="572" y="356" class="font-mono card-code">C:\EnclaveGateway\spool</text>
-  <text x="572" y="373" class="font-sans card-line">Auto-reconnects mstsc.exe</text>
+  <rect x="558" y="298" width="242" height="86" rx="3" fill="#141418" stroke="#27272A" stroke-width="1"/>
+  <text x="572" y="317" class="font-sans card-title">SessionSupervisor &amp; Spool</text>
+  <text x="572" y="337" class="font-mono card-code">Interactive /it cmdkey Injector</text>
+  <text x="572" y="355" class="font-mono card-code">C:\EnclaveGateway\spool</text>
+  <text x="572" y="372" class="font-sans card-line">Auto-reconnects mstsc.exe</text>
 
   <!-- ===================================================================== -->
-  <!-- CONNECTOR: APPLIANCE <-> BASTION (FIREWALL BOUNDARY)                  -->
+  <!-- CONNECTOR: APPLIANCE <-> BASTION (SEMANTIC FIREWALL BOUNDARY)         -->
   <!-- ===================================================================== -->
-  <line x1="28" y1="426" x2="812" y2="426" stroke="#EF4444" stroke-width="1.2" stroke-dasharray="5,5" stroke-opacity="0.65"/>
-  <text x="34" y="420" class="font-mono fw-text">FIREWALL BOUNDARY</text>
-  <text x="806" y="420" text-anchor="end" class="font-mono fw-text">ONLY TCP 3389 OPEN</text>
+  <line x1="28" y1="426" x2="812" y2="426" stroke="#DC2626" stroke-width="1.2" stroke-dasharray="4,4" stroke-opacity="0.8"/>
+  <text x="34" y="419" class="font-mono fw-text">FIREWALL BOUNDARY</text>
+  <text x="806" y="419" text-anchor="end" class="font-mono fw-text">ONLY TCP 3389 OPEN</text>
 
-  <line x1="420" y1="396" x2="420" y2="456" stroke="#F59E0B" stroke-width="2.5" marker-start="url(#arrow-amber)" marker-end="url(#arrow-amber)"/>
-  <rect x="200" y="413" width="440" height="26" rx="13" fill="#090D16" stroke="#D97706" stroke-width="1.3"/>
-  <text x="420" y="430" text-anchor="middle" class="font-mono pill-text" fill="#FBBF24">RDP [MS-RDPEFS / rdpdr]  ──  \\tsclient\C\EnclaveGateway\spool</text>
+  <line x1="420" y1="396" x2="420" y2="456" stroke="#D97706" stroke-width="1.8" marker-start="url(#arrow-pinhole)" marker-end="url(#arrow-pinhole)"/>
+  <rect x="200" y="414" width="440" height="24" rx="3" fill="#111114" stroke="#B45309" stroke-width="1.2"/>
+  <text x="420" y="430" text-anchor="middle" class="font-mono pill-text-pinhole">RDP [MS-RDPEFS / rdpdr]  ──  \\tsclient\C\EnclaveGateway\spool</text>
 
   <!-- ===================================================================== -->
   <!-- TIER 3: BASTION TERMINAL SERVER                                       -->
   <!-- ===================================================================== -->
-  <rect x="24" y="458" width="792" height="140" rx="10" fill="#0F172A" fill-opacity="0.92" stroke="#F59E0B" stroke-width="1.5"/>
-  <rect x="24" y="458" width="792" height="32" rx="10" fill="#451A03" fill-opacity="0.75"/>
-  <text x="42" y="479" class="font-sans tier-title">3. BASTION JUMP HOST (@bastion — 10.0.1.10:3389)</text>
-  <text x="798" y="479" text-anchor="end" class="font-mono tier-sub" fill="#FBBF24">BastionWorker • Warm In-Process Runspace</text>
+  <rect x="24" y="458" width="792" height="140" rx="4" fill="#111114" stroke="#3F3F46" stroke-width="1.2"/>
+  <rect x="24" y="458" width="792" height="30" rx="4" fill="#18181B"/>
+  <line x1="24" y1="488" x2="816" y2="488" stroke="#27272A" stroke-width="1"/>
+  <text x="40" y="478" class="font-mono tier-title">03 / BASTION JUMP HOST (@bastion — 10.0.1.10:3389)</text>
+  <text x="800" y="478" text-anchor="end" class="font-mono tier-sub">BastionWorker • Warm In-Process Runspace</text>
 
   <!-- Card 3.1: Transactional Envelopes -->
-  <rect x="40" y="500" width="242" height="86" rx="7" fill="#1E293B" fill-opacity="0.75" stroke="#334155" stroke-width="1"/>
-  <text x="54" y="520" class="font-sans card-title" fill="#FBBF24">RdpVfsTransport IPC</text>
-  <text x="54" y="540" class="font-mono card-code">req_&lt;id&gt;.json ↔ res_&lt;id&gt;.json</text>
-  <text x="54" y="558" class="font-mono card-code">&amp; ([scriptblock]::Create(...))</text>
-  <text x="54" y="575" class="font-sans card-line">~200ms latency, zero child procs</text>
+  <rect x="40" y="500" width="242" height="86" rx="3" fill="#141418" stroke="#27272A" stroke-width="1"/>
+  <text x="54" y="519" class="font-sans card-title">RdpVfsTransport IPC</text>
+  <text x="54" y="539" class="font-mono card-code">req_&lt;id&gt;.json ↔ res_&lt;id&gt;.json</text>
+  <text x="54" y="557" class="font-mono card-code">&amp; ([scriptblock]::Create(...))</text>
+  <text x="54" y="574" class="font-sans card-line">~200ms latency, zero child procs</text>
 
   <!-- Card 3.2: Parallel Striped I/O -->
-  <rect x="299" y="500" width="242" height="86" rx="7" fill="#1E293B" fill-opacity="0.75" stroke="#334155" stroke-width="1"/>
-  <text x="313" y="520" class="font-sans card-title" fill="#FBBF24">Parallel Striped I/O</text>
-  <text x="313" y="540" class="font-mono card-code">4 MB SHA-256 Block Delta Sync</text>
-  <text x="313" y="558" class="font-mono card-code">RunspacePool + zlib DeflateStream</text>
-  <text x="313" y="575" class="font-sans card-line">Concurrent random-access stripes</text>
+  <rect x="299" y="500" width="242" height="86" rx="3" fill="#141418" stroke="#27272A" stroke-width="1"/>
+  <text x="313" y="519" class="font-sans card-title">Parallel Striped I/O</text>
+  <text x="313" y="539" class="font-mono card-code">4 MB SHA-256 Block Delta Sync</text>
+  <text x="313" y="557" class="font-mono card-code">RunspacePool + zlib DeflateStream</text>
+  <text x="313" y="574" class="font-sans card-line">Concurrent random-access stripes</text>
 
   <!-- Card 3.3: SOCKS5 / TCP Multiplexer -->
-  <rect x="558" y="500" width="242" height="86" rx="7" fill="#1E293B" fill-opacity="0.75" stroke="#334155" stroke-width="1"/>
-  <text x="572" y="520" class="font-sans card-title" fill="#FBBF24">SOCKS5 &amp; TCP Multiplexer</text>
-  <text x="572" y="540" class="font-mono card-code">$Global:EnclaveMuxSockets Table</text>
-  <text x="572" y="558" class="font-mono card-code">mux_open | mux_io | mux_close</text>
-  <text x="572" y="575" class="font-sans card-line">Stateful bidirectional streams</text>
+  <rect x="558" y="500" width="242" height="86" rx="3" fill="#141418" stroke="#27272A" stroke-width="1"/>
+  <text x="572" y="519" class="font-sans card-title">SOCKS5 &amp; TCP Multiplexer</text>
+  <text x="572" y="539" class="font-mono card-code">$Global:EnclaveMuxSockets Table</text>
+  <text x="572" y="557" class="font-mono card-code">mux_open | mux_io | mux_close</text>
+  <text x="572" y="574" class="font-sans card-line">Stateful bidirectional streams</text>
 
   <!-- ===================================================================== -->
   <!-- CONNECTORS: BASTION <-> TARGET NODES                                  -->
   <!-- ===================================================================== -->
-  <line x1="220" y1="598" x2="220" y2="656" stroke="#10B981" stroke-width="2" marker-start="url(#arrow-emerald)" marker-end="url(#arrow-emerald)"/>
-  <rect x="40" y="614" width="360" height="26" rx="13" fill="#090D16" stroke="#059669" stroke-width="1.2"/>
-  <text x="220" y="631" text-anchor="middle" class="font-mono pill-text" fill="#34D399">OpenSSH / SCP (Base64 + CR-strip + sudo -S)</text>
+  <line x1="220" y1="598" x2="220" y2="656" stroke="#A1A1AA" stroke-width="1.5" marker-start="url(#arrow-mono)" marker-end="url(#arrow-mono)"/>
+  <rect x="40" y="615" width="360" height="24" rx="3" fill="#111114" stroke="#52525B" stroke-width="1"/>
+  <text x="220" y="631" text-anchor="middle" class="font-mono pill-text">OpenSSH / SCP (Base64 + CR-strip + sudo -S)</text>
 
-  <line x1="620" y1="598" x2="620" y2="656" stroke="#10B981" stroke-width="2" marker-start="url(#arrow-emerald)" marker-end="url(#arrow-emerald)"/>
-  <rect x="440" y="614" width="360" height="26" rx="13" fill="#090D16" stroke="#059669" stroke-width="1.2"/>
-  <text x="620" y="631" text-anchor="middle" class="font-mono pill-text" fill="#34D399">Multiplexed SOCKS5 (RFC 1928) &amp; TCP Relay</text>
+  <line x1="620" y1="598" x2="620" y2="656" stroke="#A1A1AA" stroke-width="1.5" marker-start="url(#arrow-mono)" marker-end="url(#arrow-mono)"/>
+  <rect x="440" y="615" width="360" height="24" rx="3" fill="#111114" stroke="#52525B" stroke-width="1"/>
+  <text x="620" y="631" text-anchor="middle" class="font-mono pill-text">Multiplexed SOCKS5 (RFC 1928) &amp; TCP Relay</text>
 
   <!-- ===================================================================== -->
   <!-- TIER 4: UPSTREAM TARGET NODES                                         -->
   <!-- ===================================================================== -->
   <!-- Target 1: app01 -->
-  <rect x="24" y="658" width="384" height="112" rx="10" fill="#0F172A" fill-opacity="0.92" stroke="#10B981" stroke-width="1.5"/>
-  <rect x="24" y="658" width="384" height="30" rx="10" fill="#064E3B" fill-opacity="0.75"/>
-  <text x="40" y="678" class="font-sans tier-title">4A. TARGET NODE: app01</text>
-  <text x="392" y="678" text-anchor="end" class="font-mono tier-sub" fill="#34D399">10.0.20.11:22</text>
-  <text x="40" y="706" class="font-sans card-line" fill="#E2E8F0">Linux Application Host • Docker • PostgreSQL / MySQL</text>
-  <text x="40" y="728" class="font-mono card-code" fill="#34D399">$ egw exec app01 --sudo "systemctl status docker"</text>
-  <text x="40" y="748" class="font-mono card-code" fill="#34D399">$ egw cp ./release.tar.gz app01:/tmp/release.tar.gz</text>
+  <rect x="24" y="658" width="384" height="112" rx="4" fill="#111114" stroke="#3F3F46" stroke-width="1.2"/>
+  <rect x="24" y="658" width="384" height="28" rx="4" fill="#18181B"/>
+  <line x1="24" y1="686" x2="408" y2="686" stroke="#27272A" stroke-width="1"/>
+  <circle cx="38" cy="672" r="3.5" fill="#10B981"/>
+  <text x="48" y="677" class="font-mono tier-title">04A / TARGET NODE: app01</text>
+  <text x="394" y="677" text-anchor="end" class="font-mono tier-sub">10.0.20.11:22</text>
+  <text x="40" y="706" class="font-sans card-line">Linux Application Host • Docker • PostgreSQL / MySQL</text>
+  <text x="40" y="727" class="font-mono card-code">$ egw exec app01 --sudo "systemctl status docker"</text>
+  <text x="40" y="747" class="font-mono card-code">$ egw cp ./release.tar.gz app01:/tmp/release.tar.gz</text>
 
   <!-- Target 2: auth01 -->
-  <rect x="432" y="658" width="384" height="112" rx="10" fill="#0F172A" fill-opacity="0.92" stroke="#10B981" stroke-width="1.5"/>
-  <rect x="432" y="658" width="384" height="30" rx="10" fill="#064E3B" fill-opacity="0.75"/>
-  <text x="448" y="678" class="font-sans tier-title">4B. TARGET NODE: auth01</text>
-  <text x="800" y="678" text-anchor="end" class="font-mono tier-sub" fill="#34D399">10.0.20.12:443</text>
-  <text x="448" y="706" class="font-sans card-line" fill="#E2E8F0">Internal Web / IAM / API Services • Isolated Subnets</text>
-  <text x="448" y="728" class="font-mono card-code" fill="#34D399">$ egw socks5 --port 1080</text>
-  <text x="448" y="748" class="font-mono card-code" fill="#34D399">$ egw tunnel 8443:auth01:443</text>
+  <rect x="432" y="658" width="384" height="112" rx="4" fill="#111114" stroke="#3F3F46" stroke-width="1.2"/>
+  <rect x="432" y="658" width="384" height="28" rx="4" fill="#18181B"/>
+  <line x1="432" y1="686" x2="816" y2="686" stroke="#27272A" stroke-width="1"/>
+  <circle cx="446" cy="672" r="3.5" fill="#10B981"/>
+  <text x="456" y="677" class="font-mono tier-title">04B / TARGET NODE: auth01</text>
+  <text x="802" y="677" text-anchor="end" class="font-mono tier-sub">10.0.20.12:443</text>
+  <text x="448" y="706" class="font-sans card-line">Internal Web / IAM / API Services • Isolated Subnets</text>
+  <text x="448" y="727" class="font-mono card-code">$ egw socks5 --port 1080</text>
+  <text x="448" y="747" class="font-mono card-code">$ egw tunnel 8443:auth01:443</text>
 </svg>
