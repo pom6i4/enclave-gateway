@@ -219,6 +219,20 @@ class QgaClient:
         local_path.parent.mkdir(parents=True, exist_ok=True)
         local_path.write_bytes(self.read_bytes(guest_path))
 
+    def sync_guest_clock(self, epoch_ns: int | None = None) -> bool:
+        """Synchronize the guest OS clock to the Host clock via QGA guest-set-time."""
+        ns = epoch_ns if epoch_ns is not None else time.time_ns()
+        try:
+            with self._connect_synced(timeout_sec=10.0) as (sock, reader):
+                req = json.dumps(
+                    {"execute": "guest-set-time", "arguments": {"time": ns}}
+                )
+                sock.sendall((req + "\n").encode("utf-8"))
+                resp = json.loads(reader.readline().lstrip("\xff"))  # type: ignore[attr-defined]
+                return "return" in resp
+        except Exception:
+            return False
+
 
 class DirectHostControlChannel:
     """Control channel for Windows Direct Mode or local loopback simulation."""
@@ -269,3 +283,7 @@ class DirectHostControlChannel:
     def read_file(self, guest_path: str, local_path: Path) -> None:
         local_path.parent.mkdir(parents=True, exist_ok=True)
         local_path.write_bytes(self.read_bytes(guest_path))
+
+    def sync_guest_clock(self, epoch_ns: int | None = None) -> bool:
+        _ = epoch_ns
+        return True

@@ -58,7 +58,10 @@ Connecting modern developer workstations (**macOS on Apple Silicon `M1–M5`**, 
 | Problem | Root Cause | How `enclave-gateway` Solves It |
 |---|---|---|
 | **RDP drops every ~60 seconds over ViPNet** (`Event 1026, Reason=267`) | Virtual `Infotecs` (`WinTun`) adapter defaults to `NlMtu = 65535`, while the tunnel silently drops `DF=1` packets >1420 bytes without ICMP fragmentation notices (PMTUD blackhole), and RDP-over-UDP sends unnegotiated 1500-byte datagrams. | `appliance_init.ps1` sets persistent `mtu=1350` on `Infotecs` and `Ethernet` interfaces and sets `fClientDisableUDP = 1` in registry policy. |
+| **Post-snapshot clock drift (>5 min) breaks Kerberos / NLA (`CredSSP`) & TLS** | Restoring a `qcow2` snapshot (`egw reset`) or resuming after host sleep leaves the guest Windows clock hours or days behind; `w32tm` refuses large phase jumps and NTP (`UDP 123`) is blocked inside the enclave. | `QgaClient.sync_guest_clock()` (`guest-set-time`) and `appliance_init.ps1` (`-HostEpochUtc` + `MaxPosPhaseCorrection=0xFFFFFFFF`) deterministically align guest UTC time to the Host before RDP login. |
+| **Corporate GPO idle timeout locks RDP session & unmounts `\\tsclient\C`** | Terminal Services idle lock or screensaver activation disconnects the `rdpdr` virtual channel, and corrupted `mstsc` persistent bitmap cache freezes sessions. | `bastion_worker.ps1` calls `kernel32.dll::SetThreadExecutionState(0x80000003)` on every heartbeat, disables `MaxIdleTime`, and sets `bitmapcachepersistenable:i:0`. |
 | **`cmdkey` updates via QGA fail NLA login (`LogonUI.exe`)** | QEMU Guest Agent runs as `NT AUTHORITY\SYSTEM` (Session 0), whereas `mstsc.exe` runs in the interactive desktop user session. Windows Credential Manager vaults are strictly isolated per session. | `session_supervisor.ps1` injects `cmdkey` credentials directly into the interactive user session via an ephemeral `/it` scheduled task (`UpdateEnclaveRDPCred`). |
+| **Windows OpenSSH fails non-interactive password auth or root `scp` (`Permission denied`)** | Built-in Windows OpenSSH 7.7/8.1 rejects stdin passwords, and direct `scp` cannot write to root-owned `/etc` or `/opt` paths on Linux `TargetNodes`. | `SshHopExecutor` provides an ephemeral `SSH_ASKPASS` wrapper, `egw ssh-copy-id <node>` key bootstrapping, and `egw cp --sudo` staging via `/tmp` + `sudo mv`. |
 | **Spurious `invalid_grant` / auth failures in bash scripts called from PowerShell** | Windows PowerShell 5.1 pipelines append `\r\n` to every piped line; Linux `read -r` retains the trailing `\r` as part of the password string. | `SecretVault` and `SshHopExecutor` strip `\r` on both ingress and egress (`tr -d '\r'`). |
 
 ---
@@ -95,15 +98,18 @@ egw secret set ENCLAVE_APP01_SUDO_PASSWORD "your-sudo-password"
 # Generate unattended Windows 11 Appliance provisioning bundle (Autounattend.xml + VirtIO + QGA)
 egw init --output-dir ./build/provision --create-disk
 
-# Start Appliance VM and verify tunnel status
+# Start Appliance VM and run end-to-end L1–L7 diagnostics
 egw up
-egw status
+egw doctor --fix
 
 # Launch live interactive TUI topology monitor (or --once for snapshot)
 egw top
 
-# Self-heal MTU=1350, UDP policy, interactive credentials, and Bastion RDP session
+# Self-heal clock drift, MTU=1350, UDP policy, interactive credentials, and Bastion RDP session
 egw heal --update-credentials
+
+# Bootstrap Bastion SSH key onto a TargetNode using password from OS Keychain
+egw ssh-copy-id app01
 
 # Execute commands across any tier of the topology
 egw exec @appliance "vipnetclient.exe info"
@@ -111,8 +117,9 @@ egw exec @bastion   "Get-NetTCPConnection -State Established"
 egw exec app01      "docker ps --format 'table {{.Names}}\t{{.Status}}'"
 egw exec app01 --sudo "systemctl status docker"
 
-# Transfer files with 4 MB block-level SHA-256 delta sync, Parallel Striped I/O, and verification
+# Transfer files with 4 MB block-level SHA-256 delta sync, Parallel Striped I/O, and optional --sudo
 egw cp ./release.tar.gz app01:/tmp/release.tar.gz
+egw cp --sudo ./nginx.conf app01:/etc/nginx/nginx.conf
 egw cp app01:/var/log/syslog ./syslog.txt
 
 # Tunnel local port 8443 to internal service 10.0.20.12:443 over multiplexed RdpVfsTransport

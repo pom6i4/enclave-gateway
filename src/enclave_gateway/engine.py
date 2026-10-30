@@ -162,8 +162,12 @@ ConvertTo-Json $out -Compress
         return report
 
     def heal(self, *, update_credentials: bool = False, actor: str = "cli") -> ExecResult:
-        """Self-heal MTU, RDP UDP policy, interactive credentials, and Bastion RDP session."""
+        """Self-heal clock drift, MTU, RDP UDP policy, interactive credentials, and Bastion RDP session."""
         tx_id = generate_tx_id()
+        sync_fn = getattr(self.control, "sync_guest_clock", None)
+        if callable(sync_fn):
+            sync_fn()
+
         agents_dir = Path(__file__).resolve().parent / "agents"
         init_script = (agents_dir / "appliance_init.ps1").read_text(encoding="utf-8")
         sup_script = (agents_dir / "session_supervisor.ps1").read_text(encoding="utf-8")
@@ -177,10 +181,14 @@ ConvertTo-Json $out -Compress
         if update_credentials and domain_user and password:
             cred_args = f"-RdpDomainUser '{domain_user}' -RdpPassword '{password}'"
 
+        host_epoch = int(time.time())
+        routes_csv = ",".join(self.config.provider.routes)
+        dns_csv = ",".join(self.config.provider.dns_servers)
+
         combined_ps = f"""
 & {{
 {init_script}
-}} -Mtu {self.config.appliance.mtu} -AdapterName '{self.config.provider.adapter_name}' -BastionHost '{self.config.bastion.host}' -BastionPort {self.config.bastion.port}
+}} -Mtu {self.config.appliance.mtu} -AdapterName '{self.config.provider.adapter_name}' -BastionHost '{self.config.bastion.host}' -BastionPort {self.config.bastion.port} -HostEpochUtc {host_epoch} -RoutesCsv '{routes_csv}' -DnsServersCsv '{dns_csv}'
 
 & {{
 {sup_script}
@@ -192,7 +200,7 @@ ConvertTo-Json $out -Compress
             actor=actor,
             operation="heal",
             node="@appliance",
-            summary="Heal appliance MTU, UDP policy, and Bastion session",
+            summary="Heal appliance clock, MTU, UDP policy, and Bastion session",
             exit_code=res.exit_code,
             duration_ms=res.duration_ms,
         )
@@ -218,6 +226,9 @@ ConvertTo-Json $out -Compress
             raw_res = self.rdp_vfs.exec_bastion(script, timeout_sec=timeout_sec)
         else:
             target = self._resolve_target(node)
+            ssh_pw = (
+                self.vault.get(target.password_env) if target.password_env else ""
+            )
             sudo_pw = (
                 self.vault.get(target.sudo_password_env)
                 if as_root and target.sudo_password_env
@@ -230,6 +241,7 @@ ConvertTo-Json $out -Compress
                 target,
                 script,
                 as_root=as_root,
+                ssh_password=ssh_pw,
                 sudo_password=sudo_pw,
                 timeout_sec=timeout_sec,
             )
@@ -253,6 +265,7 @@ ConvertTo-Json $out -Compress
         node: str,
         remote_path: str,
         *,
+        as_root: bool = False,
         use_delta: bool = True,
         timeout_sec: float = 900.0,
         actor: str = "cli",
@@ -273,11 +286,25 @@ ConvertTo-Json $out -Compress
                 )
             else:
                 target = self._resolve_target(node)
+                ssh_pw = (
+                    self.vault.get(target.password_env) if target.password_env else ""
+                )
+                sudo_pw = (
+                    self.vault.get(target.sudo_password_env)
+                    if as_root and target.sudo_password_env
+                    else ""
+                )
                 hop = (
                     self.bastion_ssh if target.via == "bastion" else self.appliance_ssh
                 )
                 sha = hop.push_file_to_node(
-                    target, lpath, remote_path, timeout_sec=timeout_sec
+                    target,
+                    lpath,
+                    remote_path,
+                    as_root=as_root,
+                    ssh_password=ssh_pw,
+                    sudo_password=sudo_pw,
+                    timeout_sec=timeout_sec,
                 )
         elif direction == "pull":
             if node in ("@appliance", "appliance"):
@@ -286,11 +313,25 @@ ConvertTo-Json $out -Compress
                 sha = self.rdp_vfs.pull_file(remote_path, lpath, timeout_sec=timeout_sec)
             else:
                 target = self._resolve_target(node)
+                ssh_pw = (
+                    self.vault.get(target.password_env) if target.password_env else ""
+                )
+                sudo_pw = (
+                    self.vault.get(target.sudo_password_env)
+                    if as_root and target.sudo_password_env
+                    else ""
+                )
                 hop = (
                     self.bastion_ssh if target.via == "bastion" else self.appliance_ssh
                 )
                 sha = hop.pull_file_from_node(
-                    target, remote_path, lpath, timeout_sec=timeout_sec
+                    target,
+                    remote_path,
+                    lpath,
+                    as_root=as_root,
+                    ssh_password=ssh_pw,
+                    sudo_password=sudo_pw,
+                    timeout_sec=timeout_sec,
                 )
         else:
             raise ValueError(f"Unsupported transfer direction '{direction}' (use 'push' or 'pull')")
@@ -299,7 +340,7 @@ ConvertTo-Json $out -Compress
         self.recorder.record(
             tx_id=tx_id,
             actor=actor,
-            operation=f"transfer_{direction}",
+            operation=f"transfer_{direction}{'_root' if as_root else ''}",
             node=node,
             summary=f"{lpath.name} <-> {node}:{remote_path}",
             exit_code=0,
@@ -310,10 +351,146 @@ ConvertTo-Json $out -Compress
             "tx_id": tx_id,
             "direction": direction,
             "node": node,
+            "as_root": as_root,
             "local_path": str(lpath),
             "remote_path": remote_path,
             "sha256": sha,
             "duration_ms": duration_ms,
+        }
+
+    def bootstrap_ssh_key(self, node: str, *, actor: str = "cli") -> ExecResult:
+        """Generate hop host SSH keypair if missing and install public key onto TargetNode."""
+        tx_id = generate_tx_id()
+        target = self._resolve_target(node)
+        ssh_pw = self.vault.get(target.password_env) if target.password_env else ""
+        hop = self.bastion_ssh if target.via == "bastion" else self.appliance_ssh
+        raw_res = hop.bootstrap_ssh_key(target, ssh_password=ssh_pw)
+        clean_res = self._scrub_result(raw_res)
+        self.recorder.record(
+            tx_id=tx_id,
+            actor=actor,
+            operation="ssh_copy_id",
+            node=node,
+            summary=f"Install hop SSH public key onto {target.user}@{target.host}:{target.port}",
+            exit_code=clean_res.exit_code,
+            duration_ms=clean_res.duration_ms,
+        )
+        return clean_res
+
+    def doctor(
+        self,
+        *,
+        fix: bool = False,
+        probe_targets: bool = False,
+        actor: str = "cli",
+    ) -> dict[str, Any]:
+        """Run end-to-end L1-L7 diagnostic checklist across Host, Appliance, VPN, Bastion, and Targets."""
+        st = self.status()
+        checks: list[dict[str, Any]] = []
+        needs_heal = False
+
+        vm_ok = bool(st["appliance"]["running"]) or st["appliance"]["hypervisor"] == "direct"
+        checks.append(
+            {
+                "check": "appliance_vm",
+                "ok": vm_ok,
+                "detail": f"Hypervisor={st['appliance']['hypervisor']}, PID={st['appliance']['pid']}",
+            }
+        )
+
+        # Check clock skew and UDP policy on Appliance if reachable
+        clock_skew_sec = 0
+        udp_disabled = True
+        if vm_ok:
+            diag_ps = """
+$epoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+$udpPol = (Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\Terminal Services\\Client' -Name 'fClientDisableUDP' -ErrorAction SilentlyContinue).fClientDisableUDP
+Write-Output ("DIAG_CLOCK:" + $epoch + ":UDP:" + [int]$udpPol)
+"""
+            diag_res = self.control.exec_powershell(diag_ps, timeout_sec=15.0)
+            if diag_res.exit_code == 0 and "DIAG_CLOCK:" in diag_res.stdout:
+                marker = [
+                    ln.strip()
+                    for ln in diag_res.stdout.splitlines()
+                    if ln.strip().startswith("DIAG_CLOCK:")
+                ][0]
+                parts = marker.split(":")
+                guest_epoch = int(parts[1])
+                clock_skew_sec = abs(int(time.time()) - guest_epoch)
+                udp_disabled = int(parts[3]) == 1
+
+        clock_ok = clock_skew_sec < 120
+        if not clock_ok:
+            needs_heal = True
+        checks.append(
+            {
+                "check": "appliance_clock_sync",
+                "ok": clock_ok,
+                "detail": f"Clock skew={clock_skew_sec}s (Kerberos/NLA limit is 300s)",
+            }
+        )
+
+        checks.append(
+            {
+                "check": "rdp_udp_blackhole_guard",
+                "ok": udp_disabled,
+                "detail": f"fClientDisableUDP={'1 (TCP-only)' if udp_disabled else '0 (vulnerable to UDP drops)'}",
+            }
+        )
+        if not udp_disabled:
+            needs_heal = True
+
+        tun_ok = bool(st["provider"]["tunnel_up"])
+        checks.append(
+            {
+                "check": "vpn_tunnel_probe",
+                "ok": tun_ok,
+                "detail": f"Target={st['provider']['probe_host']}:{st['provider']['probe_port']}",
+            }
+        )
+
+        wrk_ok = bool(st["bastion"]["worker_healthy"])
+        vfs_rtt_ms: int | None = None
+        if wrk_ok:
+            ping_res = self.rdp_vfs.exec_bastion(
+                "Write-Output 'VFS_PONG'", timeout_sec=10.0
+            )
+            if ping_res.exit_code == 0 and "VFS_PONG" in ping_res.stdout:
+                vfs_rtt_ms = ping_res.duration_ms
+            else:
+                wrk_ok = False
+
+        if not wrk_ok:
+            needs_heal = True
+        checks.append(
+            {
+                "check": "bastion_rdp_vfs_ipc",
+                "ok": wrk_ok,
+                "detail": f"Worker healthy={wrk_ok}, RTT={vfs_rtt_ms if vfs_rtt_ms is not None else '-'}ms",
+            }
+        )
+
+        if probe_targets and wrk_ok:
+            for t_name in self.config.targets:
+                t_res = self.exec_node(t_name, "echo TARGET_SSH_OK", timeout_sec=20.0, actor=actor)
+                checks.append(
+                    {
+                        "check": f"target_ssh:{t_name}",
+                        "ok": t_res.exit_code == 0 and "TARGET_SSH_OK" in t_res.stdout,
+                        "detail": t_res.stdout or t_res.stderr,
+                    }
+                )
+
+        healed = False
+        if fix and needs_heal and vm_ok:
+            self.heal(actor=actor)
+            healed = True
+
+        all_ok = all(bool(c["ok"]) for c in checks)
+        return {
+            "healthy": all_ok,
+            "auto_healed": healed,
+            "checks": checks,
         }
 
     def query_database(

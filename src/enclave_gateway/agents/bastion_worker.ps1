@@ -13,6 +13,17 @@ if (-not $Global:EnclaveMuxSockets) {
     $Global:EnclaveMuxSockets = [hashtable]::Synchronized(@{})
 }
 
+if (-not ("EnclaveSessionKeepAlive" -as [type])) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class EnclaveSessionKeepAlive {
+    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    public static extern uint SetThreadExecutionState(uint esFlags);
+}
+"@ -ErrorAction SilentlyContinue
+}
+
 if (-not $Global:EnclaveRunspacePool -or $Global:EnclaveRunspacePool.RunspacePoolStateInfo.State -ne "Opened") {
     $maxStreams = [Math]::Max(1, $ParallelStreams)
     $Global:EnclaveRunspacePool = [runspacefactory]::CreateRunspacePool(1, $maxStreams)
@@ -26,6 +37,9 @@ while ($true) {
         if (Test-Path $SpoolDir) {
             $now = Get-Date
             if (($now - $lastHeartbeat).TotalSeconds -ge 2.0) {
+                # Prevent Windows RDP idle session timeout / screensaver lock from unmounting \\tsclient\C
+                try { [void][EnclaveSessionKeepAlive]::SetThreadExecutionState(0x80000003) } catch {}
+
                 # Reap idle multiplexed TCP sockets older than 300s of inactivity
                 $staleIds = @()
                 foreach ($k in $Global:EnclaveMuxSockets.Keys) {

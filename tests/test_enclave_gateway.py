@@ -9,6 +9,7 @@ import re
 import socket
 import struct
 import threading
+import time
 import unittest
 import xml.etree.ElementTree as ET
 import zlib
@@ -45,7 +46,10 @@ from enclave_gateway.transports.socks5_mux import (
     SOCKS5_VERSION,
     Socks5VfsServer,
 )
-from enclave_gateway.transports.ssh_hop import build_remote_bash_invocation
+from enclave_gateway.transports.ssh_hop import (
+    build_powershell_ssh_hop_script,
+    build_remote_bash_invocation,
+)
 from enclave_gateway.tui.dashboard import render_dashboard_text
 
 
@@ -101,6 +105,14 @@ class LoopbackControlChannel:
                     stdout=json.dumps(status_obj),
                     stderr="",
                     duration_ms=10,
+                )
+
+            if "DIAG_CLOCK:" in script:
+                return ExecResult(
+                    exit_code=0,
+                    stdout=f"DIAG_CLOCK:{int(time.time())}:UDP:1",
+                    stderr="",
+                    duration_ms=5,
                 )
 
             return ExecResult(
@@ -279,6 +291,51 @@ targets:
         cmd = build_remote_bash_invocation("uname -a\r\nuptime", as_root=True)
         self.assertIn("sudo -S -p ''", cmd)
         self.assertIn("tr -d '\\r'", cmd)
+
+    def test_ssh_askpass_and_doctor_diagnostics(self) -> None:
+        cfg = EnclaveConfig.from_dict(
+            {
+                "appliance": {"hypervisor": "direct"},
+                "targets": {
+                    "app01": {
+                        "host": "10.0.20.11",
+                        "port": 2222,
+                        "user": "deploy",
+                        "via": "bastion",
+                        "password_env": "ENCLAVE_APP01_SSH_PASSWORD",
+                        "ssh_key_path": "~/.ssh/id_ed25519",
+                    }
+                },
+            }
+        )
+        node_spec = cfg.targets["app01"]
+        hop_ps = build_powershell_ssh_hop_script(
+            node_spec,
+            "id",
+            as_root=True,
+            ssh_password="SshPass#1",
+            sudo_password="SudoPass#2",
+        )
+        self.assertIn("SSH_ASKPASS_REQUIRE = 'force'", hop_ps)
+        self.assertIn("-o BatchMode=no", hop_ps)
+        self.assertIn("-i ~/.ssh/id_ed25519", hop_ps)
+        self.assertIn("-p 2222", hop_ps)
+
+        with TemporaryDirectory() as tmp:
+            control = LoopbackControlChannel()
+            recorder = FlightRecorder(log_path=Path(tmp) / "audit.jsonl")
+            engine = EnclaveEngine(
+                config=cfg, recorder=recorder, control_override=control
+            )
+            diag = engine.doctor(fix=False)
+            self.assertTrue(diag["healthy"])
+            check_names = [c["check"] for c in diag["checks"]]
+            self.assertIn("appliance_clock_sync", check_names)
+            self.assertIn("rdp_udp_blackhole_guard", check_names)
+            self.assertIn("bastion_rdp_vfs_ipc", check_names)
+
+            key_res = engine.bootstrap_ssh_key("app01")
+            self.assertEqual(key_res.exit_code, 0)
 
     def test_block_manifest_and_sha256(self) -> None:
         with TemporaryDirectory() as tmp:

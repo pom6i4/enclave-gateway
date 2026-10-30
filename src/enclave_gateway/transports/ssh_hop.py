@@ -1,4 +1,4 @@
-"""Multi-hop OpenSSH execution and verified file transfer to upstream TargetNodes."""
+"""Multi-hop OpenSSH execution, SSH_ASKPASS password auth, key bootstrap, and verified file transfer."""
 
 from __future__ import annotations
 
@@ -25,32 +25,85 @@ def build_remote_bash_invocation(
     return f"echo '{b64_script}' | base64 -d | tr -d '\\r' | bash"
 
 
+def _build_ssh_common_opts(
+    node: TargetNodeSpec,
+    *,
+    port_flag: str = "-p",
+    has_ssh_password: bool = False,
+    connect_timeout_sec: int = 15,
+) -> str:
+    batch_val = "no" if has_ssh_password else "yes"
+    opts = [
+        f"-o BatchMode={batch_val}",
+        "-o StrictHostKeyChecking=no",
+        f"-o ConnectTimeout={connect_timeout_sec}",
+        f"{port_flag} {node.port}",
+    ]
+    if node.ssh_key_path:
+        opts.append(f"-i {node.ssh_key_path}")
+    return " ".join(opts)
+
+
+def _wrap_with_askpass_ps(inner_ps: str, ssh_password: str, token_id: str) -> str:
+    """Wrap a PowerShell SSH/SCP block with an ephemeral SSH_ASKPASS helper if ssh_password is set."""
+    if not ssh_password:
+        return inner_ps.strip()
+
+    clean_ssh_pw = ssh_password.rstrip("\r\n")
+    # Escape special batch characters for cmd.exe echo
+    escaped_bat = (
+        clean_ssh_pw.replace("^", "^^")
+        .replace("&", "^&")
+        .replace("|", "^|")
+        .replace("<", "^<")
+        .replace(">", "^>")
+        .replace("%", "%%")
+    )
+    bat_content = f"@echo off\r\necho {escaped_bat}\r\n"
+    bat_b64 = base64.b64encode(bat_content.encode("utf-8")).decode("ascii")
+
+    return f"""
+$askDir = Join-Path $env:TEMP 'enclave_gw_sec'
+if (-not (Test-Path $askDir)) {{ New-Item -ItemType Directory -Force -Path $askDir | Out-Null }}
+$askCmd = Join-Path $askDir 'ask_{token_id}.cmd'
+try {{
+    [IO.File]::WriteAllBytes($askCmd, [Convert]::FromBase64String('{bat_b64}'))
+    $env:SSH_ASKPASS = $askCmd
+    $env:SSH_ASKPASS_REQUIRE = 'force'
+    $env:DISPLAY = 'localhost:0.0'
+{inner_ps}
+}} finally {{
+    Remove-Item $askCmd -Force -ErrorAction SilentlyContinue
+    Remove-Item Env:\\SSH_ASKPASS -ErrorAction SilentlyContinue
+    Remove-Item Env:\\SSH_ASKPASS_REQUIRE -ErrorAction SilentlyContinue
+}}
+""".strip()
+
+
 def build_powershell_ssh_hop_script(
     node: TargetNodeSpec,
     bash_script: str,
     *,
     as_root: bool = False,
+    ssh_password: str = "",
     sudo_password: str = "",
     connect_timeout_sec: int = 15,
 ) -> str:
     """Build a PowerShell script that invokes ssh.exe on the hop host safely."""
     remote_cmd = build_remote_bash_invocation(bash_script, as_root=as_root)
-    ssh_opts = [
-        "-o BatchMode=yes",
-        "-o StrictHostKeyChecking=no",
-        f"-o ConnectTimeout={connect_timeout_sec}",
-        f"-p {node.port}",
-    ]
-    if node.ssh_key_path:
-        ssh_opts.append(f"-i {node.ssh_key_path}")
-    opts_str = " ".join(ssh_opts)
+    opts_str = _build_ssh_common_opts(
+        node,
+        port_flag="-p",
+        has_ssh_password=bool(ssh_password),
+        connect_timeout_sec=connect_timeout_sec,
+    )
     target_uri = f"{node.user}@{node.host}"
+    token_id = secrets.token_hex(6)
 
     if as_root and sudo_password:
         clean_pw = sudo_password.rstrip("\r\n")
         pw_b64 = base64.b64encode((clean_pw + "\n").encode("utf-8")).decode("ascii")
-        token_id = secrets.token_hex(6)
-        return f"""
+        core_ps = f"""
 $secDir = Join-Path $env:TEMP 'enclave_gw_sec'
 if (-not (Test-Path $secDir)) {{ New-Item -ItemType Directory -Force -Path $secDir | Out-Null }}
 $secFile = Join-Path $secDir 's_{token_id}.bin'
@@ -61,12 +114,14 @@ try {{
 }} finally {{
     Remove-Item $secFile -Force -ErrorAction SilentlyContinue
 }}
-""".strip()
+"""
+        return _wrap_with_askpass_ps(core_ps, ssh_password, token_id)
 
-    return f"""
+    core_ps = f"""
 ssh.exe -n -T {opts_str} {target_uri} '{remote_cmd}'
 exit $LASTEXITCODE
-""".strip()
+"""
+    return _wrap_with_askpass_ps(core_ps, ssh_password, token_id)
 
 
 class SshHopExecutor:
@@ -88,6 +143,7 @@ class SshHopExecutor:
         bash_script: str,
         *,
         as_root: bool = False,
+        ssh_password: str = "",
         sudo_password: str = "",
         timeout_sec: float = 120.0,
     ) -> ExecResult:
@@ -95,6 +151,7 @@ class SshHopExecutor:
             node,
             bash_script,
             as_root=as_root,
+            ssh_password=ssh_password,
             sudo_password=sudo_password,
         )
         return self._exec_hop(hop_ps, timeout_sec)
@@ -105,30 +162,65 @@ class SshHopExecutor:
         local_path: Path,
         remote_path: str,
         *,
+        as_root: bool = False,
+        ssh_password: str = "",
+        sudo_password: str = "",
         timeout_sec: float = 900.0,
     ) -> str:
-        """Two-hop verified file delivery: Host -> Hop staging -> SCP -> TargetNode."""
+        """Two-hop verified file delivery: Host -> Hop staging -> SCP -> TargetNode (with optional sudo mv)."""
         stage_id = secrets.token_hex(6)
         hop_stage = f"C:\\Windows\\Temp\\egw_stage_{stage_id}_{local_path.name}"
         expected_sha = self._push_hop(local_path, hop_stage, timeout_sec)
 
-        scp_ps = f"""
+        scp_opts = _build_ssh_common_opts(
+            node, port_flag="-P", has_ssh_password=bool(ssh_password)
+        )
+        remote_tmp = (
+            f"/tmp/.egw_stage_{stage_id}"
+            if as_root
+            else f"{remote_path}.tmp_{stage_id}"
+        )
+
+        scp_core_ps = f"""
 $stage = '{hop_stage}'
 try {{
-    scp.exe -B -o StrictHostKeyChecking=no -P {node.port} $stage '{node.user}@{node.host}:{remote_path}.tmp_{stage_id}'
+    scp.exe {scp_opts} $stage '{node.user}@{node.host}:{remote_tmp}'
     if ($LASTEXITCODE -ne 0) {{ Write-Error 'SCP transfer to target node failed'; exit 1 }}
-    $verifyCmd = "sha=\\$(sha256sum '{remote_path}.tmp_{stage_id}' | awk '{{print tolower(\\$1)}}'); if [ \\"\\$sha\\" != '{expected_sha}' ]; then rm -f '{remote_path}.tmp_{stage_id}'; echo 'MISMATCH' >&2; exit 1; fi; mv -f '{remote_path}.tmp_{stage_id}' '{remote_path}'; echo 'VERIFIED:'\\$sha"
-    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($verifyCmd))
-    ssh.exe -n -o BatchMode=yes -o StrictHostKeyChecking=no -p {node.port} '{node.user}@{node.host}' "echo $b64 | base64 -d | bash"
-    exit $LASTEXITCODE
 }} finally {{
     Remove-Item $stage -Force -ErrorAction SilentlyContinue
 }}
 """
-        res = self._exec_hop(scp_ps, timeout_sec)
-        if res.exit_code != 0 or f"VERIFIED:{expected_sha}" not in res.stdout:
+        scp_ps = _wrap_with_askpass_ps(scp_core_ps, ssh_password, stage_id)
+        scp_res = self._exec_hop(scp_ps, timeout_sec)
+        if scp_res.exit_code != 0:
             raise RuntimeError(
-                f"TargetNode transfer failed for {node.name}:{remote_path}: {res.stderr or res.stdout}"
+                f"TargetNode SCP stage failed for {node.name}:{remote_path}: {scp_res.stderr or scp_res.stdout}"
+            )
+
+        verify_and_move_sh = f"""
+set -e
+sha=$(sha256sum '{remote_tmp}' | awk '{{print tolower($1)}}')
+if [ "$sha" != '{expected_sha}' ]; then
+    rm -f '{remote_tmp}'
+    echo "MISMATCH:$sha" >&2
+    exit 1
+fi
+mkdir -p "$(dirname '{remote_path}')"
+mv -f '{remote_tmp}' '{remote_path}'
+echo "VERIFIED:$sha"
+""".strip()
+
+        verify_res = self.exec_node(
+            node,
+            verify_and_move_sh,
+            as_root=as_root,
+            ssh_password=ssh_password,
+            sudo_password=sudo_password,
+            timeout_sec=120.0,
+        )
+        if verify_res.exit_code != 0 or f"VERIFIED:{expected_sha}" not in verify_res.stdout:
+            raise RuntimeError(
+                f"TargetNode verification/move failed for {node.name}:{remote_path}: {verify_res.stderr or verify_res.stdout}"
             )
         return expected_sha
 
@@ -138,23 +230,107 @@ try {{
         remote_path: str,
         local_path: Path,
         *,
+        as_root: bool = False,
+        ssh_password: str = "",
+        sudo_password: str = "",
         timeout_sec: float = 600.0,
     ) -> str:
-        """Two-hop verified file retrieval: TargetNode -> SCP -> Hop staging -> Host."""
+        """Two-hop verified file retrieval: TargetNode -> SCP -> Hop staging -> Host (with optional sudo staging)."""
         stage_id = secrets.token_hex(6)
         hop_stage = f"C:\\Windows\\Temp\\egw_pull_{stage_id}_{local_path.name}"
-        scp_ps = f"""
-scp.exe -B -o StrictHostKeyChecking=no -P {node.port} '{node.user}@{node.host}:{remote_path}' '{hop_stage}'
+        remote_src = f"/tmp/.egw_pull_{stage_id}" if as_root else remote_path
+
+        if as_root:
+            prep_sh = f"""
+set -e
+cp -f '{remote_path}' '{remote_src}'
+chown '{node.user}' '{remote_src}'
+chmod 600 '{remote_src}'
+""".strip()
+            prep_res = self.exec_node(
+                node,
+                prep_sh,
+                as_root=True,
+                ssh_password=ssh_password,
+                sudo_password=sudo_password,
+                timeout_sec=60.0,
+            )
+            if prep_res.exit_code != 0:
+                raise RuntimeError(
+                    f"Failed to stage root-owned file {node.name}:{remote_path}: {prep_res.stderr or prep_res.stdout}"
+                )
+
+        scp_opts = _build_ssh_common_opts(
+            node, port_flag="-P", has_ssh_password=bool(ssh_password)
+        )
+        scp_core_ps = f"""
+scp.exe {scp_opts} '{node.user}@{node.host}:{remote_src}' '{hop_stage}'
 if ($LASTEXITCODE -ne 0) {{ Write-Error 'SCP pull from target node failed'; exit 1 }}
 """
-        res = self._exec_hop(scp_ps, timeout_sec)
-        if res.exit_code != 0:
-            raise RuntimeError(
-                f"Failed to pull {node.name}:{remote_path} to hop host: {res.stderr}"
-            )
+        scp_ps = _wrap_with_askpass_ps(scp_core_ps, ssh_password, stage_id)
         try:
+            res = self._exec_hop(scp_ps, timeout_sec)
+            if res.exit_code != 0:
+                raise RuntimeError(
+                    f"Failed to pull {node.name}:{remote_path} to hop host: {res.stderr or res.stdout}"
+                )
             return self._pull_hop(hop_stage, local_path, timeout_sec)
         finally:
             self._exec_hop(
                 f"Remove-Item '{hop_stage}' -Force -ErrorAction SilentlyContinue", 30.0
             )
+            if as_root:
+                self.exec_node(
+                    node,
+                    f"rm -f '{remote_src}'",
+                    as_root=True,
+                    ssh_password=ssh_password,
+                    sudo_password=sudo_password,
+                    timeout_sec=30.0,
+                )
+
+    def bootstrap_ssh_key(
+        self,
+        node: TargetNodeSpec,
+        *,
+        ssh_password: str = "",
+        timeout_sec: float = 60.0,
+    ) -> ExecResult:
+        """Ensure an ed25519 keypair exists on the hop host and install its public key onto TargetNode."""
+        gen_ps = """
+$sshDir = Join-Path $env:USERPROFILE '.ssh'
+if (-not (Test-Path $sshDir)) { New-Item -ItemType Directory -Force -Path $sshDir | Out-Null }
+$keyPath = Join-Path $sshDir 'id_ed25519'
+$pubPath = "$keyPath.pub"
+if (-not (Test-Path $pubPath)) {
+    ssh-keygen.exe -t ed25519 -N '""' -f $keyPath | Out-Null
+}
+(Get-Content $pubPath -Raw -Encoding UTF8).Trim()
+"""
+        pub_res = self._exec_hop(gen_ps, 30.0)
+        if pub_res.exit_code != 0 or not pub_res.stdout.strip():
+            return ExecResult(
+                exit_code=1,
+                stdout="",
+                stderr=f"Failed to read or generate hop SSH public key: {pub_res.stderr}",
+                duration_ms=pub_res.duration_ms,
+            )
+        pub_key = pub_res.stdout.strip().splitlines()[-1].strip()
+        pub_b64 = base64.b64encode(pub_key.encode("utf-8")).decode("ascii")
+        install_sh = f"""
+set -e
+mkdir -p ~/.ssh
+chmod 700 ~/.ssh
+touch ~/.ssh/authorized_keys
+chmod 600 ~/.ssh/authorized_keys
+PUB=$(echo '{pub_b64}' | base64 -d)
+grep -qxF "$PUB" ~/.ssh/authorized_keys || echo "$PUB" >> ~/.ssh/authorized_keys
+echo "SSH_KEY_INSTALLED"
+""".strip()
+        return self.exec_node(
+            node,
+            install_sh,
+            as_root=False,
+            ssh_password=ssh_password,
+            timeout_sec=timeout_sec,
+        )

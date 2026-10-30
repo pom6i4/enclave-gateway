@@ -261,6 +261,8 @@ drivestoredirect:s:C:;
 redirectdrives:i:1
 redirectclipboard:i:1
 autoreconnection enabled:i:1
+bitmapcachepersistenable:i:0
+compression:i:1
 authentication level:i:0
 "@
 [IO.File]::WriteAllText($RdpFile, $RdpContent, [Text.Encoding]::ASCII)

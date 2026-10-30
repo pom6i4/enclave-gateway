@@ -22,6 +22,26 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "enclave_doctor",
+        "description": "Run L1-L7 diagnostics across Host, Appliance clock skew, RDP UDP blackhole guard, VPN tunnel, Bastion VFS RTT, and optional TargetNode SSH.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "fix": {
+                    "type": "boolean",
+                    "description": "Automatically self-heal if clock skew, UDP policy, or Bastion session issues are detected.",
+                    "default": False,
+                },
+                "probe_targets": {
+                    "type": "boolean",
+                    "description": "Also probe SSH reachability to configured TargetNodes.",
+                    "default": False,
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "enclave_heal",
         "description": "Heal Appliance MTU (1350), disable RDP-over-UDP, optionally refresh interactive session credentials, and reconnect the Bastion RDP session.",
         "inputSchema": {
@@ -92,6 +112,11 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "remote_path": {
                     "type": "string",
                     "description": "Destination or source path on the remote node.",
+                },
+                "as_root": {
+                    "type": "boolean",
+                    "description": "Stage via sudo on Linux TargetNode for root-owned paths.",
+                    "default": False,
                 },
                 "use_delta": {
                     "type": "boolean",
@@ -205,6 +230,18 @@ class McpJsonRpcServer:
             status_data = self.engine.status()
             return self._tool_result(req_id, json.dumps(status_data, indent=2))
 
+        if tool_name == "enclave_doctor":
+            diag_data = self.engine.doctor(
+                fix=bool(args.get("fix", False)),
+                probe_targets=bool(args.get("probe_targets", False)),
+                actor="mcp",
+            )
+            return self._tool_result(
+                req_id,
+                json.dumps(diag_data, indent=2),
+                is_error=not bool(diag_data.get("healthy", False)),
+            )
+
         if tool_name == "enclave_heal":
             res = self.engine.heal(
                 update_credentials=bool(args.get("update_credentials", False)),
@@ -229,6 +266,7 @@ class McpJsonRpcServer:
                 str(args["local_path"]),
                 str(args["node"]),
                 str(args["remote_path"]),
+                as_root=bool(args.get("as_root", False)),
                 use_delta=bool(args.get("use_delta", True)),
                 actor="mcp",
             )

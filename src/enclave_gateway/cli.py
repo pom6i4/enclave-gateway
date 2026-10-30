@@ -94,6 +94,21 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("down", help="Gracefully stop the Appliance VM via ACPI powerdown.")
     sub.add_parser("status", help="Display health telemetry across Appliance, VPN, Bastion, and Targets.")
 
+    p_doc = sub.add_parser(
+        "doctor",
+        help="Run end-to-end L1-L7 diagnostics (clock skew, MTU/UDP policy, VPN tunnel, Bastion VFS RTT, SSH).",
+    )
+    p_doc.add_argument(
+        "--fix",
+        action="store_true",
+        help="Automatically self-heal clock skew, MTU/UDP policy, or stale Bastion RDP session.",
+    )
+    p_doc.add_argument(
+        "--probe-targets",
+        action="store_true",
+        help="Also test SSH connectivity to all configured TargetNodes.",
+    )
+
     p_top = sub.add_parser(
         "top",
         help="Interactive TUI dashboard monitoring Host -> Appliance -> Bastion -> TargetNodes.",
@@ -153,10 +168,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_cp.add_argument("source", help="Source path or <node>:<remote_path>.")
     p_cp.add_argument("destination", help="Destination path or <node>:<remote_path>.")
     p_cp.add_argument(
+        "--sudo",
+        action="store_true",
+        help="Use sudo staging on Linux TargetNode for root-owned paths.",
+    )
+    p_cp.add_argument(
         "--no-delta",
         action="store_true",
         help="Disable 4 MB block-level SHA-256 delta synchronization.",
     )
+
+    p_key = sub.add_parser(
+        "ssh-copy-id",
+        help="Generate hop SSH keypair if missing and install public key onto a TargetNode.",
+    )
+    p_key.add_argument("node", help="TargetNode name from enclave.yaml.")
 
     p_tun = sub.add_parser(
         "tunnel",
@@ -261,6 +287,13 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(st, indent=2, ensure_ascii=False))
         return 0
 
+    if args.command == "doctor":
+        diag = engine.doctor(
+            fix=args.fix, probe_targets=args.probe_targets, actor="cli"
+        )
+        print(json.dumps(diag, indent=2, ensure_ascii=False))
+        return 0 if diag["healthy"] else 1
+
     if args.command == "top":
         return run_interactive_top(
             engine, interval_sec=args.interval, once=args.once
@@ -308,6 +341,7 @@ def main(argv: list[str] | None = None) -> int:
                 src_path,
                 dst_node,
                 dst_path,
+                as_root=args.sudo,
                 use_delta=not args.no_delta,
                 actor="cli",
             )
@@ -317,6 +351,7 @@ def main(argv: list[str] | None = None) -> int:
                 dst_path,
                 src_node,
                 src_path,
+                as_root=args.sudo,
                 use_delta=not args.no_delta,
                 actor="cli",
             )
@@ -328,6 +363,14 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(json.dumps(meta, indent=2, ensure_ascii=False))
         return 0
+
+    if args.command == "ssh-copy-id":
+        res = engine.bootstrap_ssh_key(args.node, actor="cli")
+        if res.stdout:
+            print(res.stdout)
+        if res.stderr:
+            print(res.stderr, file=sys.stderr)
+        return res.exit_code
 
     if args.command == "tunnel":
         parts = args.spec.split(":")

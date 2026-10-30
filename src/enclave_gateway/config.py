@@ -62,6 +62,8 @@ class ProviderSpec:
     adapter_name: str = "Infotecs"
     probe_host: str = "10.0.1.10"
     probe_port: int = 3389
+    routes: list[str] = field(default_factory=list)
+    dns_servers: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -88,6 +90,7 @@ class TargetNodeSpec:
     port: int = 22
     user: str = "root"
     via: str = "bastion"
+    password_env: str = ""
     sudo_password_env: str = ""
     ssh_key_path: str = ""
 
@@ -116,6 +119,7 @@ class EnclaveConfig:
                     port=int(t_cfg.get("port", 22)),
                     user=str(t_cfg.get("user", "root")),
                     via=str(t_cfg.get("via", "bastion")),
+                    password_env=str(t_cfg.get("password_env", "")),
                     sudo_password_env=str(t_cfg.get("sudo_password_env", "")),
                     ssh_key_path=str(t_cfg.get("ssh_key_path", "")),
                 )

@@ -51,14 +51,14 @@
   <!-- Card 1.1: CLI -->
   <rect x="40" y="106" width="242" height="82" rx="3" fill="#FAFAFA" stroke="#D4D4D8" stroke-width="1"/>
   <text x="54" y="125" class="font-sans card-title">CLI Orchestrator (egw)</text>
-  <text x="54" y="145" class="font-mono card-code">init | up | down | status | top</text>
-  <text x="54" y="163" class="font-mono card-code">exec | cp | tunnel | socks5 | heal</text>
+  <text x="54" y="145" class="font-mono card-code">init | up | status | doctor | top</text>
+  <text x="54" y="163" class="font-mono card-code">exec | cp --sudo | tunnel | socks5</text>
   <text x="54" y="179" class="font-sans card-line">Unified multi-tier command router</text>
 
   <!-- Card 1.2: MCP Server -->
   <rect x="299" y="106" width="242" height="82" rx="3" fill="#FAFAFA" stroke="#D4D4D8" stroke-width="1"/>
   <text x="313" y="125" class="font-sans card-title">MCP Server (JSON-RPC 2.0)</text>
-  <text x="313" y="145" class="font-mono card-code">enclave_status | enclave_heal</text>
+  <text x="313" y="145" class="font-mono card-code">enclave_status | enclave_doctor</text>
   <text x="313" y="163" class="font-mono card-code">node_exec | node_transfer | db</text>
   <text x="313" y="179" class="font-sans card-line">Zero-dependency stdio protocol</text>
 
@@ -98,10 +98,10 @@
 
   <!-- Card 2.2: Network & PMTUD Fix -->
   <rect x="299" y="298" width="242" height="86" rx="3" fill="#FAFAFA" stroke="#D4D4D8" stroke-width="1"/>
-  <text x="313" y="317" class="font-sans card-title">PMTUD &amp; RDP Policy Guard</text>
-  <text x="313" y="337" class="font-mono card-code">Persistent MTU = 1350 (Infotecs)</text>
-  <text x="313" y="355" class="font-mono card-code">fClientDisableUDP = 1 (Registry)</text>
-  <text x="313" y="372" class="font-sans card-line">Eliminates 60s UDP frame drops</text>
+  <text x="313" y="317" class="font-sans card-title">PMTUD, Clock &amp; RDP Guard</text>
+  <text x="313" y="337" class="font-mono card-code">MTU = 1350 + fClientDisableUDP = 1</text>
+  <text x="313" y="355" class="font-mono card-code">guest-set-time (Anti-NLA Skew)</text>
+  <text x="313" y="372" class="font-sans card-line">Fixes 60s drops &amp; snapshot drift</text>
 
   <!-- Card 2.3: Session Supervisor -->
   <rect x="558" y="298" width="242" height="86" rx="3" fill="#FAFAFA" stroke="#D4D4D8" stroke-width="1"/>
@@ -134,8 +134,8 @@
   <rect x="40" y="500" width="242" height="86" rx="3" fill="#FAFAFA" stroke="#D4D4D8" stroke-width="1"/>
   <text x="54" y="519" class="font-sans card-title">RdpVfsTransport IPC</text>
   <text x="54" y="539" class="font-mono card-code">req_&lt;id&gt;.json ↔ res_&lt;id&gt;.json</text>
-  <text x="54" y="557" class="font-mono card-code">&amp; ([scriptblock]::Create(...))</text>
-  <text x="54" y="574" class="font-sans card-line">~200ms latency, zero child procs</text>
+  <text x="54" y="557" class="font-mono card-code">SetThreadExecutionState KeepAlive</text>
+  <text x="54" y="574" class="font-sans card-line">~200ms latency, prevents idle lock</text>
 
   <!-- Card 3.2: Parallel Striped I/O -->
   <rect x="299" y="500" width="242" height="86" rx="3" fill="#FAFAFA" stroke="#D4D4D8" stroke-width="1"/>
@@ -156,7 +156,7 @@
   <!-- ===================================================================== -->
   <line x1="220" y1="598" x2="220" y2="656" stroke="#52525B" stroke-width="1.5" marker-start="url(#arrow-mono-l)" marker-end="url(#arrow-mono-l)"/>
   <rect x="40" y="615" width="360" height="24" rx="3" fill="#FFFFFF" stroke="#A1A1AA" stroke-width="1"/>
-  <text x="220" y="631" text-anchor="middle" class="font-mono pill-text">OpenSSH / SCP (Base64 + CR-strip + sudo -S)</text>
+  <text x="220" y="631" text-anchor="middle" class="font-mono pill-text">OpenSSH / SCP (Base64 + ASKPASS + sudo -S)</text>
 
   <line x1="620" y1="598" x2="620" y2="656" stroke="#52525B" stroke-width="1.5" marker-start="url(#arrow-mono-l)" marker-end="url(#arrow-mono-l)"/>
   <rect x="440" y="615" width="360" height="24" rx="3" fill="#FFFFFF" stroke="#A1A1AA" stroke-width="1"/>
