@@ -1,0 +1,58 @@
+# Local agent/IDE directories (never committed)
+.agents/
+.cursor/
+.claude/
+.gemini/
+.windsurf/
+.idea/
+.vscode/
+
+# Secrets, keys, and local environment
+.env
+.env.*
+!.env.example
+secrets/
+vendor/
+*.dst
+*.pem
+*.key
+*.pfx
+*.p12
+*.rdp
+*.msi
+*.exe
+*.iso
+*.lzh
+
+# Virtual machine images and runtime sockets
+*.qcow2
+*.fd
+*.img
+*.vmdk
+*.Vhdx
+*.pid
+*.sock
+*.lock
+.enclave-runtime/
+
+# Python build & test artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.installed.cfg
+*.egg
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# OS metadata
+.DS_Store
+._*
+Thumbs.db

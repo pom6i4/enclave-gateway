@@ -1,0 +1,58 @@
+# Enclave Gateway Topology Configuration
+# Copy this file to enclave.yaml and adjust hostnames/ports for your environment.
+
+profile: default
+
+appliance:
+  name: enclave-appliance
+  hypervisor: auto                      # auto | hvf (macOS) | kvm (Linux) | whpx (Windows) | direct (Windows host)
+  arch: auto                            # auto | arm64 | x86_64
+  cpus: 4
+  memory_mb: 4096
+  disk_path: ~/.local/share/enclave-gateway/disk.qcow2
+  efi_vars_path: ~/.local/share/enclave-gateway/efi_vars.fd
+  golden_snapshot: golden_ready
+  mtu: 1350                             # Prevents PMTUD blackholes over WinTun / IPsec tunnels
+  socks5_port: 1080                     # Local SOCKS5 listener on 127.0.0.1
+  rdp_forward_port: 13389               # Local forwarded port to Bastion RDP (127.0.0.1:13389)
+  vnc_display: 1                        # Local VNC display for Appliance console (127.0.0.1:5901)
+
+provider:
+  type: vipnet                          # vipnet | custom
+  binary_path: 'C:\Program Files\Mobile\bin\vipnetclient.exe'
+  installer_path: ./vendor/ViPNet_Client.msi
+  dst_key_path: ./secrets/client.dst
+  dst_password_env: ENCLAVE_VPN_KEY_PASSWORD
+  adapter_name: Infotecs
+  probe_host: 10.0.1.10
+  probe_port: 3389
+
+bastion:
+  enabled: true
+  host: 10.0.1.10
+  port: 3389
+  domain_env: ENCLAVE_BASTION_DOMAIN
+  user_env: ENCLAVE_BASTION_USER
+  password_env: ENCLAVE_BASTION_PASSWORD
+  transport: rdp_vfs                    # rdp_vfs ([MS-RDPEFS] \\tsclient\C) | direct_ssh
+  appliance_spool_dir: 'C:\EnclaveGateway\spool'
+  bastion_spool_dir: '\\tsclient\C\EnclaveGateway\spool'
+  parallel_streams: 4
+  compress: true
+  block_size_bytes: 4194304
+
+targets:
+  app01:
+    host: 10.0.20.11
+    port: 22
+    user: deploy
+    via: bastion                        # bastion (via Bastion OpenSSH) | appliance (direct from Appliance)
+    sudo_password_env: ENCLAVE_APP01_SUDO_PASSWORD
+    ssh_key_path: '~/.ssh/id_ed25519'
+
+  auth01:
+    host: 10.0.20.12
+    port: 22
+    user: admin
+    via: bastion
+    sudo_password_env: ENCLAVE_AUTH01_SUDO_PASSWORD
