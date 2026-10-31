@@ -153,12 +153,116 @@ try {
                 foreach ($reqItem in $reqFiles) {
                     $sw = [Diagnostics.Stopwatch]::StartNew()
                     $rawJson = Get-Content $reqItem.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-                    Remove-Item $reqItem.FullName -Force -ErrorAction SilentlyContinue
-                    if (-not $rawJson) { continue }
+                    if (-not $rawJson) {
+                        if (((Get-Date) - $reqItem.LastWriteTime).TotalSeconds -gt 10) {
+                            Remove-Item $reqItem.FullName -Force -ErrorAction SilentlyContinue
+                        }
+                        continue
+                    }
 
-                    $envObj = ConvertFrom-Json $rawJson
-                    $txId = $envObj.tx_id
+                    $envObj = $null
+                    try {
+                        $envObj = ConvertFrom-Json $rawJson -ErrorAction Stop
+                    } catch {
+                        if (((Get-Date) - $reqItem.LastWriteTime).TotalSeconds -gt 10) {
+                            Remove-Item $reqItem.FullName -Force -ErrorAction SilentlyContinue
+                        }
+                        continue
+                    }
+                    Remove-Item $reqItem.FullName -Force -ErrorAction SilentlyContinue
+
+                    $txId = [string]$envObj.tx_id
                     $opType = if ($envObj.op) { [string]$envObj.op } else { "exec" }
+
+                    # Native fast-path for stateful TCP/SOCKS5 multiplexer (zero ScriptBlock compilation overhead)
+                    if ($envObj.mux_action) {
+                        $muxAction = [string]$envObj.mux_action
+                        $connId = [string]$envObj.conn_id
+                        try {
+                            if ($muxAction -eq "open") {
+                                $tHost = [string]$envObj.target_host
+                                $tPort = [int]$envObj.target_port
+                                $tMs = if ($envObj.timeout_ms) { [int]$envObj.timeout_ms } else { 15000 }
+                                $client = New-Object System.Net.Sockets.TcpClient
+                                $client.NoDelay = $true
+                                $client.ReceiveTimeout = $tMs
+                                $client.SendTimeout = $tMs
+                                $client.Connect($tHost, $tPort)
+                                $Global:EnclaveMuxSockets[$connId] = @{
+                                    Client     = $client
+                                    Stream     = $client.GetStream()
+                                    Target     = "${tHost}:${tPort}"
+                                    LastActive = (Get-Date)
+                                }
+                                $sw.Stop()
+                                Write-EnclaveResponse -Spool $SpoolDir -TxId $txId -ExitCode 0 -StdoutStr "MUX_OPEN_OK:$connId" -StderrStr "" -DurationMs ([int]$sw.ElapsedMilliseconds)
+                                continue
+                            } elseif ($muxAction -eq "io") {
+                                if (-not $Global:EnclaveMuxSockets.ContainsKey($connId)) {
+                                    $sw.Stop()
+                                    Write-EnclaveResponse -Spool $SpoolDir -TxId $txId -ExitCode 0 -StdoutStr "MUX_EOF:" -StderrStr "" -DurationMs ([int]$sw.ElapsedMilliseconds)
+                                    continue
+                                }
+                                $entry = $Global:EnclaveMuxSockets[$connId]
+                                $client = $entry.Client
+                                $stream = $entry.Stream
+                                $entry.LastActive = (Get-Date)
+                                $txB64 = [string]$envObj.tx_b64
+                                if ($txB64) {
+                                    $txBytes = [Convert]::FromBase64String($txB64)
+                                    $stream.Write($txBytes, 0, $txBytes.Length)
+                                    $stream.Flush()
+                                }
+                                $maxRead = if ($envObj.max_read_bytes) { [int]$envObj.max_read_bytes } else { 65536 }
+                                $waitMs = if ($null -ne $envObj.read_wait_ms) { [int]$envObj.read_wait_ms } else { 100 }
+                                $ms = New-Object System.IO.MemoryStream
+                                $buf = New-Object byte[] $maxRead
+                                $eof = $false
+                                $waited = 0
+                                while (-not $stream.DataAvailable -and $waited -lt $waitMs) {
+                                    if ($client.Client.Poll(1000, [System.Net.Sockets.SelectMode]::SelectRead) -and $client.Client.Available -eq 0) {
+                                        $eof = $true
+                                        break
+                                    }
+                                    Start-Sleep -Milliseconds 15
+                                    $waited += 15
+                                }
+                                while ($stream.DataAvailable -and $ms.Length -lt $maxRead) {
+                                    $toRead = [Math]::Min($buf.Length, $maxRead - [int]$ms.Length)
+                                    $r = $stream.Read($buf, 0, $toRead)
+                                    if ($r -le 0) { $eof = $true; break }
+                                    $ms.Write($buf, 0, $r)
+                                }
+                                if (-not $eof -and $client.Client.Poll(0, [System.Net.Sockets.SelectMode]::SelectRead) -and $client.Client.Available -eq 0) {
+                                    $eof = $true
+                                }
+                                $rxB64 = [Convert]::ToBase64String($ms.ToArray())
+                                $outLine = if ($eof) {
+                                    try { $client.Close() } catch {}
+                                    $Global:EnclaveMuxSockets.Remove($connId)
+                                    "MUX_EOF:$rxB64"
+                                } else {
+                                    "MUX_DATA:$rxB64"
+                                }
+                                $sw.Stop()
+                                Write-EnclaveResponse -Spool $SpoolDir -TxId $txId -ExitCode 0 -StdoutStr $outLine -StderrStr "" -DurationMs ([int]$sw.ElapsedMilliseconds)
+                                continue
+                            } elseif ($muxAction -eq "close") {
+                                if ($Global:EnclaveMuxSockets.ContainsKey($connId)) {
+                                    try { $Global:EnclaveMuxSockets[$connId].Client.Close() } catch {}
+                                    $Global:EnclaveMuxSockets.Remove($connId)
+                                }
+                                $sw.Stop()
+                                Write-EnclaveResponse -Spool $SpoolDir -TxId $txId -ExitCode 0 -StdoutStr "MUX_CLOSED" -StderrStr "" -DurationMs ([int]$sw.ElapsedMilliseconds)
+                                continue
+                            }
+                        } catch {
+                            $sw.Stop()
+                            Write-EnclaveResponse -Spool $SpoolDir -TxId $txId -ExitCode 1 -StdoutStr "" -StderrStr ($_ | Out-String) -DurationMs ([int]$sw.ElapsedMilliseconds)
+                            continue
+                        }
+                    }
+
                     $scriptText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($envObj.payload_b64))
 
                     $needsMainRunspace = ($opType -eq "mux") -or ($scriptText -match '\$Global:EnclaveMuxSockets|\$Global:EnclaveRunspacePool')

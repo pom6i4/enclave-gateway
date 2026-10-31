@@ -936,25 +936,42 @@ Write-Output 'APPLIANCE_CLEAN_OK'
         confirm_destructive: bool = False,
         actor: str = "cli",
     ) -> ExecResult:
-        """Execute a SQL query inside a container on a TargetNode without quote-escaping hazards."""
+        """Execute a SQL query on a TargetNode (either directly or inside a container) without CLI password exposure."""
         verify_command_safety(query, confirm_destructive=confirm_destructive)
         sql_b64 = base64.b64encode(query.encode("utf-8")).decode("ascii")
-        db_pw = self.vault.get(db_password_env) if db_password_env else ""
+        sec_env = {"EGW_DB_PWD": db_password_env} if db_password_env else None
 
-        if engine.lower() in ("mysql", "mariadb"):
-            pw_part = f"-p{shlex.quote(db_pw)}" if db_pw else '-p"$MYSQL_ROOT_PASSWORD"'
+        eng = engine.lower()
+        if eng in ("mysql", "mariadb"):
             db_part = shlex.quote(database) if database else ""
-            script = (
-                f"echo '{sql_b64}' | base64 -d | "
-                f"docker exec -i {shlex.quote(container)} sh -c "
-                f"'mysql -u{shlex.quote(db_user)} {pw_part} {db_part}'"
-            )
-        elif engine.lower() in ("postgres", "postgresql", "psql"):
+            if container:
+                env_flag = '-e MYSQL_PWD="$EGW_DB_PWD"' if db_password_env else ""
+                fallback_pw = "" if db_password_env else '-p"$MYSQL_ROOT_PASSWORD"'
+                script = (
+                    f"echo '{sql_b64}' | base64 -d | "
+                    f"docker exec -i {env_flag} {shlex.quote(container)} sh -c "
+                    f"'mysql -u{shlex.quote(db_user)} {fallback_pw} {db_part}'"
+                )
+            else:
+                env_prefix = 'MYSQL_PWD="$EGW_DB_PWD" ' if db_password_env else ""
+                script = (
+                    f"echo '{sql_b64}' | base64 -d | "
+                    f"{env_prefix}mysql -u{shlex.quote(db_user)} {db_part}"
+                )
+        elif eng in ("postgres", "postgresql", "psql"):
             db_part = f"-d {shlex.quote(database)}" if database else ""
-            script = (
-                f"echo '{sql_b64}' | base64 -d | "
-                f"docker exec -i {shlex.quote(container)} psql -U {shlex.quote(db_user)} {db_part}"
-            )
+            if container:
+                env_flag = '-e PGPASSWORD="$EGW_DB_PWD"' if db_password_env else ""
+                script = (
+                    f"echo '{sql_b64}' | base64 -d | "
+                    f"docker exec -i {env_flag} {shlex.quote(container)} psql -U {shlex.quote(db_user)} {db_part}"
+                )
+            else:
+                env_prefix = 'PGPASSWORD="$EGW_DB_PWD" ' if db_password_env else ""
+                script = (
+                    f"echo '{sql_b64}' | base64 -d | "
+                    f"{env_prefix}psql -U {shlex.quote(db_user)} {db_part}"
+                )
         else:
             raise ValueError(f"Unsupported database engine: {engine}")
 
@@ -963,6 +980,7 @@ Write-Output 'APPLIANCE_CLEAN_OK'
             script,
             as_root=as_root,
             confirm_destructive=confirm_destructive,
+            secret_env=sec_env,
             actor=actor,
         )
 

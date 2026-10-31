@@ -203,12 +203,16 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     },
     {
         "name": "node_db_query",
-        "description": "Execute a SQL statement inside a database container (mysql/postgres) on a TargetNode without shell-quoting hazards.",
+        "description": "Execute a SQL statement on a TargetNode (either directly on the host or inside a Docker container) without CLI password exposure.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "node": {"type": "string", "description": "TargetNode name."},
-                "container": {"type": "string", "description": "Docker container name."},
+                "container": {
+                    "type": "string",
+                    "description": "Optional Docker container name. Leave empty to run psql/mysql directly on the TargetNode.",
+                    "default": "",
+                },
                 "engine": {
                     "type": "string",
                     "enum": ["mysql", "mariadb", "postgres", "postgresql"],
@@ -220,7 +224,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "db_password_env": {"type": "string", "default": ""},
                 "confirm_destructive": {"type": "boolean", "default": False},
             },
-            "required": ["node", "container", "engine", "query"],
+            "required": ["node", "engine", "query"],
             "additionalProperties": False,
         },
     },
@@ -375,7 +379,7 @@ class McpJsonRpcServer:
         if tool_name == "node_db_query":
             res = self.engine.query_database(
                 str(args["node"]),
-                str(args["container"]),
+                str(args.get("container", "")),
                 str(args["engine"]),
                 str(args["query"]),
                 database=str(args.get("database", "")),

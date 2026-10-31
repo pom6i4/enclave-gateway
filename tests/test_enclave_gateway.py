@@ -892,6 +892,26 @@ targets:
             self.assertIn("-RdpPasswordB64", control.last_script)
             self.assertNotIn("BastionPass#2026", control.last_script)
 
+            # 5. Verify query_database with container="" (host-direct) and env-based password (PGPASSWORD / MYSQL_PWD)
+            db_res = engine.query_database(
+                "app01",
+                "",
+                "postgres",
+                "SELECT 1;",
+                database="enclave_db",
+                db_user="postgres",
+                db_password_env="ENCLAVE_BASTION_PASSWORD",
+            )
+            self.assertEqual(db_res.exit_code, 0)
+            self.assertIn("PGPASSWORD=", db_res.stdout)
+            self.assertNotIn("BastionPass#2026", db_res.stdout)
+
+            # 6. Verify structured mux_action over Direct Spool File IPC
+            cid = engine.rdp_vfs.mux_open("10.0.20.11", 5432)
+            rx, eof = engine.rdp_vfs.mux_io(cid, b"FAST_MUX")
+            self.assertTrue(eof)
+            self.assertEqual(rx, b"MUX_ECHO[10.0.20.11:5432]:FAST_MUX")
+
 
 if __name__ == "__main__":
     unittest.main()

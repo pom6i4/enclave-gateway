@@ -8,6 +8,7 @@ import os
 import random
 import socket
 import subprocess
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -45,7 +46,7 @@ class ControlChannel(Protocol):
 @contextmanager
 def _file_lock(lock_path: Path) -> Iterator[None]:
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fp = lock_path.open("w")
+    fp = lock_path.open("a+")
     try:
         if fcntl is not None:
             fcntl.flock(fp, fcntl.LOCK_EX)
@@ -76,10 +77,11 @@ class QgaClient:
             Path(lock_path) if lock_path else Path(f"{self.socket_path}.lock")
         )
         self.supports_direct_spool_ipc = direct_spool_ipc
+        self._thread_lock = threading.RLock()
 
     @contextmanager
     def _connect_synced(self, timeout_sec: float = 30.0) -> Iterator[tuple[socket.socket, object]]:
-        with _file_lock(self.lock_path):
+        with self._thread_lock, _file_lock(self.lock_path):
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             sock.settimeout(timeout_sec)
             try:
@@ -127,11 +129,12 @@ class QgaClient:
                 raise RuntimeError(f"Unexpected QGA guest-exec response: {resp}")
             pid = resp["return"]["pid"]
 
-            deadline = time.monotonic() + timeout_sec
-            poll_delay = 0.015
-            while time.monotonic() < deadline:
-                time.sleep(poll_delay)
-                poll_delay = min(0.15, poll_delay * 1.6)
+        deadline = time.monotonic() + timeout_sec
+        poll_delay = 0.015
+        while time.monotonic() < deadline:
+            time.sleep(poll_delay)
+            poll_delay = min(0.15, poll_delay * 1.6)
+            with self._connect_synced(timeout_sec=10.0) as (sock, reader):
                 status_req = json.dumps(
                     {"execute": "guest-exec-status", "arguments": {"pid": pid}}
                 )

@@ -257,16 +257,23 @@ class RdpVfsTransport:
         self.spec = spec
 
     def exec_bastion(
-        self, ps_script: str, timeout_sec: float = 120.0, *, op: str = "exec"
+        self,
+        ps_script: str,
+        timeout_sec: float = 120.0,
+        *,
+        op: str = "exec",
+        extra_fields: dict[str, Any] | None = None,
     ) -> ExecResult:
         """Dispatch a PowerShell script to BastionWorker via transactional JSON envelope."""
         tx_id = generate_tx_id()
-        envelope = {
+        envelope: dict[str, Any] = {
             "tx_id": tx_id,
             "op": op,
             "payload_b64": base64.b64encode(ps_script.encode("utf-8")).decode("ascii"),
             "timeout_ms": int(timeout_sec * 1000),
         }
+        if extra_fields:
+            envelope.update(extra_fields)
         return self._dispatch_envelope(envelope, timeout_sec=timeout_sec)
 
     def _dispatch_envelope(
@@ -575,7 +582,17 @@ $Global:EnclaveMuxSockets['{conn_id}'] = @{{
 }}
 Write-Output 'MUX_OPEN_OK:{conn_id}'
 """
-        res = self.exec_bastion(open_ps, timeout_sec=timeout_sec + 5.0, op="mux")
+        res = self.exec_bastion(
+            open_ps,
+            timeout_sec=timeout_sec + 5.0,
+            op="mux",
+            extra_fields={
+                "mux_action": "open",
+                "conn_id": conn_id,
+                "target_host": target_host,
+                "target_port": int(target_port),
+            },
+        )
         if res.exit_code != 0 or f"MUX_OPEN_OK:{conn_id}" not in res.stdout:
             raise ConnectionError(
                 f"Failed to open multiplexed TCP stream to {target_host}:{target_port}: {res.stderr or res.stdout}"
@@ -646,7 +663,18 @@ if ($eof) {{
     Write-Output "MUX_DATA:$rxB64"
 }}
 """
-        res = self.exec_bastion(io_ps, timeout_sec=timeout_sec, op="mux")
+        res = self.exec_bastion(
+            io_ps,
+            timeout_sec=timeout_sec,
+            op="mux",
+            extra_fields={
+                "mux_action": "io",
+                "conn_id": conn_id,
+                "tx_b64": b64_tx,
+                "max_read_bytes": int(max_read_bytes),
+                "read_wait_ms": int(read_wait_ms),
+            },
+        )
         if res.exit_code != 0:
             raise ConnectionError(
                 f"Multiplexed I/O error on {conn_id}: {res.stderr or res.stdout}"
@@ -669,7 +697,12 @@ if ($Global:EnclaveMuxSockets -and $Global:EnclaveMuxSockets.ContainsKey('{conn_
 }}
 Write-Output 'MUX_CLOSED'
 """
-        self.exec_bastion(close_ps, timeout_sec=timeout_sec, op="mux")
+        self.exec_bastion(
+            close_ps,
+            timeout_sec=timeout_sec,
+            op="mux",
+            extra_fields={"mux_action": "close", "conn_id": conn_id},
+        )
 
     def relay_tcp_exchange(
         self, target_host: str, target_port: int, payload: bytes, timeout_sec: float = 30.0
