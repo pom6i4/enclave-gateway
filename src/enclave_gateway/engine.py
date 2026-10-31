@@ -322,9 +322,7 @@ ConvertTo-Json $out -Compress
                 if as_root and target.sudo_password_env
                 else ""
             )
-            hop = (
-                self.bastion_ssh if target.via == "bastion" else self.appliance_ssh
-            )
+            hop, jump_node = self._resolve_hop_and_jump(target)
             raw_res = hop.exec_node(
                 target,
                 full_script,
@@ -332,6 +330,7 @@ ConvertTo-Json $out -Compress
                 ssh_password=ssh_pw,
                 sudo_password=sudo_pw,
                 timeout_sec=timeout_sec,
+                jump_node=jump_node,
             )
 
         clean_res = self._scrub_result(raw_res)
@@ -382,9 +381,7 @@ ConvertTo-Json $out -Compress
                     if as_root and target.sudo_password_env
                     else ""
                 )
-                hop = (
-                    self.bastion_ssh if target.via == "bastion" else self.appliance_ssh
-                )
+                hop, jump_node = self._resolve_hop_and_jump(target)
                 sha = hop.push_file_to_node(
                     target,
                     lpath,
@@ -393,6 +390,7 @@ ConvertTo-Json $out -Compress
                     ssh_password=ssh_pw,
                     sudo_password=sudo_pw,
                     timeout_sec=timeout_sec,
+                    jump_node=jump_node,
                 )
         elif direction == "pull":
             if node in ("@appliance", "appliance"):
@@ -409,9 +407,7 @@ ConvertTo-Json $out -Compress
                     if as_root and target.sudo_password_env
                     else ""
                 )
-                hop = (
-                    self.bastion_ssh if target.via == "bastion" else self.appliance_ssh
-                )
+                hop, jump_node = self._resolve_hop_and_jump(target)
                 sha = hop.pull_file_from_node(
                     target,
                     remote_path,
@@ -420,6 +416,7 @@ ConvertTo-Json $out -Compress
                     ssh_password=ssh_pw,
                     sudo_password=sudo_pw,
                     timeout_sec=timeout_sec,
+                    jump_node=jump_node,
                 )
         else:
             raise ValueError(f"Unsupported transfer direction '{direction}' (use 'push' or 'pull')")
@@ -493,11 +490,12 @@ ConvertTo-Json $out -Compress
                             files_synced += 1
 
                 archive_bytes = archive_path.stat().st_size
-                remote_stage = (
-                    f"%LOCALAPPDATA%\\EnclaveGateway\\stage\\egw_sync_{sync_id}.tar.gz"
-                    if is_windows_node
-                    else f"/tmp/.egw_sync_{sync_id}.tar.gz"
-                )
+                if node in ("@bastion", "bastion"):
+                    remote_stage = f"{self.config.bastion.bastion_spool_dir.rstrip(chr(92) + '/')}\\egw_sync_{sync_id}.tar.gz"
+                elif is_windows_node:
+                    remote_stage = f"%LOCALAPPDATA%\\EnclaveGateway\\stage\\egw_sync_{sync_id}.tar.gz"
+                else:
+                    remote_stage = f"/tmp/.egw_sync_{sync_id}.tar.gz"
                 tx_meta = self.transfer_file(
                     "push",
                     archive_path,
@@ -548,11 +546,12 @@ echo "SYNC_EXTRACT_OK"
                     )
 
             elif direction == "pull":
-                remote_stage = (
-                    f"%LOCALAPPDATA%\\EnclaveGateway\\stage\\egw_sync_pull_{sync_id}.tar.gz"
-                    if is_windows_node
-                    else f"/tmp/.egw_sync_pull_{sync_id}.tar.gz"
-                )
+                if node in ("@bastion", "bastion"):
+                    remote_stage = f"{self.config.bastion.bastion_spool_dir.rstrip(chr(92) + '/')}\\egw_sync_pull_{sync_id}.tar.gz"
+                elif is_windows_node:
+                    remote_stage = f"%LOCALAPPDATA%\\EnclaveGateway\\stage\\egw_sync_pull_{sync_id}.tar.gz"
+                else:
+                    remote_stage = f"/tmp/.egw_sync_pull_{sync_id}.tar.gz"
                 if is_windows_node:
                     pack_ps = f"""
 $src = [Environment]::ExpandEnvironmentVariables('{remote_dir}')
@@ -666,8 +665,10 @@ echo "SYNC_PACK_OK"
         tx_id = generate_tx_id()
         target = self._resolve_target(node)
         ssh_pw = self.vault.get(target.password_env) if target.password_env else ""
-        hop = self.bastion_ssh if target.via == "bastion" else self.appliance_ssh
-        raw_res = hop.bootstrap_ssh_key(target, ssh_password=ssh_pw)
+        hop, jump_node = self._resolve_hop_and_jump(target)
+        raw_res = hop.bootstrap_ssh_key(
+            target, ssh_password=ssh_pw, jump_node=jump_node
+        )
         clean_res = self._scrub_result(raw_res)
         self.recorder.record(
             tx_id=tx_id,
@@ -863,7 +864,15 @@ Write-Output 'APPLIANCE_CLEAN_OK'
                     f"    HostName {spec.host}",
                     f"    Port {spec.port}",
                     f"    User {spec.user}",
-                    f"    ProxyCommand egw{cfg_flag} stdio-proxy %h %p",
+                ]
+            )
+            if spec.via in self.config.targets and spec.via != name:
+                jump_alias = f"{prefix}{spec.via}" if prefix else spec.via
+                lines.append(f"    ProxyJump {jump_alias}")
+            else:
+                lines.append(f"    ProxyCommand egw{cfg_flag} stdio-proxy %h %p")
+            lines.extend(
+                [
                     "    StrictHostKeyChecking no",
                     "    UserKnownHostsFile /dev/null",
                 ]
@@ -894,6 +903,9 @@ Write-Output 'APPLIANCE_CLEAN_OK'
             "-p",
             str(target.port),
         ]
+        _, jump_node = self._resolve_hop_and_jump(target)
+        if jump_node is not None:
+            cmd.extend(["-J", f"{jump_node.user}@{jump_node.host}:{jump_node.port}"])
         if target.ssh_key_path:
             cmd.extend(["-i", target.ssh_key_path])
         cmd.append(f"{target.user}@{target.host}")
@@ -1019,3 +1031,21 @@ Write-Output 'APPLIANCE_CLEAN_OK'
                 f"Unknown TargetNode '{name}'. Configured targets: {available}"
             )
         return self.config.targets[name]
+
+    def _resolve_hop_and_jump(
+        self, target: TargetNodeSpec
+    ) -> tuple[SshHopExecutor, TargetNodeSpec | None]:
+        via = target.via.lstrip("@")
+        if via == "appliance":
+            return self.appliance_ssh, None
+        if via in ("bastion", ""):
+            return self.bastion_ssh, None
+        if via in self.config.targets and via != target.name:
+            jump_node = self.config.targets[via]
+            hop = (
+                self.appliance_ssh
+                if jump_node.via.lstrip("@") == "appliance"
+                else self.bastion_ssh
+            )
+            return hop, jump_node
+        return self.bastion_ssh, None

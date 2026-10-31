@@ -9,15 +9,19 @@ $ErrorActionPreference = "Continue"
 Set-PSReadLineOption -HistorySaveStyle SaveNothing -ErrorAction SilentlyContinue
 $startedAt = Get-Date
 $lastHeartbeat = [DateTime]::MinValue
+$lastActivity = Get-Date
+$isFullLang = ($ExecutionContext.SessionState.LanguageMode -eq "FullLanguage")
 
 if (-not $Global:EnclaveMuxSockets) {
-    $Global:EnclaveMuxSockets = [hashtable]::Synchronized(@{})
+    $Global:EnclaveMuxSockets = if ($isFullLang) { [hashtable]::Synchronized(@{}) } else { @{} }
 }
 
-if (-not $Global:EnclaveRunspacePool -or $Global:EnclaveRunspacePool.RunspacePoolStateInfo.State -ne "Opened") {
-    $maxStreams = [Math]::Max(1, $ParallelStreams)
-    $Global:EnclaveRunspacePool = [runspacefactory]::CreateRunspacePool(1, $maxStreams)
-    $Global:EnclaveRunspacePool.Open()
+if ($isFullLang -and (-not $Global:EnclaveRunspacePool -or $Global:EnclaveRunspacePool.RunspacePoolStateInfo.State -ne "Opened")) {
+    try {
+        $maxStreams = [Math]::Max(1, $ParallelStreams)
+        $Global:EnclaveRunspacePool = [runspacefactory]::CreateRunspacePool(1, $maxStreams)
+        $Global:EnclaveRunspacePool.Open()
+    } catch {}
 }
 
 # Clean up any orphaned temporary files from a previous interrupted session
@@ -27,7 +31,7 @@ if (Test-Path $SpoolDir) {
         Remove-Item -Force -ErrorAction SilentlyContinue
 }
 
-$activeTxJobs = New-Object System.Collections.Generic.List[object]
+$activeTxJobs = @()
 
 $asyncExecWorker = {
     param([string]$ScriptText)
@@ -40,13 +44,13 @@ $asyncExecWorker = {
         if ($LASTEXITCODE -ne $null -and $LASTEXITCODE -ne 0) {
             $exitCode = [int]$LASTEXITCODE
         }
-        $outLines = New-Object System.Collections.Generic.List[string]
-        $errLines = New-Object System.Collections.Generic.List[string]
+        $outLines = @()
+        $errLines = @()
         foreach ($item in $outputItems) {
             if ($item -is [System.Management.Automation.ErrorRecord]) {
-                $errLines.Add($item.ToString())
+                $errLines += $item.ToString()
             } elseif ($null -ne $item) {
-                $outLines.Add($item.ToString())
+                $outLines += $item.ToString()
             }
         }
         $stdoutStr = ($outLines -join "`n")
@@ -82,32 +86,41 @@ function Write-EnclaveResponse {
     $resJson = ConvertTo-Json $resObj -Compress
     $resTmp = Join-Path $Spool "res_${TxId}.tmp"
     $resPath = Join-Path $Spool "res_${TxId}.json"
-    [IO.File]::WriteAllText($resTmp, $resJson, [Text.Encoding]::UTF8)
+    if ($ExecutionContext.SessionState.LanguageMode -eq "FullLanguage") {
+        [IO.File]::WriteAllText($resTmp, $resJson, [Text.Encoding]::UTF8)
+    } else {
+        Set-Content -Path $resTmp -Value $resJson -Encoding UTF8 -NoNewline -Force
+    }
     Move-Item $resTmp $resPath -Force -ErrorAction SilentlyContinue
 }
 
-Write-Host "[BastionWorker] In-process RDP VFS agent started (PID $PID, Spool: $SpoolDir, ParallelStreams: $ParallelStreams)"
+Write-Host "[BastionWorker] In-process RDP VFS agent started (PID $PID, Spool: $SpoolDir, ParallelStreams: $ParallelStreams, Mode: $($ExecutionContext.SessionState.LanguageMode))"
 
 try {
     while ($true) {
         try {
             if (Test-Path $SpoolDir) {
                 # 1. Reap completed asynchronous RunspacePool transactions without blocking mux_io
-                for ($j = $activeTxJobs.Count - 1; $j -ge 0; $j--) {
-                    $job = $activeTxJobs[$j]
-                    if ($job.Handle.IsCompleted) {
-                        $job.Sw.Stop()
-                        try {
-                            $resCollection = $job.Pipe.EndInvoke($job.Handle)
-                            $resMap = $resCollection[0]
-                            Write-EnclaveResponse -Spool $SpoolDir -TxId $job.TxId -ExitCode $resMap.ExitCode -StdoutStr $resMap.StdoutStr -StderrStr $resMap.StderrStr -DurationMs ([int]$job.Sw.ElapsedMilliseconds)
-                        } catch {
-                            Write-EnclaveResponse -Spool $SpoolDir -TxId $job.TxId -ExitCode 1 -StdoutStr "" -StderrStr ($_ | Out-String) -DurationMs ([int]$job.Sw.ElapsedMilliseconds)
-                        } finally {
-                            $job.Pipe.Dispose()
-                            $activeTxJobs.RemoveAt($j)
+                if ($activeTxJobs.Count -gt 0) {
+                    $remainingJobs = @()
+                    foreach ($job in $activeTxJobs) {
+                        if ($job.Handle.IsCompleted) {
+                            $durMs = [int]((Get-Date) - $job.StartedAt).TotalMilliseconds
+                            try {
+                                $resCollection = $job.Pipe.EndInvoke($job.Handle)
+                                $resMap = $resCollection[0]
+                                Write-EnclaveResponse -Spool $SpoolDir -TxId $job.TxId -ExitCode $resMap.ExitCode -StdoutStr $resMap.StdoutStr -StderrStr $resMap.StderrStr -DurationMs $durMs
+                            } catch {
+                                Write-EnclaveResponse -Spool $SpoolDir -TxId $job.TxId -ExitCode 1 -StdoutStr "" -StderrStr ($_ | Out-String) -DurationMs $durMs
+                            } finally {
+                                $job.Pipe.Dispose()
+                            }
+                            $lastActivity = Get-Date
+                        } else {
+                            $remainingJobs += $job
                         }
                     }
+                    $activeTxJobs = $remainingJobs
                 }
 
                 $now = Get-Date
@@ -135,6 +148,7 @@ try {
                         pid                = $PID
                         user               = "$env:USERDOMAIN\$env:USERNAME"
                         hostname           = $env:COMPUTERNAME
+                        language_mode      = [string]$ExecutionContext.SessionState.LanguageMode
                         uptime_sec         = $uptimeSec
                         parallel_streams   = $ParallelStreams
                         active_mux_streams = $Global:EnclaveMuxSockets.Count
@@ -144,14 +158,18 @@ try {
                     $stateJson = ConvertTo-Json $stateObj -Compress
                     $stateTmp = Join-Path $SpoolDir "worker_state.tmp"
                     $statePath = Join-Path $SpoolDir "worker_state.json"
-                    [IO.File]::WriteAllText($stateTmp, $stateJson, [Text.Encoding]::UTF8)
+                    if ($isFullLang) {
+                        [IO.File]::WriteAllText($stateTmp, $stateJson, [Text.Encoding]::UTF8)
+                    } else {
+                        Set-Content -Path $stateTmp -Value $stateJson -Encoding UTF8 -NoNewline -Force
+                    }
                     Move-Item $stateTmp $statePath -Force -ErrorAction SilentlyContinue
                     $lastHeartbeat = $now
                 }
 
                 $reqFiles = Get-ChildItem -Path $SpoolDir -Filter "req_*.json" -ErrorAction SilentlyContinue | Sort-Object Name
                 foreach ($reqItem in $reqFiles) {
-                    $sw = [Diagnostics.Stopwatch]::StartNew()
+                    $startedTx = Get-Date
                     $rawJson = Get-Content $reqItem.FullName -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
                     if (-not $rawJson) {
                         if (((Get-Date) - $reqItem.LastWriteTime).TotalSeconds -gt 10) {
@@ -170,12 +188,13 @@ try {
                         continue
                     }
                     Remove-Item $reqItem.FullName -Force -ErrorAction SilentlyContinue
+                    $lastActivity = Get-Date
 
                     $txId = [string]$envObj.tx_id
                     $opType = if ($envObj.op) { [string]$envObj.op } else { "exec" }
 
                     # Native fast-path for stateful TCP/SOCKS5 multiplexer (zero ScriptBlock compilation overhead)
-                    if ($envObj.mux_action) {
+                    if ($isFullLang -and $envObj.mux_action) {
                         $muxAction = [string]$envObj.mux_action
                         $connId = [string]$envObj.conn_id
                         try {
@@ -194,13 +213,13 @@ try {
                                     Target     = "${tHost}:${tPort}"
                                     LastActive = (Get-Date)
                                 }
-                                $sw.Stop()
-                                Write-EnclaveResponse -Spool $SpoolDir -TxId $txId -ExitCode 0 -StdoutStr "MUX_OPEN_OK:$connId" -StderrStr "" -DurationMs ([int]$sw.ElapsedMilliseconds)
+                                $durMs = [int]((Get-Date) - $startedTx).TotalMilliseconds
+                                Write-EnclaveResponse -Spool $SpoolDir -TxId $txId -ExitCode 0 -StdoutStr "MUX_OPEN_OK:$connId" -StderrStr "" -DurationMs $durMs
                                 continue
                             } elseif ($muxAction -eq "io") {
                                 if (-not $Global:EnclaveMuxSockets.ContainsKey($connId)) {
-                                    $sw.Stop()
-                                    Write-EnclaveResponse -Spool $SpoolDir -TxId $txId -ExitCode 0 -StdoutStr "MUX_EOF:" -StderrStr "" -DurationMs ([int]$sw.ElapsedMilliseconds)
+                                    $durMs = [int]((Get-Date) - $startedTx).TotalMilliseconds
+                                    Write-EnclaveResponse -Spool $SpoolDir -TxId $txId -ExitCode 0 -StdoutStr "MUX_EOF:" -StderrStr "" -DurationMs $durMs
                                     continue
                                 }
                                 $entry = $Global:EnclaveMuxSockets[$connId]
@@ -244,21 +263,21 @@ try {
                                 } else {
                                     "MUX_DATA:$rxB64"
                                 }
-                                $sw.Stop()
-                                Write-EnclaveResponse -Spool $SpoolDir -TxId $txId -ExitCode 0 -StdoutStr $outLine -StderrStr "" -DurationMs ([int]$sw.ElapsedMilliseconds)
+                                $durMs = [int]((Get-Date) - $startedTx).TotalMilliseconds
+                                Write-EnclaveResponse -Spool $SpoolDir -TxId $txId -ExitCode 0 -StdoutStr $outLine -StderrStr "" -DurationMs $durMs
                                 continue
                             } elseif ($muxAction -eq "close") {
                                 if ($Global:EnclaveMuxSockets.ContainsKey($connId)) {
                                     try { $Global:EnclaveMuxSockets[$connId].Client.Close() } catch {}
                                     $Global:EnclaveMuxSockets.Remove($connId)
                                 }
-                                $sw.Stop()
-                                Write-EnclaveResponse -Spool $SpoolDir -TxId $txId -ExitCode 0 -StdoutStr "MUX_CLOSED" -StderrStr "" -DurationMs ([int]$sw.ElapsedMilliseconds)
+                                $durMs = [int]((Get-Date) - $startedTx).TotalMilliseconds
+                                Write-EnclaveResponse -Spool $SpoolDir -TxId $txId -ExitCode 0 -StdoutStr "MUX_CLOSED" -StderrStr "" -DurationMs $durMs
                                 continue
                             }
                         } catch {
-                            $sw.Stop()
-                            Write-EnclaveResponse -Spool $SpoolDir -TxId $txId -ExitCode 1 -StdoutStr "" -StderrStr ($_ | Out-String) -DurationMs ([int]$sw.ElapsedMilliseconds)
+                            $durMs = [int]((Get-Date) - $startedTx).TotalMilliseconds
+                            Write-EnclaveResponse -Spool $SpoolDir -TxId $txId -ExitCode 1 -StdoutStr "" -StderrStr ($_ | Out-String) -DurationMs $durMs
                             continue
                         }
                     }
@@ -266,35 +285,29 @@ try {
                     $scriptText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($envObj.payload_b64))
 
                     $needsMainRunspace = ($opType -eq "mux") -or ($scriptText -match '\$Global:EnclaveMuxSockets|\$Global:EnclaveRunspacePool')
-                    if (-not $needsMainRunspace -and $Global:EnclaveRunspacePool -and $Global:EnclaveRunspacePool.RunspacePoolStateInfo.State -eq "Opened") {
+                    if ($isFullLang -and -not $needsMainRunspace -and $Global:EnclaveRunspacePool -and $Global:EnclaveRunspacePool.RunspacePoolStateInfo.State -eq "Opened") {
                         $ps = [powershell]::Create()
                         $ps.RunspacePool = $Global:EnclaveRunspacePool
                         [void]$ps.AddScript($asyncExecWorker).AddArgument($scriptText)
-                        $activeTxJobs.Add(@{
-                            TxId   = $txId
-                            Pipe   = $ps
-                            Handle = $ps.BeginInvoke()
-                            Sw     = $sw
-                        })
+                        $activeTxJobs += @{
+                            TxId      = $txId
+                            Pipe      = $ps
+                            Handle    = $ps.BeginInvoke()
+                            StartedAt = $startedTx
+                        }
                         continue
                     }
 
                     $resMap = & $asyncExecWorker $scriptText
-                    $sw.Stop()
-                    Write-EnclaveResponse -Spool $SpoolDir -TxId $txId -ExitCode $resMap.ExitCode -StdoutStr $resMap.StdoutStr -StderrStr $resMap.StderrStr -DurationMs ([int]$sw.ElapsedMilliseconds)
+                    $durMs = [int]((Get-Date) - $startedTx).TotalMilliseconds
+                    Write-EnclaveResponse -Spool $SpoolDir -TxId $txId -ExitCode $resMap.ExitCode -StdoutStr $resMap.StdoutStr -StderrStr $resMap.StderrStr -DurationMs $durMs
                 }
 
-                # Event-driven FileSystemWatcher wait with short-poll fallback
-                if ($activeTxJobs.Count -gt 0) {
-                    Start-Sleep -Milliseconds 15
+                # Adaptive burst polling (10ms during active traffic or within 3s of activity; 120ms when idle)
+                if ($activeTxJobs.Count -gt 0 -or $Global:EnclaveMuxSockets.Count -gt 0 -or ((Get-Date) - $lastActivity).TotalSeconds -lt 3.0) {
+                    Start-Sleep -Milliseconds 10
                 } else {
-                    try {
-                        $fsw = New-Object System.IO.FileSystemWatcher($SpoolDir, "req_*.json")
-                        [void]$fsw.WaitForChanged([System.IO.WatcherChangeTypes]::Created -bor [System.IO.WatcherChangeTypes]::Renamed, $PollIntervalMs)
-                        $fsw.Dispose()
-                    } catch {
-                        Start-Sleep -Milliseconds 30
-                    }
+                    Start-Sleep -Milliseconds ([Math]::Min(120, $PollIntervalMs))
                 }
             } else {
                 Start-Sleep -Milliseconds $PollIntervalMs

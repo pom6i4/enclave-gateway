@@ -228,9 +228,9 @@ class LoopbackControlChannel:
             return f"SHA256:{sha}:CHUNKS:{num_chunks}"
 
         # 7. SSH hop execution with base64-encoded bash script
-        m_b64_sh = re.search(r"echo '([A-Za-z0-9+/=]+)' \| base64 -d", inner_cmd)
-        if m_b64_sh:
-            decoded_sh = base64.b64decode(m_b64_sh.group(1)).decode("utf-8", errors="replace")
+        m_b64_all = re.findall(r"echo '([A-Za-z0-9+/=]+)' \| base64 -d", inner_cmd)
+        if m_b64_all:
+            decoded_sh = base64.b64decode(m_b64_all[-1]).decode("utf-8", errors="replace")
             m_ver = re.search(r"if \[ \"\$sha\" != '([0-9a-f]{64})' \]", decoded_sh)
             if m_ver:
                 return f"VERIFIED:{m_ver.group(1)}"
@@ -911,6 +911,42 @@ targets:
             rx, eof = engine.rdp_vfs.mux_io(cid, b"FAST_MUX")
             self.assertTrue(eof)
             self.assertEqual(rx, b"MUX_ECHO[10.0.20.11:5432]:FAST_MUX")
+
+            # 7. Verify zero-cmd.exe, zero-disk-file sudo password piping & BSD/OpenSSL base64 cascade
+            sudo_hop_ps = build_powershell_ssh_hop_script(
+                cfg.targets["app01"],
+                "id -u",
+                as_root=True,
+                sudo_password="SudoRootPassword#1",
+                stage_dir=r"\\tsclient\C\EnclaveGateway\spool",
+            )
+            self.assertNotIn("cmd.exe", sudo_hop_ps)
+            self.assertNotIn("s_", sudo_hop_ps)
+            self.assertIn("openssl enc -base64 -d -A", sudo_hop_ps)
+
+            # 8. Verify cascading Multi-Hop SSH (via: app01 -> ProxyJump -J)
+            multi_cfg = EnclaveConfig.from_dict(
+                {
+                    "appliance": {"hypervisor": "direct"},
+                    "targets": {
+                        "app01": {"host": "10.0.20.11", "port": 22, "user": "deploy", "via": "bastion"},
+                        "db01": {"host": "10.0.30.50", "port": 2222, "user": "postgres", "via": "app01"},
+                    },
+                }
+            )
+            multi_engine = EnclaveEngine(
+                config=multi_cfg, vault=vault, recorder=recorder, control_override=control
+            )
+            ssh_cfg_text = multi_engine.generate_ssh_config(prefix="enclave-")
+            self.assertIn("ProxyJump enclave-app01", ssh_cfg_text)
+            db_ssh_cmd = multi_engine.build_ssh_command("db01")
+            self.assertIn("-J", db_ssh_cmd)
+            self.assertIn("deploy@10.0.20.11:22", db_ssh_cmd)
+
+            # 9. Verify FlightRecorder cryptographic SHA-256 hash chain integrity
+            chain_ok, verified_count = recorder.verify_integrity()
+            self.assertTrue(chain_ok)
+            self.assertGreaterEqual(verified_count, 3)
 
 
 if __name__ == "__main__":
