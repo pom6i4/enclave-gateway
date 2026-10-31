@@ -3,16 +3,54 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, TextIO
 
 from enclave_gateway import __version__
 from enclave_gateway.engine import EnclaveEngine
+from enclave_gateway.transports.rdp_vfs import RdpVfsTunnelServer
+from enclave_gateway.transports.socks5_mux import Socks5VfsServer
 
 MCP_PROTOCOL_VERSION = "2024-11-05"
+DEFAULT_MAX_OUTPUT_CHARS = 32000
+
+_READ_ONLY_MUTATING_SHELL_RE = re.compile(
+    r"(?:^|[;&|]\s*)(?:rm|mv|cp|chmod|chown|chgrp|dd|mkfs|mount|umount|kill|pkill|killall|"
+    r"reboot|shutdown|poweroff|useradd|userdel|usermod|passwd|apt|apt-get|yum|dnf|apk|pip|"
+    r"Remove-Item|Move-Item|Copy-Item|Set-Content|Add-Content|Out-File|Stop-Process|Stop-Service|"
+    r"Restart-Service|New-Item)\b|"
+    r"\b(?:systemctl\s+(?:start|stop|restart|reload|enable|disable|mask)|"
+    r"(?:docker|podman|nerdctl)\s+(?:rm|rmi|stop|kill|restart|run|exec|cp))\b|"
+    r"(?:^|[^0-9])>{1,2}\s*\S",
+    re.IGNORECASE,
+)
+_READ_ONLY_SAFE_SQL_RE = re.compile(
+    r"^\s*(?:SELECT|SHOW|EXPLAIN|DESCRIBE|DESC|WITH|VALUES|PRAGMA|\\[a-zA-Z])\b",
+    re.IGNORECASE,
+)
+
+
+def truncate_for_context(text: str, max_chars: int = DEFAULT_MAX_OUTPUT_CHARS) -> str:
+    """Preserve head (60%) and tail (40%) when tool output exceeds max_chars to protect LLM context window."""
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    head_len = max(1, int(max_chars * 0.6))
+    tail_len = max(1, max_chars - head_len)
+    omitted = len(text) - head_len - tail_len
+    if omitted <= 0:
+        return text
+    middle = text[head_len : len(text) - tail_len]
+    omitted_lines = middle.count("\n")
+    return (
+        f"{text[:head_len]}\n"
+        f"... [TRUNCATED {omitted} chars ({omitted_lines} lines) to protect LLM context window] ...\n"
+        f"{text[len(text) - tail_len :]}"
+    )
 
 TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
@@ -248,14 +286,146 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "node_read_file",
+        "description": "Read a UTF-8 file (or line range) from '@appliance', '@bastion', or a TargetNode with SHA-256 hash and secret scrubbing.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "node": {
+                    "type": "string",
+                    "description": "Target node identifier ('@appliance', '@bastion', or TargetNode name).",
+                },
+                "remote_path": {
+                    "type": "string",
+                    "description": "Path to the file on the remote node.",
+                },
+                "start_line": {
+                    "type": "integer",
+                    "description": "1-based start line (inclusive, default: 1).",
+                    "default": 1,
+                },
+                "end_line": {
+                    "type": "integer",
+                    "description": "1-based end line (inclusive, 0 = until end of file).",
+                    "default": 0,
+                },
+                "as_root": {
+                    "type": "boolean",
+                    "description": "Read with elevated sudo privileges on a Linux TargetNode.",
+                    "default": False,
+                },
+            },
+            "required": ["node", "remote_path"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "node_patch_file",
+        "description": "Atomically replace a target block inside a remote UTF-8 file on '@appliance', '@bastion', or a TargetNode with optional SHA-256 precondition check.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "node": {
+                    "type": "string",
+                    "description": "Target node identifier ('@appliance', '@bastion', or TargetNode name).",
+                },
+                "remote_path": {
+                    "type": "string",
+                    "description": "Path to the file on the remote node.",
+                },
+                "target": {
+                    "type": "string",
+                    "description": "Exact substring/block to replace.",
+                },
+                "replacement": {
+                    "type": "string",
+                    "description": "Replacement content.",
+                },
+                "expected_sha256": {
+                    "type": "string",
+                    "description": "Optional SHA-256 precondition from node_read_file to prevent concurrent overwrite.",
+                    "default": "",
+                },
+                "as_root": {
+                    "type": "boolean",
+                    "description": "Write with elevated sudo privileges on a Linux TargetNode.",
+                    "default": False,
+                },
+            },
+            "required": ["node", "remote_path", "target", "replacement"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "enclave_tunnel",
+        "description": "Dynamically start, stop, or list background TCP port forwards or universal SOCKS5/HTTP proxies over RdpVfsTransport.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["start", "stop", "list"],
+                    "description": "Action to perform ('start', 'stop', or 'list').",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["tcp", "proxy"],
+                    "description": "'tcp' forwards a single port to target_host:target_port; 'proxy' starts a universal SOCKS5/SOCKS4a/HTTP CONNECT proxy.",
+                    "default": "tcp",
+                },
+                "local_port": {
+                    "type": "integer",
+                    "description": "Local TCP port on 127.0.0.1 (0 = auto-assign on 'start', or stop all tunnels on 'stop').",
+                    "default": 0,
+                },
+                "target_host": {
+                    "type": "string",
+                    "description": "TargetNode alias or IP/FQDN (required when action='start' and mode='tcp').",
+                    "default": "",
+                },
+                "target_port": {
+                    "type": "integer",
+                    "description": "Remote TCP port (required when action='start' and mode='tcp').",
+                    "default": 0,
+                },
+            },
+            "required": ["action"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "enclave_audit",
+        "description": "Retrieve recent session audit log entries from the FlightRecorder and verify its SHA-256 hash chain integrity.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of recent audit entries to return (default: 25).",
+                    "default": 25,
+                }
+            },
+            "additionalProperties": False,
+        },
+    },
 ]
 
 
 class McpJsonRpcServer:
     """Handles MCP JSON-RPC 2.0 requests and dispatches tool calls to EnclaveEngine."""
 
-    def __init__(self, engine: EnclaveEngine) -> None:
+    def __init__(
+        self,
+        engine: EnclaveEngine,
+        *,
+        read_only: bool = False,
+        max_output_chars: int = DEFAULT_MAX_OUTPUT_CHARS,
+    ) -> None:
         self.engine = engine
+        self.read_only = read_only
+        self.max_output_chars = max_output_chars
+        self._active_tunnels: dict[int, tuple[Any, threading.Thread, dict[str, Any]]] = {}
 
     def handle_message(self, msg: dict[str, Any]) -> dict[str, Any] | None:
         method = msg.get("method", "")
@@ -399,9 +569,53 @@ class McpJsonRpcServer:
                 },
             )
 
+    def stop_all_tunnels(self) -> list[int]:
+        """Stop all background tunnels managed by this MCP server."""
+        stopped: list[int] = []
+        for port, (srv, th, _) in list(self._active_tunnels.items()):
+            try:
+                srv.stop()
+                th.join(timeout=1.5)
+            except Exception:
+                pass
+            stopped.append(port)
+            self._active_tunnels.pop(port, None)
+        return stopped
+
+    def _check_read_only_violation(
+        self, tool_name: str, args: dict[str, Any]
+    ) -> str | None:
+        if not self.read_only:
+            return None
+        if tool_name in ("node_patch_file", "enclave_heal", "enclave_clean"):
+            return f"Tool '{tool_name}' is blocked because the MCP server is running in --read-only mode."
+        if tool_name == "enclave_doctor" and bool(args.get("fix", False)):
+            return "enclave_doctor with fix=true is blocked in --read-only mode (use fix=false)."
+        if tool_name in ("node_transfer", "node_sync") and str(args.get("direction", "")).lower() == "push":
+            return f"{tool_name} with direction='push' is blocked in --read-only mode (only 'pull' is permitted)."
+        if bool(args.get("as_root", False)) or bool(args.get("confirm_destructive", False)):
+            return f"{tool_name} with as_root/confirm_destructive is blocked in --read-only mode."
+        if tool_name == "node_exec":
+            script = str(args.get("script", ""))
+            if _READ_ONLY_MUTATING_SHELL_RE.search(script):
+                return "Mutating shell/PowerShell command blocked by MCP --read-only mode."
+        if tool_name == "node_db_query":
+            query = str(args.get("query", "")).strip()
+            if not _READ_ONLY_SAFE_SQL_RE.match(query):
+                return "Only read-only SQL queries (SELECT/SHOW/EXPLAIN/DESCRIBE) are permitted in --read-only mode."
+        if tool_name == "node_http_request":
+            method = str(args.get("method", "GET")).upper()
+            if method not in ("GET", "HEAD", "OPTIONS"):
+                return f"HTTP method '{method}' is blocked in --read-only mode (only GET/HEAD/OPTIONS allowed)."
+        return None
+
     def _dispatch_tool(
         self, req_id: Any, tool_name: str, args: dict[str, Any]
     ) -> dict[str, Any]:
+        ro_err = self._check_read_only_violation(tool_name, args)
+        if ro_err is not None:
+            return self._tool_result(req_id, ro_err, is_error=True)
+
         if tool_name == "enclave_status":
             status_data = self.engine.status()
             return self._tool_result(req_id, json.dumps(status_data, indent=2))
@@ -469,6 +683,133 @@ class McpJsonRpcServer:
             )
             return self._tool_result(req_id, json.dumps(meta, indent=2))
 
+        if tool_name == "node_read_file":
+            meta = self.engine.read_remote_file(
+                str(args["node"]),
+                str(args["remote_path"]),
+                start_line=int(args.get("start_line", 1)),
+                end_line=int(args.get("end_line", 0)),
+                as_root=bool(args.get("as_root", False)),
+                actor="mcp",
+            )
+            return self._tool_result(req_id, json.dumps(meta, ensure_ascii=False, indent=2))
+
+        if tool_name == "node_patch_file":
+            meta = self.engine.patch_remote_file(
+                str(args["node"]),
+                str(args["remote_path"]),
+                str(args["target"]),
+                str(args["replacement"]),
+                as_root=bool(args.get("as_root", False)),
+                expected_sha256=str(args.get("expected_sha256", "")),
+                actor="mcp",
+            )
+            return self._tool_result(req_id, json.dumps(meta, ensure_ascii=False, indent=2))
+
+        if tool_name == "enclave_tunnel":
+            action = str(args.get("action", "list")).lower()
+            if action == "list":
+                active = [info for _, _, info in self._active_tunnels.values()]
+                return self._tool_result(
+                    req_id, json.dumps({"active_tunnels": active}, indent=2)
+                )
+            if action == "stop":
+                port = int(args.get("local_port", 0))
+                if port == 0:
+                    stopped = self.stop_all_tunnels()
+                elif port in self._active_tunnels:
+                    srv, th, _ = self._active_tunnels.pop(port)
+                    srv.stop()
+                    th.join(timeout=1.5)
+                    stopped = [port]
+                else:
+                    stopped = []
+                return self._tool_result(
+                    req_id, json.dumps({"stopped_ports": stopped}, indent=2)
+                )
+            if action == "start":
+                mode = str(args.get("mode", "tcp")).lower()
+                req_port = int(args.get("local_port", 0))
+                if mode == "proxy":
+                    aliases = {
+                        name: spec.host
+                        for name, spec in self.engine.config.targets.items()
+                    }
+                    proxy_srv = Socks5VfsServer(
+                        self.engine.rdp_vfs,
+                        bind_host="127.0.0.1",
+                        bind_port=req_port,
+                        target_aliases=aliases,
+                    )
+                    th = threading.Thread(target=proxy_srv.serve_forever, daemon=True)
+                    th.start()
+                    deadline = time.monotonic() + 2.5
+                    while proxy_srv.bind_port == 0 and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    bound = proxy_srv.bind_port
+                    info = {
+                        "mode": "proxy",
+                        "local_port": bound,
+                        "endpoint": f"127.0.0.1:{bound}",
+                        "protocols": ["SOCKS5", "SOCKS4a", "HTTP CONNECT", "HTTP Proxy"],
+                    }
+                    self._active_tunnels[bound] = (proxy_srv, th, info)
+                    return self._tool_result(req_id, json.dumps(info, indent=2))
+
+                target_host_raw = str(args.get("target_host", "")).strip()
+                target_port = int(args.get("target_port", 0))
+                if not target_host_raw or target_port <= 0:
+                    return self._tool_result(
+                        req_id,
+                        "enclave_tunnel(action='start', mode='tcp') requires target_host and target_port > 0.",
+                        is_error=True,
+                    )
+                resolved_host = (
+                    self.engine.config.targets[target_host_raw].host
+                    if target_host_raw in self.engine.config.targets
+                    else target_host_raw
+                )
+                tun_srv = RdpVfsTunnelServer(
+                    self.engine.rdp_vfs,
+                    local_port=req_port,
+                    target_host=resolved_host,
+                    target_port=target_port,
+                    multiplexed=True,
+                )
+                th = threading.Thread(target=tun_srv.serve_forever, daemon=True)
+                th.start()
+                deadline = time.monotonic() + 2.5
+                while tun_srv.local_port == 0 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                bound = tun_srv.local_port
+                info = {
+                    "mode": "tcp",
+                    "local_port": bound,
+                    "local_endpoint": f"127.0.0.1:{bound}",
+                    "target_host": target_host_raw,
+                    "resolved_host": resolved_host,
+                    "target_port": target_port,
+                }
+                self._active_tunnels[bound] = (tun_srv, th, info)
+                return self._tool_result(req_id, json.dumps(info, indent=2))
+
+        if tool_name == "enclave_audit":
+            limit = max(1, int(args.get("limit", 25)))
+            chain_ok, verified_records = self.engine.recorder.verify_integrity()
+            entries = self.engine.recorder.read_recent(limit=limit)
+            return self._tool_result(
+                req_id,
+                json.dumps(
+                    {
+                        "integrity_verified": chain_ok,
+                        "verified_records": verified_records,
+                        "entries": entries,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            )
+
         if tool_name == "enclave_ssh_config":
             prefix = str(args.get("prefix", "enclave-"))
             return self._tool_result(
@@ -507,8 +848,8 @@ class McpJsonRpcServer:
         payload = {
             "exit_code": res.exit_code,
             "duration_ms": res.duration_ms,
-            "stdout": res.stdout,
-            "stderr": res.stderr,
+            "stdout": truncate_for_context(res.stdout, self.max_output_chars),
+            "stderr": truncate_for_context(res.stderr, self.max_output_chars),
         }
         return self._tool_result(
             req_id,
@@ -516,13 +857,13 @@ class McpJsonRpcServer:
             is_error=(res.exit_code != 0),
         )
 
-    @staticmethod
-    def _tool_result(req_id: Any, text: str, *, is_error: bool = False) -> dict[str, Any]:
+    def _tool_result(self, req_id: Any, text: str, *, is_error: bool = False) -> dict[str, Any]:
+        bounded_text = truncate_for_context(text, self.max_output_chars)
         return {
             "jsonrpc": "2.0",
             "id": req_id,
             "result": {
-                "content": [{"type": "text", "text": text}],
+                "content": [{"type": "text", "text": bounded_text}],
                 "isError": is_error,
             },
         }

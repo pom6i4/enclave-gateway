@@ -1074,6 +1074,97 @@ targets:
                 http_mcp.stop()
                 http_thread.join(timeout=2.0)
 
+            # 13. Verify node_read_file, node_patch_file, enclave_tunnel, enclave_audit, read_only mode, & context truncation
+            from enclave_gateway.mcp_server.server import truncate_for_context
+
+            remote_cfg_path = r"C:\App\service.conf"
+            control.files[remote_cfg_path] = b"line1\nport=8080\nsecret=BastionPass#2026\nline4\n"
+
+            read_resp = mcp_srv.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 60,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "node_read_file",
+                        "arguments": {"node": "@appliance", "remote_path": remote_cfg_path, "start_line": 2, "end_line": 3},
+                    },
+                }
+            )
+            read_data = json.loads(read_resp["result"]["content"][0]["text"])
+            self.assertEqual(read_data["total_lines"], 4)
+            self.assertIn("port=8080", read_data["content"])
+            self.assertNotIn("BastionPass#2026", read_data["content"])
+
+            patch_resp = mcp_srv.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 61,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "node_patch_file",
+                        "arguments": {
+                            "node": "@appliance",
+                            "remote_path": remote_cfg_path,
+                            "target": "port=8080",
+                            "replacement": "port=9090",
+                            "expected_sha256": read_data["sha256"],
+                        },
+                    },
+                }
+            )
+            patch_data = json.loads(patch_resp["result"]["content"][0]["text"])
+            self.assertEqual(patch_data["replacements"], 1)
+            self.assertIn(b"port=9090", control.files[remote_cfg_path])
+
+            tun_start = mcp_srv.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 62,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "enclave_tunnel",
+                        "arguments": {"action": "start", "mode": "tcp", "target_host": "app01", "target_port": 5432},
+                    },
+                }
+            )
+            tun_info = json.loads(tun_start["result"]["content"][0]["text"])
+            self.assertGreater(tun_info["local_port"], 0)
+            self.assertEqual(tun_info["resolved_host"], "10.0.20.11")
+            mcp_srv.stop_all_tunnels()
+
+            audit_resp = mcp_srv.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 63,
+                    "method": "tools/call",
+                    "params": {"name": "enclave_audit", "arguments": {"limit": 5}},
+                }
+            )
+            audit_data = json.loads(audit_resp["result"]["content"][0]["text"])
+            self.assertTrue(audit_data["integrity_verified"])
+
+            ro_mcp = McpJsonRpcServer(multi_engine, read_only=True, max_output_chars=120)
+            ro_block = ro_mcp.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 64,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "node_exec",
+                        "arguments": {"node": "app01", "script": "rm -rf /tmp/cache"},
+                    },
+                }
+            )
+            self.assertTrue(ro_block["result"]["isError"])
+            self.assertIn("--read-only", ro_block["result"]["content"][0]["text"])
+
+            long_str = "HEAD_MARKER_" + ("A\n" * 200) + "_TAIL_MARKER"
+            truncated = truncate_for_context(long_str, max_chars=80)
+            self.assertIn("HEAD_MARKER_", truncated)
+            self.assertIn("_TAIL_MARKER", truncated)
+            self.assertIn("TRUNCATED", truncated)
+
 
 if __name__ == "__main__":
     unittest.main()

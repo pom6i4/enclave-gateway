@@ -468,6 +468,117 @@ ConvertTo-Json $out -Compress
             "duration_ms": duration_ms,
         }
 
+    def read_remote_file(
+        self,
+        node: str,
+        remote_path: str,
+        *,
+        start_line: int = 1,
+        end_line: int = 0,
+        as_root: bool = False,
+        timeout_sec: float = 120.0,
+        actor: str = "cli",
+    ) -> dict[str, Any]:
+        """Read a UTF-8 file (or line range) from @appliance, @bastion, or a TargetNode with secret scrubbing."""
+        with TemporaryDirectory() as tmp_dir:
+            tmp_file = Path(tmp_dir) / "remote_read.bin"
+            meta = self.transfer_file(
+                "pull",
+                tmp_file,
+                node,
+                remote_path,
+                as_root=as_root,
+                timeout_sec=timeout_sec,
+                actor=actor,
+            )
+            raw_text = tmp_file.read_text(encoding="utf-8", errors="replace")
+            lines = raw_text.splitlines(keepends=True)
+            total_lines = len(lines)
+            s_idx = max(1, int(start_line))
+            e_idx = int(end_line) if int(end_line) > 0 else total_lines
+            e_idx = min(max(s_idx, e_idx), max(1, total_lines))
+            sliced = "".join(lines[s_idx - 1 : e_idx]) if lines else ""
+            scrubbed = self.vault.scrubber.scrub(sliced)
+            return {
+                "node": node,
+                "remote_path": remote_path,
+                "sha256": meta["sha256"],
+                "total_lines": total_lines,
+                "start_line": s_idx,
+                "end_line": e_idx if total_lines > 0 else 0,
+                "content": scrubbed,
+            }
+
+    def patch_remote_file(
+        self,
+        node: str,
+        remote_path: str,
+        target: str,
+        replacement: str,
+        *,
+        as_root: bool = False,
+        expected_sha256: str = "",
+        timeout_sec: float = 120.0,
+        actor: str = "cli",
+    ) -> dict[str, Any]:
+        """Atomically patch a remote file by replacing target substring with replacement and verifying SHA-256."""
+        if not target:
+            raise ValueError("patch_remote_file requires a non-empty 'target' string.")
+        with TemporaryDirectory() as tmp_dir:
+            tmp_file = Path(tmp_dir) / "remote_patch.bin"
+            pull_meta = self.transfer_file(
+                "pull",
+                tmp_file,
+                node,
+                remote_path,
+                as_root=as_root,
+                timeout_sec=timeout_sec,
+                actor=actor,
+            )
+            old_sha = pull_meta["sha256"]
+            if expected_sha256 and old_sha.lower() != expected_sha256.strip().lower():
+                raise ValueError(
+                    f"Precondition SHA-256 mismatch for {node}:{remote_path}: "
+                    f"expected {expected_sha256}, actual {old_sha}"
+                )
+            raw_bytes = tmp_file.read_bytes()
+            uses_crlf = b"\r\n" in raw_bytes
+            raw_text = raw_bytes.decode("utf-8")
+            normalized_text = raw_text.replace("\r\n", "\n")
+            normalized_target = target.replace("\r\n", "\n")
+            normalized_replacement = replacement.replace("\r\n", "\n")
+
+            occurrences = normalized_text.count(normalized_target)
+            if occurrences == 0:
+                raise ValueError(
+                    f"Target block not found in {node}:{remote_path}."
+                )
+            updated_text = normalized_text.replace(
+                normalized_target, normalized_replacement
+            )
+            if uses_crlf:
+                updated_text = updated_text.replace("\n", "\r\n")
+            tmp_file.write_bytes(updated_text.encode("utf-8"))
+
+            push_meta = self.transfer_file(
+                "push",
+                tmp_file,
+                node,
+                remote_path,
+                as_root=as_root,
+                use_delta=True,
+                timeout_sec=timeout_sec,
+                actor=actor,
+            )
+            return {
+                "node": node,
+                "remote_path": remote_path,
+                "old_sha256": old_sha,
+                "new_sha256": push_meta["sha256"],
+                "replacements": occurrences,
+                "as_root": as_root,
+            }
+
     def sync_directory(
         self,
         direction: str,

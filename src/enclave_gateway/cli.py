@@ -397,6 +397,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print OpenAPI 3.1.0 tool server specification JSON (for Open WebUI) and exit.",
     )
+    p_mcp.add_argument(
+        "--read-only",
+        action="store_true",
+        help="Run MCP server in Zero-Trust Read-Only mode (blocks file pushes, patches, root escalation, and mutating SQL/shell/HTTP commands).",
+    )
+    p_mcp.add_argument(
+        "--max-output-chars",
+        type=int,
+        default=32000,
+        help="Maximum characters per tool response before head+tail context truncation (default: 32000).",
+    )
 
     p_mcp_cfg = sub.add_parser(
         "mcp-config",
@@ -449,29 +460,36 @@ def main(argv: list[str] | None = None) -> int:
         if args.export_openapi:
             print(json.dumps(export_openapi_spec(), indent=2, ensure_ascii=False))
             return 0
-        server = McpJsonRpcServer(engine)
-        if args.listen:
-            host_part, _, port_part = args.listen.rpartition(":")
-            bind_host = host_part or "127.0.0.1"
-            bind_port = int(port_part or "8765")
-            http_srv = McpHttpServer(
-                server,
-                bind_host=bind_host,
-                bind_port=bind_port,
-                bearer_token=args.token,
-            )
-            print(
-                f"Enclave Gateway HTTP MCP & Tool Server listening on http://{bind_host}:{bind_port} "
-                "(/mcp, /v1/tools, /v1/tools/call, /openapi.json)",
-                file=sys.stderr,
-            )
-            try:
-                http_srv.serve_forever()
-            except KeyboardInterrupt:
-                http_srv.stop()
+        server = McpJsonRpcServer(
+            engine,
+            read_only=bool(args.read_only),
+            max_output_chars=int(args.max_output_chars),
+        )
+        try:
+            if args.listen:
+                host_part, _, port_part = args.listen.rpartition(":")
+                bind_host = host_part or "127.0.0.1"
+                bind_port = int(port_part or "8765")
+                http_srv = McpHttpServer(
+                    server,
+                    bind_host=bind_host,
+                    bind_port=bind_port,
+                    bearer_token=args.token,
+                )
+                print(
+                    f"Enclave Gateway HTTP MCP & Tool Server listening on http://{bind_host}:{bind_port} "
+                    "(/mcp, /v1/tools, /v1/tools/call, /openapi.json)",
+                    file=sys.stderr,
+                )
+                try:
+                    http_srv.serve_forever()
+                except KeyboardInterrupt:
+                    http_srv.stop()
+                return 0
+            server.serve_stdio()
             return 0
-        server.serve_stdio()
-        return 0
+        finally:
+            server.stop_all_tunnels()
 
     if args.command == "init":
         admin_pw = (
