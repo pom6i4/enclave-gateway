@@ -1029,6 +1029,51 @@ targets:
                 poly_proxy.stop()
                 poly_thread.join(timeout=2.0)
 
+            # 12. Verify Multi-IDE MCP configs, Content-Length framing, resources/read, and HTTP OpenAPI/Ollama bridge
+            from enclave_gateway.mcp_server.server import (
+                McpHttpServer,
+                export_openai_tools,
+                export_openapi_spec,
+                generate_client_configs,
+            )
+            import urllib.request
+
+            client_cfgs = generate_client_configs(config_path="./enclave.yaml")
+            self.assertIn("vscode", client_cfgs)
+            self.assertIn("zed", client_cfgs)
+            self.assertIn("continue", client_cfgs)
+            self.assertIn("open-webui", client_cfgs)
+            self.assertGreaterEqual(len(export_openai_tools()), 10)
+            self.assertIn("/tools/node_exec", export_openapi_spec()["paths"])
+
+            mcp_srv = McpJsonRpcServer(multi_engine)
+            res_list = mcp_srv.handle_message({"jsonrpc": "2.0", "id": 50, "method": "resources/list"})
+            self.assertEqual(len(res_list["result"]["resources"]), 2)
+            topo_read = mcp_srv.handle_message(
+                {"jsonrpc": "2.0", "id": 51, "method": "resources/read", "params": {"uri": "enclave://topology"}}
+            )
+            self.assertIn("db01", topo_read["result"]["contents"][0]["text"])
+
+            lsp_req = json.dumps({"jsonrpc": "2.0", "id": 52, "method": "ping"})
+            lsp_in = io.StringIO(f"Content-Length: {len(lsp_req)}\r\n\r\n{lsp_req}")
+            lsp_out = io.StringIO()
+            mcp_srv.serve_stdio(stdin=lsp_in, stdout=lsp_out)
+            self.assertTrue(lsp_out.getvalue().startswith("Content-Length:"))
+
+            http_mcp = McpHttpServer(mcp_srv, bind_host="127.0.0.1", bind_port=0)
+            http_thread = threading.Thread(target=http_mcp.serve_forever, daemon=True)
+            http_thread.start()
+            deadline = time.time() + 3.0
+            while http_mcp.bind_port == 0 and time.time() < deadline:
+                time.sleep(0.01)
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{http_mcp.bind_port}/v1/tools", timeout=3.0) as r_tools:
+                    tools_payload = json.loads(r_tools.read().decode("utf-8"))
+                    self.assertIn("tools", tools_payload)
+            finally:
+                http_mcp.stop()
+                http_thread.join(timeout=2.0)
+
 
 if __name__ == "__main__":
     unittest.main()

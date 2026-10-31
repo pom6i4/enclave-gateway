@@ -146,9 +146,16 @@ egw clean
 egw report
 ```
 
-### 4. MCP Server Configuration (Cursor / VS Code / Claude Desktop)
+### 4. MCP & Local LLM Server Configuration (All IDEs & Local Models)
 
-Add the following entry to your MCP client configuration (`mcp.json`):
+Generate ready-to-use configurations for any IDE or local LLM stack automatically:
+
+```bash
+egw mcp-config --client all
+# Or target a specific client: cursor | vscode | zed | continue | codex | claude-code | lm-studio | open-webui | ollama
+```
+
+#### Cursor / Claude Desktop / Windsurf / Cline / Roo Code / LM Studio (`mcp.json`)
 
 ```json
 {
@@ -160,6 +167,78 @@ Add the following entry to your MCP client configuration (`mcp.json`):
   }
 }
 ```
+
+#### VS Code (GitHub Copilot Agent Mode — `.vscode/mcp.json`)
+
+```json
+{
+  "servers": {
+    "enclave-gateway": {
+      "type": "stdio",
+      "command": "egw",
+      "args": ["-c", "/path/to/enclave.yaml", "mcp"]
+    }
+  }
+}
+```
+
+#### Zed IDE (`~/.config/zed/settings.json`)
+
+`egw mcp` auto-detects both newline-delimited JSON and LSP `Content-Length` framing over `stdio`, and supports `resources/list` (`enclave://topology`, `enclave://status`) and `prompts/list`:
+
+```json
+{
+  "context_servers": {
+    "enclave-gateway": {
+      "command": {
+        "path": "egw",
+        "args": ["-c", "/path/to/enclave.yaml", "mcp"],
+        "env": {}
+      }
+    }
+  }
+}
+```
+
+#### Continue.dev in VS Code & JetBrains (`~/.continue/config.yaml` — Ollama / LM Studio / vLLM)
+
+```yaml
+mcpServers:
+  - name: enclave-gateway
+    command: egw
+    args:
+      - "-c"
+      - "/path/to/enclave.yaml"
+      - "mcp"
+```
+
+#### Claude Code CLI & OpenAI Codex CLI
+
+```bash
+# Claude Code CLI
+claude mcp add enclave-gateway -- egw -c /path/to/enclave.yaml mcp
+
+# OpenAI Codex CLI (~/.codex/config.toml)
+egw mcp-config --client codex >> ~/.codex/config.toml
+```
+
+#### Local Models: Open WebUI, Ollama, vLLM, & llama.cpp (`egw mcp --listen`)
+
+For browser-based local LLM frontends (**Open WebUI**, **AnythingLLM**, **LibreChat**) or custom **Ollama / vLLM / llama.cpp** agent scripts that require HTTP endpoints instead of `stdio`, start the built-in HTTP bridge:
+
+```bash
+# Start local HTTP bridge on 127.0.0.1:8765 (optional --token SECRET)
+egw -c /path/to/enclave.yaml mcp --listen 127.0.0.1:8765
+```
+
+It simultaneously exposes three standards on the same port:
+1. **OpenAPI 3.1 Tool Server for Open WebUI**: add `http://127.0.0.1:8765/openapi.json` under *Settings -> Tools -> Add Tool Server* in Open WebUI.
+2. **Streamable HTTP MCP (`POST /mcp`)**: connect any HTTP-capable MCP client to `http://127.0.0.1:8765/mcp`.
+3. **OpenAI / Ollama Function-Calling Schema (`GET /v1/tools` & `POST /v1/tools/call`)**:
+   ```bash
+   # Export OpenAI / Ollama tools array directly from CLI
+   egw mcp --export-openai-tools > enclave_tools.json
+   ```
 
 ---
 

@@ -1,9 +1,12 @@
-"""Model Context Protocol (MCP) JSON-RPC 2.0 Server over stdio."""
+"""Model Context Protocol (MCP) JSON-RPC 2.0 Server over stdio and Streamable HTTP / OpenAPI."""
 
 from __future__ import annotations
 
 import json
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, TextIO
 
 from enclave_gateway import __version__
@@ -269,14 +272,18 @@ class McpJsonRpcServer:
                     req_id,
                     {
                         "protocolVersion": MCP_PROTOCOL_VERSION,
-                        "capabilities": {"tools": {"listChanged": False}},
+                        "capabilities": {
+                            "tools": {"listChanged": False},
+                            "resources": {"subscribe": False, "listChanged": False},
+                            "prompts": {"listChanged": False},
+                        },
                         "serverInfo": {
                             "name": "enclave-gateway",
                             "version": __version__,
                         },
                     },
                 )
-            if method == "ping":
+            if method in ("ping", "logging/setLevel"):
                 return self._ok(req_id, {})
             if method == "tools/list":
                 return self._ok(req_id, {"tools": TOOL_DEFINITIONS})
@@ -284,6 +291,98 @@ class McpJsonRpcServer:
                 tool_name = str(params.get("name", ""))
                 args = dict(params.get("arguments") or {})
                 return self._dispatch_tool(req_id, tool_name, args)
+            if method == "resources/list":
+                return self._ok(
+                    req_id,
+                    {
+                        "resources": [
+                            {
+                                "uri": "enclave://topology",
+                                "name": "Enclave Topology",
+                                "description": "Configured Appliance, Bastion, TargetNodes, and PortForwards.",
+                                "mimeType": "application/json",
+                            },
+                            {
+                                "uri": "enclave://status",
+                                "name": "Enclave Health Telemetry",
+                                "description": "Live health status across Appliance, VPN, and Bastion.",
+                                "mimeType": "application/json",
+                            },
+                        ]
+                    },
+                )
+            if method == "resources/templates/list":
+                return self._ok(req_id, {"resourceTemplates": []})
+            if method == "resources/read":
+                uri = str(params.get("uri", ""))
+                if uri == "enclave://topology":
+                    topo = {
+                        "profile": self.engine.config.profile,
+                        "targets": {
+                            k: {
+                                "host": v.host,
+                                "port": v.port,
+                                "user": v.user,
+                                "via": v.via,
+                                "os": v.os,
+                            }
+                            for k, v in self.engine.config.targets.items()
+                        },
+                        "forwards": {
+                            k: {
+                                "local_port": f.local_port,
+                                "target_host": f.target_host,
+                                "target_port": f.target_port,
+                            }
+                            for k, f in self.engine.config.forwards.items()
+                        },
+                    }
+                    text = json.dumps(topo, indent=2)
+                elif uri == "enclave://status":
+                    text = json.dumps(self.engine.status(), indent=2)
+                else:
+                    return self._error(req_id, -32602, f"Unknown resource URI: {uri}")
+                return self._ok(
+                    req_id,
+                    {
+                        "contents": [
+                            {
+                                "uri": uri,
+                                "mimeType": "application/json",
+                                "text": text,
+                            }
+                        ]
+                    },
+                )
+            if method == "prompts/list":
+                return self._ok(
+                    req_id,
+                    {
+                        "prompts": [
+                            {
+                                "name": "enclave-diagnose",
+                                "description": "Run L1-L7 diagnostics and self-heal any enclave connectivity drift.",
+                                "arguments": [],
+                            }
+                        ]
+                    },
+                )
+            if method == "prompts/get":
+                return self._ok(
+                    req_id,
+                    {
+                        "description": "Diagnose and self-heal Enclave Gateway connectivity.",
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": {
+                                    "type": "text",
+                                    "text": "Call enclave_doctor with fix=true and probe_targets=true, then summarize the L1-L7 status.",
+                                },
+                            }
+                        ],
+                    },
+                )
 
             return self._error(req_id, -32601, f"Method not found: {method}")
         except Exception as exc:
@@ -443,15 +542,298 @@ class McpJsonRpcServer:
     def serve_stdio(
         self, stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout
     ) -> None:
-        for raw_line in stdin:
+        """Serve MCP JSON-RPC 2.0 over stdio supporting both newline-JSON and Content-Length framing."""
+        while True:
+            raw_line = stdin.readline()
+            if not raw_line:
+                break
             line = raw_line.strip()
             if not line:
                 continue
+
+            use_content_length = False
+            if line.lower().startswith("content-length:"):
+                use_content_length = True
+                try:
+                    length = int(line.partition(":")[2].strip())
+                except ValueError:
+                    continue
+                while True:
+                    hdr = stdin.readline()
+                    if not hdr or hdr in ("\r\n", "\n", ""):
+                        break
+                body = stdin.read(length)
+                if not body:
+                    break
+                payload_str = body
+            else:
+                payload_str = line
+
             try:
-                msg = json.loads(line)
+                msg = json.loads(payload_str)
             except json.JSONDecodeError:
                 continue
+
             resp = self.handle_message(msg)
             if resp is not None:
-                stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
+                out_json = json.dumps(resp, ensure_ascii=False)
+                if use_content_length:
+                    encoded = out_json.encode("utf-8")
+                    stdout.write(f"Content-Length: {len(encoded)}\r\n\r\n{out_json}")
+                else:
+                    stdout.write(out_json + "\n")
                 stdout.flush()
+
+
+def export_openai_tools() -> list[dict[str, Any]]:
+    """Export MCP TOOL_DEFINITIONS in OpenAI / Ollama / vLLM / llama.cpp function-calling schema."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": tool["inputSchema"],
+            },
+        }
+        for tool in TOOL_DEFINITIONS
+    ]
+
+
+def export_openapi_spec(server_url: str = "http://127.0.0.1:8765") -> dict[str, Any]:
+    """Export OpenAPI 3.1.0 specification for Open WebUI, AnythingLLM, and local LLM Tool Servers."""
+    paths: dict[str, Any] = {}
+    for tool in TOOL_DEFINITIONS:
+        t_name = tool["name"]
+        paths[f"/tools/{t_name}"] = {
+            "post": {
+                "operationId": t_name,
+                "summary": tool["description"],
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": tool["inputSchema"],
+                        }
+                    },
+                },
+                "responses": {
+                    "200": {
+                        "description": "Tool execution output",
+                        "content": {
+                            "application/json": {
+                                "schema": {"type": "object"},
+                            }
+                        },
+                    }
+                },
+            }
+        }
+    return {
+        "openapi": "3.1.0",
+        "info": {
+            "title": "Enclave Gateway Tool Server",
+            "version": __version__,
+            "description": "MCP & OpenAPI bridge for local LLMs (Ollama, Open WebUI, LM Studio, vLLM, llama.cpp).",
+        },
+        "servers": [{"url": server_url}],
+        "paths": paths,
+    }
+
+
+class McpHttpServer:
+    """Local HTTP bridge exposing Streamable HTTP MCP (/mcp), OpenAI Tools (/v1/tools), and OpenAPI (/openapi.json)."""
+
+    def __init__(
+        self,
+        rpc_server: McpJsonRpcServer,
+        bind_host: str = "127.0.0.1",
+        bind_port: int = 8765,
+        *,
+        bearer_token: str = "",
+    ) -> None:
+        self.rpc_server = rpc_server
+        self.bind_host = bind_host
+        self.bind_port = bind_port
+        self.bearer_token = bearer_token
+        self._httpd: ThreadingHTTPServer | None = None
+
+    def serve_forever(self) -> None:
+        parent = self
+
+        class _Handler(BaseHTTPRequestHandler):
+            def log_message(self, _format: str, *_args: Any) -> None:
+                return
+
+            def _check_auth(self) -> bool:
+                if not parent.bearer_token:
+                    return True
+                auth = self.headers.get("Authorization", "")
+                if auth == f"Bearer {parent.bearer_token}":
+                    return True
+                self._send_json(401, {"error": "Unauthorized"})
+                return False
+
+            def _send_json(self, status: int, data: Any) -> None:
+                raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(raw)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header(
+                    "Access-Control-Allow-Headers", "Content-Type, Authorization"
+                )
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def do_OPTIONS(self) -> None:
+                self._send_json(200, {"ok": True})
+
+            def do_GET(self) -> None:
+                if not self._check_auth():
+                    return
+                path = self.path.split("?", 1)[0]
+                if path == "/openapi.json":
+                    url = f"http://{parent.bind_host}:{parent.bind_port}"
+                    self._send_json(200, export_openapi_spec(url))
+                    return
+                if path == "/v1/tools":
+                    self._send_json(200, {"tools": export_openai_tools()})
+                    return
+                if path == "/healthz":
+                    self._send_json(200, {"status": "ok", "version": __version__})
+                    return
+                self._send_json(404, {"error": f"Unknown endpoint: {path}"})
+
+            def do_POST(self) -> None:
+                if not self._check_auth():
+                    return
+                length = int(self.headers.get("Content-Length", "0") or "0")
+                raw_body = self.rfile.read(length).decode("utf-8", errors="replace")
+                try:
+                    body = json.loads(raw_body) if raw_body.strip() else {}
+                except json.JSONDecodeError:
+                    self._send_json(400, {"error": "Invalid JSON body"})
+                    return
+
+                path = self.path.split("?", 1)[0]
+                if path == "/mcp":
+                    resp = parent.rpc_server.handle_message(body)
+                    if resp is None:
+                        self.send_response(202)
+                        self.end_headers()
+                    else:
+                        self._send_json(200, resp)
+                    return
+
+                if path == "/v1/tools/call":
+                    t_name = str(body.get("name", ""))
+                    t_args = dict(body.get("arguments") or {})
+                    rpc_resp = parent.rpc_server.handle_message(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": "http-tool-call",
+                            "method": "tools/call",
+                            "params": {"name": t_name, "arguments": t_args},
+                        }
+                    )
+                    self._send_json(200, rpc_resp or {})
+                    return
+
+                if path.startswith("/tools/"):
+                    t_name = path.partition("/tools/")[2].strip("/")
+                    rpc_resp = parent.rpc_server.handle_message(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": f"openapi-{t_name}",
+                            "method": "tools/call",
+                            "params": {"name": t_name, "arguments": body},
+                        }
+                    )
+                    result = (rpc_resp or {}).get("result", {})
+                    content = result.get("content") or []
+                    text_out = content[0].get("text", "") if content else ""
+                    try:
+                        parsed = json.loads(text_out)
+                    except Exception:
+                        parsed = {"output": text_out}
+                    self._send_json(200, parsed)
+                    return
+
+                self._send_json(404, {"error": f"Unknown endpoint: {path}"})
+
+        httpd = ThreadingHTTPServer((self.bind_host, self.bind_port), _Handler)
+        self.bind_port = httpd.server_address[1]
+        self._httpd = httpd
+        try:
+            httpd.serve_forever()
+        finally:
+            httpd.server_close()
+
+    def stop(self) -> None:
+        if self._httpd is not None:
+            threading.Thread(target=self._httpd.shutdown, daemon=True).start()
+
+
+def generate_client_configs(
+    config_path: str | Path = "./enclave.yaml",
+    http_url: str = "http://127.0.0.1:8765",
+) -> dict[str, Any]:
+    """Generate ready-to-use MCP / Tool configurations for all major IDEs and local LLM stacks."""
+    resolved_cfg = str(Path(config_path).expanduser().resolve())
+    args = ["-c", resolved_cfg, "mcp"]
+
+    return {
+        "cursor": {
+            "mcpServers": {
+                "enclave-gateway": {"command": "egw", "args": args}
+            }
+        },
+        "vscode": {
+            "servers": {
+                "enclave-gateway": {
+                    "type": "stdio",
+                    "command": "egw",
+                    "args": args,
+                }
+            }
+        },
+        "zed": {
+            "context_servers": {
+                "enclave-gateway": {
+                    "command": {"path": "egw", "args": args, "env": {}}
+                }
+            }
+        },
+        "continue": (
+            "mcpServers:\n"
+            "  - name: enclave-gateway\n"
+            "    command: egw\n"
+            "    args:\n"
+            f'      - "-c"\n'
+            f'      - "{resolved_cfg}"\n'
+            '      - "mcp"\n'
+        ),
+        "codex": (
+            "[mcp_servers.enclave-gateway]\n"
+            'command = "egw"\n'
+            f'args = ["-c", "{resolved_cfg}", "mcp"]\n'
+        ),
+        "claude-code": f'claude mcp add enclave-gateway -- egw -c "{resolved_cfg}" mcp',
+        "lm-studio": {
+            "mcpServers": {
+                "enclave-gateway": {"command": "egw", "args": args}
+            }
+        },
+        "open-webui": {
+            "mcp_streamable_http_url": f"{http_url}/mcp",
+            "openapi_tool_server_url": f"{http_url}/openapi.json",
+            "start_command": f'egw -c "{resolved_cfg}" mcp --listen 127.0.0.1:8765',
+        },
+        "ollama": {
+            "tools_endpoint": f"{http_url}/v1/tools",
+            "call_endpoint": f"{http_url}/v1/tools/call",
+            "start_command": f'egw -c "{resolved_cfg}" mcp --listen 127.0.0.1:8765',
+        },
+    }

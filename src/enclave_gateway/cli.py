@@ -11,7 +11,13 @@ from pathlib import Path
 from enclave_gateway import __version__
 from enclave_gateway.config import EnclaveConfig
 from enclave_gateway.engine import EnclaveEngine
-from enclave_gateway.mcp_server.server import McpJsonRpcServer
+from enclave_gateway.mcp_server.server import (
+    McpHttpServer,
+    McpJsonRpcServer,
+    export_openai_tools,
+    export_openapi_spec,
+    generate_client_configs,
+)
 from enclave_gateway.provision.builder import ApplianceProvisioner, ProvisionOptions
 from enclave_gateway.transports.rdp_vfs import RdpVfsTunnelServer
 from enclave_gateway.transports.socks5_mux import (
@@ -367,8 +373,51 @@ def build_parser() -> argparse.ArgumentParser:
     p_ui = sub.add_parser("ui", help="Open VNC console to Appliance or native RDP client.")
     p_ui.add_argument("--view", choices=["vnc", "rdp"], default="vnc")
 
-    sub.add_parser(
-        "mcp", help="Run the Model Context Protocol (MCP) JSON-RPC 2.0 server over stdio."
+    p_mcp = sub.add_parser(
+        "mcp",
+        help="Run the MCP JSON-RPC 2.0 server over stdio or HTTP (/mcp, /v1/tools, /openapi.json).",
+    )
+    p_mcp.add_argument(
+        "--listen",
+        default="",
+        help="Optional HTTP bind address (e.g. 127.0.0.1:8765) for Streamable HTTP MCP, Open WebUI, and Ollama.",
+    )
+    p_mcp.add_argument(
+        "--token",
+        default="",
+        help="Optional Bearer token for HTTP endpoints.",
+    )
+    p_mcp.add_argument(
+        "--export-openai-tools",
+        action="store_true",
+        help="Print OpenAI / Ollama / vLLM / llama.cpp function-calling schema JSON and exit.",
+    )
+    p_mcp.add_argument(
+        "--export-openapi",
+        action="store_true",
+        help="Print OpenAPI 3.1.0 tool server specification JSON (for Open WebUI) and exit.",
+    )
+
+    p_mcp_cfg = sub.add_parser(
+        "mcp-config",
+        help="Generate MCP / Tool configurations for IDEs (VS Code, Cursor, Zed, Continue, Codex, Claude Code) and local LLMs (Ollama, LM Studio, Open WebUI).",
+    )
+    p_mcp_cfg.add_argument(
+        "--client",
+        choices=[
+            "all",
+            "cursor",
+            "vscode",
+            "zed",
+            "continue",
+            "codex",
+            "claude-code",
+            "lm-studio",
+            "open-webui",
+            "ollama",
+        ],
+        default="all",
+        help="Target IDE or local LLM client (default: all).",
     )
 
     return parser
@@ -381,8 +430,46 @@ def main(argv: list[str] | None = None) -> int:
     cfg = EnclaveConfig.load(args.config)
     engine = EnclaveEngine(config=cfg)
 
+    if args.command == "mcp-config":
+        configs = generate_client_configs(config_path=args.config)
+        if args.client == "all":
+            print(json.dumps(configs, indent=2, ensure_ascii=False))
+        else:
+            entry = configs[args.client]
+            if isinstance(entry, str):
+                print(entry)
+            else:
+                print(json.dumps(entry, indent=2, ensure_ascii=False))
+        return 0
+
     if args.command == "mcp":
+        if args.export_openai_tools:
+            print(json.dumps(export_openai_tools(), indent=2, ensure_ascii=False))
+            return 0
+        if args.export_openapi:
+            print(json.dumps(export_openapi_spec(), indent=2, ensure_ascii=False))
+            return 0
         server = McpJsonRpcServer(engine)
+        if args.listen:
+            host_part, _, port_part = args.listen.rpartition(":")
+            bind_host = host_part or "127.0.0.1"
+            bind_port = int(port_part or "8765")
+            http_srv = McpHttpServer(
+                server,
+                bind_host=bind_host,
+                bind_port=bind_port,
+                bearer_token=args.token,
+            )
+            print(
+                f"Enclave Gateway HTTP MCP & Tool Server listening on http://{bind_host}:{bind_port} "
+                "(/mcp, /v1/tools, /v1/tools/call, /openapi.json)",
+                file=sys.stderr,
+            )
+            try:
+                http_srv.serve_forever()
+            except KeyboardInterrupt:
+                http_srv.stop()
+            return 0
         server.serve_stdio()
         return 0
 
