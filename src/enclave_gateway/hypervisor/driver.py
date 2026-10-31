@@ -36,6 +36,61 @@ def detect_host_arch(preference: str = "auto") -> str:
     return "x86_64"
 
 
+def resolve_qemu_binary(arch: str) -> str:
+    """Locate QEMU system binary across macOS, Linux, and Windows installations."""
+    binary_name = "qemu-system-aarch64" if arch == "arm64" else "qemu-system-x86_64"
+    found = shutil.which(binary_name)
+    if found:
+        return found
+    candidates = [
+        f"/opt/homebrew/bin/{binary_name}",
+        f"/usr/local/bin/{binary_name}",
+        f"/usr/bin/{binary_name}",
+        rf"C:\Program Files\qemu\{binary_name}.exe",
+    ]
+    for cand in candidates:
+        if Path(cand).is_file():
+            return cand
+    return f"/opt/homebrew/bin/{binary_name}"
+
+
+def resolve_efi_code_path(arch: str, configured_path: str = "") -> str:
+    """Resolve UEFI firmware image across macOS (edk2), Linux (AAVMF/OVMF), and Windows."""
+    if configured_path:
+        expanded = Path(os.path.expanduser(configured_path))
+        if expanded.is_file():
+            return str(expanded)
+
+    if arch == "arm64":
+        candidates = [
+            "/opt/homebrew/share/qemu/edk2-aarch64-code.fd",
+            "/usr/local/share/qemu/edk2-aarch64-code.fd",
+            "/usr/share/AAVMF/AAVMF_CODE.fd",
+            "/usr/share/AAVMF/AAVMF_CODE.no-secboot.fd",
+            "/usr/share/qemu-efi-aarch64/QEMU_EFI.fd",
+            "/usr/share/edk2/aarch64/QEMU_EFI-pflash.raw",
+            "/usr/share/edk2/aarch64/QEMU_EFI.fd",
+            "/usr/share/qemu/edk2-aarch64-code.fd",
+            r"C:\Program Files\qemu\share\edk2-aarch64-code.fd",
+        ]
+    else:
+        candidates = [
+            "/opt/homebrew/share/qemu/edk2-x86_64-code.fd",
+            "/usr/local/share/qemu/edk2-x86_64-code.fd",
+            "/usr/share/OVMF/OVMF_CODE.fd",
+            "/usr/share/OVMF/OVMF_CODE_4M.fd",
+            "/usr/share/edk2/ovmf/OVMF_CODE.fd",
+            "/usr/share/qemu/OVMF.fd",
+            "/usr/share/qemu/edk2-x86_64-code.fd",
+            r"C:\Program Files\qemu\share\edk2-x86_64-code.fd",
+        ]
+
+    for cand in candidates:
+        if Path(cand).is_file():
+            return cand
+    return configured_path or candidates[0]
+
+
 class ApplianceHypervisor:
     """Manages the cryptographic appliance VM lifecycle and copy-on-write snapshots."""
 
@@ -57,8 +112,8 @@ class ApplianceHypervisor:
         accel = detect_host_accelerator(self.spec.hypervisor)
         arch = detect_host_arch(self.spec.arch)
 
-        binary_name = "qemu-system-aarch64" if arch == "arm64" else "qemu-system-x86_64"
-        qemu_bin = shutil.which(binary_name) or f"/opt/homebrew/bin/{binary_name}"
+        qemu_bin = resolve_qemu_binary(arch)
+        efi_code = resolve_efi_code_path(arch, self.spec.efi_code_path)
 
         hostfwd_rules = [
             f"hostfwd=tcp:127.0.0.1:{self.spec.rdp_forward_port}-:33890",
@@ -87,7 +142,7 @@ class ApplianceHypervisor:
                     "-M",
                     "virt,highmem=on",
                     "-drive",
-                    f"if=pflash,format=raw,readonly=on,file={self.spec.efi_code_path}",
+                    f"if=pflash,format=raw,readonly=on,file={efi_code}",
                     "-drive",
                     f"if=pflash,format=raw,file={self.spec.resolved_efi_vars_path}",
                     "-device",

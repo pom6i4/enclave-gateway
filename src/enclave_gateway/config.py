@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+
+def _default_runtime_dir() -> str:
+    return "/tmp" if os.name != "nt" and Path("/tmp").is_dir() else tempfile.gettempdir()
 
 
 @dataclass(slots=True)
@@ -25,7 +30,7 @@ class ApplianceSpec:
     rdp_forward_port: int = 13389
     vm_rdp_forward_port: int = 13390
     vnc_display: int = 1
-    runtime_dir: str = "/tmp"
+    runtime_dir: str = field(default_factory=_default_runtime_dir)
 
     @property
     def resolved_disk_path(self) -> Path:

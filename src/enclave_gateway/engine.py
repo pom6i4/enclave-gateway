@@ -161,8 +161,22 @@ class EnclaveEngine:
 
         probe_ps = f"""
 $info = ""
-if ('{self.config.provider.type}' -eq 'vipnet' -and (Test-Path '{self.config.provider.binary_path}')) {{
+$ptype = '{self.config.provider.type}'.ToLower()
+if ($ptype -eq 'vipnet' -and (Test-Path '{self.config.provider.binary_path}')) {{
     $info = (& '{self.config.provider.binary_path}' info | Out-String).Trim()
+}} elseif ($ptype -eq 'wireguard') {{
+    if (Get-Command wg.exe -ErrorAction SilentlyContinue) {{
+        $info = (& wg.exe show | Out-String).Trim()
+    }} else {{
+        $info = (Get-Service 'WireGuardTunnel*' -ErrorAction SilentlyContinue | Select-Object Name, Status | Out-String).Trim()
+    }}
+}} elseif ($ptype -eq 'anyconnect' -and (Test-Path '{self.config.provider.binary_path}')) {{
+    $info = (& '{self.config.provider.binary_path}' state | Out-String).Trim()
+}} elseif ($ptype -in @('openvpn', 'kontinent', 'custom')) {{
+    $adapter = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {{ $_.InterfaceDescription -like '*{self.config.provider.adapter_name}*' -or $_.Name -like '*{self.config.provider.adapter_name}*' }}
+    if ($adapter) {{
+        $info = ($adapter | Select-Object Name, InterfaceDescription, Status, LinkSpeed | Out-String).Trim()
+    }}
 }}
 $tcp = Test-NetConnection -ComputerName '{self.config.provider.probe_host}' -Port {self.config.provider.probe_port} -WarningAction SilentlyContinue
 $spool = '{self.config.bastion.appliance_spool_dir}'

@@ -7,6 +7,7 @@ import socket
 import struct
 import threading
 import time
+import urllib.parse
 from typing import BinaryIO, Callable
 
 from enclave_gateway.config import PortForwardSpec
@@ -45,50 +46,127 @@ def build_socks5_reply(rep: int, bind_ip: str = "0.0.0.0", bind_port: int = 0) -
     return struct.pack("!BBBB4sH", SOCKS5_VERSION, rep, 0x00, SOCKS5_ATYP_IPV4, ip_bytes, bind_port)
 
 
+def _read_cstring(sock: socket.socket, max_len: int = 256) -> bytes:
+    buf = bytearray()
+    while len(buf) < max_len:
+        ch = _recv_exact(sock, 1)
+        if ch == b"\x00":
+            break
+        buf.extend(ch)
+    return bytes(buf)
+
+
+def negotiate_proxy_destination(
+    conn: socket.socket,
+    host_resolver: Callable[[str], str] | None = None,
+) -> tuple[str, int, str, bytes]:
+    """Auto-detect and negotiate SOCKS5, SOCKS4/4a, HTTP CONNECT, or HTTP Proxy on the same port."""
+    first_b = _recv_exact(conn, 1)[0]
+
+    # 1. RFC 1928 SOCKS5
+    if first_b == SOCKS5_VERSION:
+        nmethods = _recv_exact(conn, 1)[0]
+        methods = _recv_exact(conn, nmethods)
+        if SOCKS5_AUTH_NONE not in methods:
+            conn.sendall(bytes([SOCKS5_VERSION, SOCKS5_AUTH_NO_ACCEPTABLE]))
+            raise PermissionError("Client does not support SOCKS5 no-auth (0x00)")
+
+        conn.sendall(bytes([SOCKS5_VERSION, SOCKS5_AUTH_NONE]))
+
+        req_hdr = _recv_exact(conn, 4)
+        req_ver, cmd, _rsv, atyp = req_hdr[0], req_hdr[1], req_hdr[2], req_hdr[3]
+        if req_ver != SOCKS5_VERSION:
+            raise ValueError(f"Invalid SOCKS5 request version: {req_ver}")
+        if cmd != SOCKS5_CMD_CONNECT:
+            conn.sendall(build_socks5_reply(SOCKS5_REP_CMD_NOT_SUPPORTED))
+            raise ValueError(f"Unsupported SOCKS5 command: {cmd} (only CONNECT=1 is supported)")
+
+        if atyp == SOCKS5_ATYP_IPV4:
+            raw_ip = _recv_exact(conn, 4)
+            target_host = socket.inet_ntoa(raw_ip)
+        elif atyp == SOCKS5_ATYP_DOMAIN:
+            domain_len = _recv_exact(conn, 1)[0]
+            target_host = _recv_exact(conn, domain_len).decode("utf-8", errors="replace")
+        elif atyp == SOCKS5_ATYP_IPV6:
+            raw_ip6 = _recv_exact(conn, 16)
+            target_host = socket.inet_ntop(socket.AF_INET6, raw_ip6)
+        else:
+            conn.sendall(build_socks5_reply(SOCKS5_REP_ATYP_NOT_SUPPORTED))
+            raise ValueError(f"Unsupported SOCKS5 address type: {atyp}")
+
+        port_bytes = _recv_exact(conn, 2)
+        target_port = struct.unpack("!H", port_bytes)[0]
+        if host_resolver is not None:
+            target_host = host_resolver(target_host)
+        return target_host, target_port, "socks5", b""
+
+    # 2. SOCKS4 / SOCKS4a
+    if first_b == 0x04:
+        rest = _recv_exact(conn, 7)
+        cmd = rest[0]
+        if cmd != 0x01:
+            conn.sendall(struct.pack("!BBH4s", 0x00, 0x5B, 0, b"\x00\x00\x00\x00"))
+            raise ValueError(f"Unsupported SOCKS4 command: {cmd}")
+        target_port = struct.unpack("!H", rest[1:3])[0]
+        raw_ip = rest[3:7]
+        _read_cstring(conn)  # userid
+        if raw_ip[:3] == b"\x00\x00\x00" and raw_ip[3] != 0:
+            target_host = _read_cstring(conn).decode("utf-8", errors="replace")
+        else:
+            target_host = socket.inet_ntoa(raw_ip)
+        if host_resolver is not None:
+            target_host = host_resolver(target_host)
+        return target_host, target_port, "socks4", b""
+
+    # 3. HTTP CONNECT or plain HTTP Proxy
+    if chr(first_b) in ("C", "G", "P", "H", "D", "O"):
+        buf = bytearray([first_b])
+        while b"\r\n\r\n" not in buf and len(buf) < 32768:
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            buf.extend(chunk)
+        raw_req = bytes(buf)
+        hdr_part, sep, body_rem = raw_req.partition(b"\r\n\r\n")
+        if not sep:
+            raise ValueError("Malformed HTTP proxy request header")
+        lines = hdr_part.decode("utf-8", errors="replace").split("\r\n")
+        parts = lines[0].split(" ")
+        if len(parts) < 3:
+            raise ValueError(f"Invalid HTTP request line: {lines[0]}")
+        method, target_uri, http_ver = parts[0], parts[1], parts[2]
+        if method.upper() == "CONNECT":
+            host_part, _, port_part = target_uri.rpartition(":")
+            target_host = (host_part or target_uri).strip("[]")
+            target_port = int(port_part) if port_part.isdigit() else 443
+            if host_resolver is not None:
+                target_host = host_resolver(target_host)
+            return target_host, target_port, "http_connect", body_rem
+
+        parsed = urllib.parse.urlsplit(target_uri)
+        target_host = parsed.hostname or ""
+        target_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        rel_path = parsed.path or "/"
+        if parsed.query:
+            rel_path += f"?{parsed.query}"
+        lines[0] = f"{method} {rel_path} {http_ver}"
+        rewritten = ("\r\n".join(lines) + "\r\n\r\n").encode("utf-8") + body_rem
+        if host_resolver is not None and target_host:
+            target_host = host_resolver(target_host)
+        return target_host, target_port, "http_proxy", rewritten
+
+    raise ValueError(f"Unsupported proxy protocol byte: {first_b}")
+
+
 def negotiate_socks5_destination(
     conn: socket.socket,
     host_resolver: Callable[[str], str] | None = None,
 ) -> tuple[str, int]:
     """Perform RFC 1928 SOCKS5 method negotiation and parse the CONNECT target."""
-    hdr = _recv_exact(conn, 2)
-    ver, nmethods = hdr[0], hdr[1]
-    if ver != SOCKS5_VERSION:
-        raise ValueError(f"Unsupported SOCKS version: {ver}")
-    methods = _recv_exact(conn, nmethods)
-    if SOCKS5_AUTH_NONE not in methods:
-        conn.sendall(bytes([SOCKS5_VERSION, SOCKS5_AUTH_NO_ACCEPTABLE]))
-        raise PermissionError("Client does not support SOCKS5 no-auth (0x00)")
-
-    conn.sendall(bytes([SOCKS5_VERSION, SOCKS5_AUTH_NONE]))
-
-    req_hdr = _recv_exact(conn, 4)
-    req_ver, cmd, _rsv, atyp = req_hdr[0], req_hdr[1], req_hdr[2], req_hdr[3]
-    if req_ver != SOCKS5_VERSION:
-        raise ValueError(f"Invalid SOCKS5 request version: {req_ver}")
-    if cmd != SOCKS5_CMD_CONNECT:
-        conn.sendall(build_socks5_reply(SOCKS5_REP_CMD_NOT_SUPPORTED))
-        raise ValueError(f"Unsupported SOCKS5 command: {cmd} (only CONNECT=1 is supported)")
-
-    if atyp == SOCKS5_ATYP_IPV4:
-        raw_ip = _recv_exact(conn, 4)
-        target_host = socket.inet_ntoa(raw_ip)
-    elif atyp == SOCKS5_ATYP_DOMAIN:
-        domain_len = _recv_exact(conn, 1)[0]
-        target_host = _recv_exact(conn, domain_len).decode("utf-8", errors="replace")
-    elif atyp == SOCKS5_ATYP_IPV6:
-        raw_ip6 = _recv_exact(conn, 16)
-        target_host = socket.inet_ntop(socket.AF_INET6, raw_ip6)
-    else:
-        conn.sendall(build_socks5_reply(SOCKS5_REP_ATYP_NOT_SUPPORTED))
-        raise ValueError(f"Unsupported SOCKS5 address type: {atyp}")
-
-    port_bytes = _recv_exact(conn, 2)
-    target_port = struct.unpack("!H", port_bytes)[0]
-
-    if host_resolver is not None:
-        target_host = host_resolver(target_host)
-
-    return target_host, target_port
+    host, port, _proto, _init = negotiate_proxy_destination(
+        conn, host_resolver=host_resolver
+    )
+    return host, port
 
 
 class Socks5VfsServer:
@@ -146,16 +224,29 @@ class Socks5VfsServer:
         conn.settimeout(10.0)
         with self._lock:
             self._active_connections += 1
+        proto = "socks5"
         try:
-            target_host, target_port = negotiate_socks5_destination(
+            target_host, target_port, proto, initial_tx = negotiate_proxy_destination(
                 conn, host_resolver=self.resolve_host
             )
             conn_id = self.transport.mux_open(target_host, target_port)
             try:
-                conn.sendall(build_socks5_reply(SOCKS5_REP_SUCCEEDED))
-                conn.settimeout(0.03)
+                if proto == "socks5":
+                    conn.sendall(build_socks5_reply(SOCKS5_REP_SUCCEEDED))
+                elif proto == "socks4":
+                    conn.sendall(struct.pack("!BBH4s", 0x00, 0x5A, 0, b"\x00\x00\x00\x00"))
+                elif proto == "http_connect":
+                    conn.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+
+                pending_tx = initial_tx
+                idle_streak = 0
                 while not self._stop_event.is_set():
+                    recv_wait = 0.025 if idle_streak < 8 else min(0.25, 0.025 * (idle_streak - 5))
+                    conn.settimeout(recv_wait)
                     tx_chunks: list[bytes] = []
+                    if pending_tx:
+                        tx_chunks.append(pending_tx)
+                        pending_tx = b""
                     client_eof = False
                     try:
                         data = conn.recv(65536)
@@ -172,12 +263,16 @@ class Socks5VfsServer:
                     rx_bytes, remote_eof = self.transport.mux_io(
                         conn_id,
                         tx_payload,
-                        read_wait_ms=40 if tx_payload else 100,
+                        read_wait_ms=35 if tx_payload else (80 if idle_streak < 8 else 150),
                     )
+                    if tx_payload or rx_bytes:
+                        idle_streak = 0
+                    else:
+                        idle_streak += 1
+
                     if rx_bytes:
                         conn.settimeout(5.0)
                         conn.sendall(rx_bytes)
-                        conn.settimeout(0.03)
 
                     if remote_eof or client_eof:
                         break
@@ -188,12 +283,16 @@ class Socks5VfsServer:
                     pass
         except ConnectionError:
             try:
-                conn.sendall(build_socks5_reply(SOCKS5_REP_HOST_UNREACHABLE))
+                if proto == "socks5":
+                    conn.sendall(build_socks5_reply(SOCKS5_REP_HOST_UNREACHABLE))
+                elif proto in ("http_connect", "http_proxy"):
+                    conn.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
             except Exception:
                 pass
         except Exception:
             try:
-                conn.sendall(build_socks5_reply(SOCKS5_REP_GENERAL_FAILURE))
+                if proto == "socks5":
+                    conn.sendall(build_socks5_reply(SOCKS5_REP_GENERAL_FAILURE))
             except Exception:
                 pass
         finally:

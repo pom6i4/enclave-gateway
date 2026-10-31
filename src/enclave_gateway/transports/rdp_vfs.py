@@ -78,6 +78,35 @@ $dst = [Environment]::ExpandEnvironmentVariables('{bastion_dest_path}')
 $tmp = "$dst.tmp_{tx_id}"
 $parent = Split-Path -Parent $dst
 if ($parent -and -not (Test-Path $parent)) {{ New-Item -ItemType Directory -Force -Path $parent | Out-Null }}
+$changed = @({idx_csv})
+
+if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {{
+    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    $first = $true
+    foreach ($idx in $changed) {{
+        $chunkName = ('chunk_{{0}}_{{1:D5}}.bin' -f '{tx_id}', [int]$idx)
+        $chunkPath = Join-Path $vfsSpool $chunkName
+        if ($first) {{
+            Copy-Item $chunkPath $tmp -Force
+            $first = $false
+        }} else {{
+            $chunkBytes = Get-Content -Path $chunkPath -Encoding Byte -Raw
+            if ($null -ne $chunkBytes) {{
+                Add-Content -Path $tmp -Value $chunkBytes -Encoding Byte
+            }}
+        }}
+        Remove-Item $chunkPath -Force -ErrorAction SilentlyContinue
+    }}
+    $actualSha = (Get-FileHash -Algorithm SHA256 $tmp).Hash.ToLower()
+    if ($actualSha -ne '{expected_sha256}') {{
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+        Write-Error "SHA-256 verification failed on Bastion: expected {expected_sha256}, got $actualSha"
+        exit 1
+    }}
+    Move-Item $tmp $dst -Force
+    Write-Output "VERIFIED:$actualSha"
+    exit 0
+}}
 
 if ((Test-Path $dst) -and '{str(use_delta).lower()}' -eq 'true') {{
     Copy-Item $dst $tmp -Force
@@ -87,7 +116,6 @@ if ((Test-Path $dst) -and '{str(use_delta).lower()}' -eq 'true') {{
     $emptyFs.Close()
 }}
 
-$changed = @({idx_csv})
 $maxStreams = [Math]::Max(1, {streams})
 $ownPool = $false
 if ($Global:EnclaveRunspacePool -and $Global:EnclaveRunspacePool.RunspacePoolStateInfo.State -eq 'Opened') {{
@@ -183,7 +211,7 @@ $fileSize = [int64]$item.Length
 $sha = (Get-FileHash -Algorithm SHA256 $src).Hash.ToLower()
 $blockSize = [int64]{block_size}
 
-if ($fileSize -le $blockSize -or {streams} -le 1) {{
+if ($fileSize -le $blockSize -or {streams} -le 1 -or $ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {{
     $stagePath = Join-Path '{vfs_spool}' 'pull_{tx_id}.bin'
     Copy-Item $src $stagePath -Force
     Write-Output "SHA256:$sha:CHUNKS:0"
@@ -413,12 +441,13 @@ exit 124
         # Step 1: Fast pre-check if identical file already exists on Bastion
         check_ps = f"""
 $dst = [Environment]::ExpandEnvironmentVariables('{bastion_dest_path}')
+$isFullLang = ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage')
 if (Test-Path $dst) {{
     $item = Get-Item $dst
     if ($item.Length -eq {file_size}) {{
         $h = (Get-FileHash -Algorithm SHA256 $dst).Hash.ToLower()
         if ($h -eq '{file_sha}') {{ Write-Output 'MATCH'; exit 0 }}
-        if ('{str(use_delta).lower()}' -eq 'true') {{
+        if ('{str(use_delta).lower()}' -eq 'true' -and $isFullLang) {{
             $fs = [IO.File]::OpenRead($dst)
             $sha = [Security.Cryptography.SHA256]::Create()
             $buf = New-Object byte[] {block_size}
@@ -437,11 +466,16 @@ if (Test-Path $dst) {{
         }}
     }}
 }}
+if (-not $isFullLang) {{ Write-Output 'MISS_CLM'; exit 0 }}
 Write-Output 'MISS'
 """
         probe = self.exec_bastion(check_ps, timeout_sec=60.0)
         if probe.exit_code == 0 and probe.stdout.strip() == "MATCH":
             return file_sha
+
+        is_clm = probe.exit_code == 0 and "MISS_CLM" in probe.stdout
+        effective_compress = self.spec.compress and not is_clm
+        effective_delta = use_delta and not is_clm
 
         remote_block_hashes: list[str] = []
         if probe.exit_code == 0 and probe.stdout.startswith("BLOCKS:"):
@@ -455,7 +489,7 @@ Write-Output 'MISS'
         blocks_to_stage: list[BlockDigest] = []
         for blk in manifest:
             if (
-                use_delta
+                effective_delta
                 and blk.index < len(remote_block_hashes)
                 and remote_block_hashes[blk.index] == blk.sha256
             ):
@@ -468,7 +502,7 @@ Write-Output 'MISS'
                 raw_chunk = fp.read(blk.size)
             payload = (
                 zlib.compress(raw_chunk, level=6)
-                if self.spec.compress
+                if effective_compress
                 else raw_chunk
             )
             guest_chunk_path = (
@@ -491,8 +525,8 @@ Write-Output 'MISS'
             file_size=file_size,
             block_size=block_size,
             changed_indices=changed_indices,
-            compress=self.spec.compress,
-            use_delta=use_delta,
+            compress=effective_compress,
+            use_delta=effective_delta,
             parallel_streams=self.spec.parallel_streams,
             expected_sha256=file_sha,
         )
@@ -764,6 +798,7 @@ def pump_multiplexed_socket(
     conn_id = transport.mux_open(target_host, target_port)
     client_sock.settimeout(0.03)
     pending_tx = initial_tx
+    idle_streak = 0
     try:
         while stop_event is None or not stop_event.is_set():
             tx_chunks: list[bytes] = []
@@ -783,15 +818,22 @@ def pump_multiplexed_socket(
                 client_eof = True
 
             tx_payload = b"".join(tx_chunks)
+            wait_ms = 20 if tx_payload else min(450, 40 + idle_streak * 35)
             rx_bytes, remote_eof = transport.mux_io(
                 conn_id,
                 tx_payload,
-                read_wait_ms=40 if tx_payload else 100,
+                read_wait_ms=wait_ms,
             )
+            if tx_payload or rx_bytes:
+                idle_streak = 0
+                client_sock.settimeout(0.015)
+            else:
+                idle_streak = min(idle_streak + 1, 12)
+                client_sock.settimeout(min(0.15, 0.02 + idle_streak * 0.01))
             if rx_bytes:
                 client_sock.settimeout(5.0)
                 client_sock.sendall(rx_bytes)
-                client_sock.settimeout(0.03)
+                client_sock.settimeout(0.015)
 
             if remote_eof or client_eof:
                 break

@@ -967,6 +967,68 @@ targets:
             self.assertTrue(chain_ok)
             self.assertGreaterEqual(verified_count, 3)
 
+            # 11. Verify Universal Proxy Polyglot (HTTP CONNECT + SOCKS4a) & CLM file assembly fallback
+            from enclave_gateway.hypervisor.driver import resolve_efi_code_path
+            from enclave_gateway.transports.rdp_vfs import build_parallel_striped_assemble_ps
+
+            clm_assemble = build_parallel_striped_assemble_ps(
+                vfs_spool=r"\\tsclient\C\EnclaveGateway\spool",
+                bastion_dest_path=r"C:\Temp\artifact.bin",
+                tx_id="txclm1",
+                file_size=1024,
+                block_size=512,
+                changed_indices=[0, 1],
+                compress=False,
+                use_delta=False,
+                parallel_streams=2,
+                expected_sha256="0" * 64,
+            )
+            self.assertIn("LanguageMode -ne 'FullLanguage'", clm_assemble)
+            self.assertIn("Add-Content -Path $tmp -Value $chunkBytes -Encoding Byte", clm_assemble)
+
+            fake_efi = Path(tmp) / "custom_efi.fd"
+            fake_efi.write_bytes(b"EFI")
+            self.assertEqual(resolve_efi_code_path("arm64", str(fake_efi)), str(fake_efi))
+
+            poly_proxy = Socks5VfsServer(
+                engine.rdp_vfs,
+                bind_port=0,
+                target_aliases={"app01": "10.0.20.11"},
+            )
+            poly_thread = threading.Thread(target=poly_proxy.serve_forever, daemon=True)
+            poly_thread.start()
+            deadline = time.time() + 3.0
+            while poly_proxy.bind_port == 0 and time.time() < deadline:
+                time.sleep(0.01)
+            try:
+                # Test HTTP CONNECT proxy on the same port
+                with socket.create_connection(("127.0.0.1", poly_proxy.bind_port), timeout=3.0) as s_http:
+                    s_http.sendall(b"CONNECT app01:8443 HTTP/1.1\r\nHost: app01:8443\r\n\r\nTLS_CLIENT_HELLO")
+                    resp_buf = b""
+                    while b"MUX_ECHO" not in resp_buf:
+                        chunk = s_http.recv(4096)
+                        if not chunk:
+                            break
+                        resp_buf += chunk
+                    self.assertIn(b"HTTP/1.1 200 Connection Established\r\n\r\n", resp_buf)
+                    self.assertIn(b"MUX_ECHO[10.0.20.11:8443]:TLS_CLIENT_HELLO", resp_buf)
+
+                # Test SOCKS4a proxy on the same port
+                with socket.create_connection(("127.0.0.1", poly_proxy.bind_port), timeout=3.0) as s_s4:
+                    s4a_req = b"\x04\x01" + struct.pack("!H", 5432) + b"\x00\x00\x00\x01user\x00app01\x00PG_HELLO"
+                    s_s4.sendall(s4a_req)
+                    s4_resp = b""
+                    while b"MUX_ECHO" not in s4_resp:
+                        chunk = s_s4.recv(4096)
+                        if not chunk:
+                            break
+                        s4_resp += chunk
+                    self.assertTrue(s4_resp.startswith(b"\x00\x5a"))
+                    self.assertIn(b"MUX_ECHO[10.0.20.11:5432]:PG_HELLO", s4_resp)
+            finally:
+                poly_proxy.stop()
+                poly_thread.join(timeout=2.0)
+
 
 if __name__ == "__main__":
     unittest.main()
