@@ -47,7 +47,7 @@ from enclave_gateway.control.qga_client import (
 from enclave_gateway.hypervisor.driver import ApplianceHypervisor
 from enclave_gateway.security.secrets import SecretVault, verify_command_safety
 from enclave_gateway.security.quoting import ps_quote, ssh_config_quote
-from enclave_gateway.security.policy import active_grant
+from enclave_gateway.security.policy import active_grant, below, remote_path, canonical_node
 from enclave_gateway.transports.ssh_hop import _node_uri, _build_b64_decode_expr
 from enclave_gateway.transports.rdp_vfs import RdpVfsTransport, generate_tx_id
 from enclave_gateway.transports.ssh_hop import SshHopExecutor
@@ -98,7 +98,8 @@ class EnclaveEngine:
         self.vault = vault or SecretVault()
         self.recorder = recorder or FlightRecorder()
         self.recorder.scrubber = self.vault.scrubber
-        self.journal = journal or TransactionJournal(self.recorder.log_path.with_suffix(".transactions.sqlite3"))
+        from enclave_gateway.operations.retention import RetentionPolicy
+        self.journal = journal or TransactionJournal(self.recorder.log_path.with_suffix(".transactions.sqlite3"), RetentionPolicy(**self.config.journal_retention))
         self._operations_lock = threading.RLock()
         self._operations = {}
         self._pending_cancels = set()
@@ -107,7 +108,8 @@ class EnclaveEngine:
         if control_override is not None:
             self.control: ControlChannel = control_override
         elif self.config.appliance.hypervisor == "direct":
-            self.control = DirectHostControlChannel()
+            self.control = DirectHostControlChannel(runtime_helper_path=self.config.security.runtime_helper_path,
+                trusted_signers=self.config.security.trusted_signers,require_signed=self.config.security.require_signed_helpers)
         else:
             self.control = QgaClient(
                 self.config.appliance.qga_socket,
@@ -115,6 +117,8 @@ class EnclaveEngine:
             )
 
         self.rdp_vfs = RdpVfsTransport(self.control, self.config.bastion)
+        if self.config.security.enforce_worker_attestation:
+            self.rdp_vfs.attestation_guard=lambda:self.attest_worker(timeout_sec=budget(10))
         self.bastion_ssh = SshHopExecutor(
             exec_hop_fn=self.rdp_vfs.exec_bastion,
             push_hop_fn=self._push_bastion_vfs_stage,
@@ -123,6 +127,8 @@ class EnclaveEngine:
             helper_path=self.config.security.askpass_helper_path,
             trusted_signers=self.config.security.trusted_signers,
             require_signed=self.config.security.require_signed_helpers,
+            owned_commands=self.config.security.owned_ssh_commands,
+            runtime_helper_path=self.config.security.runtime_helper_path,
         )
         self.appliance_ssh = SshHopExecutor(
             exec_hop_fn=self.control.exec_powershell,
@@ -131,6 +137,8 @@ class EnclaveEngine:
             helper_path=self.config.security.askpass_helper_path,
             trusted_signers=self.config.security.trusted_signers,
             require_signed=self.config.security.require_signed_helpers,
+            owned_commands=self.config.security.owned_ssh_commands,
+            runtime_helper_path=self.config.security.runtime_helper_path,
         )
 
     def _push_bastion_vfs_stage(
@@ -692,6 +700,8 @@ echo EGW_PATCH_COMMIT_OK
         actor: str = "cli",
     ) -> dict[str, Any]:
         """Batch-synchronize a directory between Host and @appliance, @bastion, or a TargetNode via streaming tar.gz."""
+        if active_grant() and not active_grant().unrestricted_paths:
+            return self._scoped_sync(direction,local_dir,node,remote_dir,as_root=as_root,exclude=exclude,timeout_sec=timeout_sec,actor=actor)
         tx_id = current().tx_id if current() else generate_tx_id()
         started = time.monotonic()
         ldir = Path(local_dir).expanduser().resolve()
@@ -1286,6 +1296,97 @@ Write-Output 'APPLIANCE_CLEAN_OK'
         script = f"if command -v curl >/dev/null 2>&1; then {curl}; elif command -v python3 >/dev/null 2>&1; then python3 -c {shlex.quote(python)}; else {wget}; fi"
         return self.exec_node(node, script, actor=actor)
 
+    @tracked('provider_manage')
+    def provider_manage(self,action,*,apply=False,approval_digest='',timeout_sec=900,actor='cli'):
+        from enclave_gateway.providers.lifecycle import plan,powershell
+        document=plan(self.config.provider,action)
+        if not apply: return {**document,'status':'planned'}
+        if not secrets.compare_digest(approval_digest,document['approval_digest']):
+            raise OperationError('provider_approval_mismatch','provider',message='Apply requires the digest of the reviewed plan')
+        outcomes=[]; staged=[]; replacements={}; cleanup_pending=[]
+        try:
+            for artifact in document['artifacts']:
+                base=PureWindowsPath(artifact['remote_path'])
+                if not base.is_absolute() or '%' in str(base): raise ValueError('Staged provider artifacts require an absolute Windows path')
+                stage=str(base.with_name(base.stem[:64]+'.egw_'+__import__('hashlib').sha256((current().tx_id+artifact['input']).encode()).hexdigest()[:24]+base.suffix))
+                staged.append(stage)
+                metadata=self.transfer_file('push',artifact['local_path'],'@appliance',stage,use_delta=False,timeout_sec=budget(timeout_sec,'provider.stage'),actor=actor)
+                if metadata['sha256']!=artifact['sha256']: raise OperationError('provider_artifact_changed','provider.stage',indeterminate=True)
+                if artifact['publisher']:
+                    check=f"$s=Get-AuthenticodeSignature -LiteralPath {ps_quote(stage)}; if ($s.Status -ne 'Valid' -or $s.SignerCertificate.Subject -ne {ps_quote(artifact['publisher'])}) {{throw 'Installer publisher mismatch'}}"
+                    checked=self.exec_node('@appliance',check,timeout_sec=budget(30),actor=actor)
+                    if checked.exit_code: raise OperationError('provider_publisher_mismatch','provider.stage')
+                replacements[artifact['remote_path']]=stage
+            for original in document['steps']:
+                step={**original,'arguments':[replacements.get(arg,arg) for arg in original['arguments']],
+                      'timeout_sec':budget(min(original.get('timeout_sec',120),timeout_sec),'provider.step')}
+                secret=self.vault.get(step.get('stdin_env','')) if step.get('stdin_env') else ''
+                if step.get('stdin_env') and not secret: raise OperationError('provider_credential_missing','provider')
+                result=self.exec_node('@appliance',powershell(step,self.config.security,secret),timeout_sec=budget(timeout_sec,'provider.step'),actor=actor)
+                if result.exit_code: raise OperationError('provider_step_failed','provider',indeterminate=True)
+                status=json.loads(result.stdout)
+                if status['exit_code'] not in step['success_codes']:
+                    raise OperationError('provider_step_failed','provider',indeterminate=True,message='Controller did not report an approved success status')
+                outcomes.append(status)
+        finally:
+            for stage in staged:
+                try:
+                    with owned_cleanup():
+                        cleanup=self.exec_node('@appliance',f"$ErrorActionPreference='Stop'; if (Test-Path -LiteralPath {ps_quote(stage)}) {{Remove-Item -LiteralPath {ps_quote(stage)} -Force}}; Write-Output 'STAGE_REMOVED'",timeout_sec=2,actor=actor)
+                        if cleanup.exit_code or 'STAGE_REMOVED' not in cleanup.stdout: cleanup_pending.append(stage)
+                except Exception: cleanup_pending.append(stage)
+        return {'status':'completed_cleanup_pending' if cleanup_pending else 'completed','cleanup_pending':cleanup_pending,'action':action,'provider':self.config.provider.type,'steps':outcomes,
+                'reboot_required':any(item['reboot_required'] for item in outcomes),'reboot_performed':False,
+                'approval_digest':document['approval_digest']}
+
+    def attest_worker(self, *, timeout_sec=10):
+        from enclave_gateway.security.attestation import verify
+        nonce=secrets.token_hex(32)
+        evidence=self.rdp_vfs.attest(nonce,timeout_sec=timeout_sec)
+        settings=self.config.security
+        return verify(evidence,nonce,expected_sha256=settings.worker_sha256,
+                      trusted_signers=settings.trusted_signers,require_signed=settings.require_signed_agents,
+                      expected_account=settings.worker_account,require_process_isolation=settings.require_process_isolation,expected_runtime_sha256=settings.runtime_sha256,expected_version=settings.worker_version)
+
+    def _scoped_sync(self,direction,local_dir,node,remote_dir,*,as_root,exclude,timeout_sec,actor):
+        from enclave_gateway.agents.rooted_fs import request
+        from enclave_gateway.security.scoped_sync import synchronize,remote_script
+        grant=active_grant()
+        node=canonical_node(node)
+        remote_roots=(grant.write_roots if direction=='push' else grant.read_roots)
+        candidates=remote_roots.get(node,[])+remote_roots.get('*',[])
+        allowed=[root for root in candidates if below(remote_dir,[root])]
+        local_roots=grant.local_read_roots if direction=='push' else grant.local_write_roots
+        local=Path(local_dir).expanduser().resolve()
+        local_allowed=[Path(root).expanduser().resolve() for root in local_roots if below(str(local),[root],local=True)]
+        if not allowed or not local_allowed: raise OperationError('access_denied','sync',node=node)
+        remote_base=max(allowed,key=len); local_base=max(local_allowed,key=lambda p:len(str(p)))
+        remote_relative=remote_path(remote_dir).relative_to(remote_path(remote_base)).as_posix()
+        if remote_relative=='.': remote_relative=''
+        local_relative=local.relative_to(local_base).as_posix()
+        if local_relative=='.': local_relative=''
+        def endpoint(root,windows,remote):
+            def execute(payload):
+                payload={**payload,'root':str(root)}
+                if payload['action'] not in ('list','read'): mark_dispatched()
+                if not remote and os.name!='nt': return request(payload)
+                script=remote_script(payload,windows,helper_path=self.config.security.runtime_helper_path,
+                                     trusted_signers=self.config.security.trusted_signers,require_signed=self.config.security.require_signed_helpers)
+                if remote: result=self.exec_node(node,script,as_root=as_root,timeout_sec=timeout_sec,actor=actor)
+                else: result=DirectHostControlChannel(runtime_helper_path=self.config.security.runtime_helper_path,trusted_signers=self.config.security.trusted_signers,require_signed=self.config.security.require_signed_helpers).exec_powershell(script,timeout_sec=budget(timeout_sec))
+                if result.exit_code: raise OperationError('rooted_filesystem_failed','sync',node=node)
+                data=json.loads(result.stdout)
+                if 'error' in data: raise OperationError('rooted_filesystem_failed','sync',node=node)
+                return data
+            return execute
+        host=endpoint(local_base,os.name=='nt',False)
+        guest=endpoint(remote_base,self._is_powershell_node(node),True)
+        source,destination=(host,guest) if direction=='push' else (guest,host)
+        src,dst=(local_relative,remote_relative) if direction=='push' else (remote_relative,local_relative)
+        destination({'action':'mkdir','path':dst})
+        return {**synchronize(source,destination,src,dst,list(DEFAULT_SYNC_EXCLUDES)+list(exclude or [])),
+                'node':node,'direction':direction,'local_dir':str(local),'remote_dir':remote_dir}
+
     def _cleanup_owned(self, node, script, *, as_root=False, actor="cli"):
         try:
             with owned_cleanup():
@@ -1344,6 +1445,8 @@ Write-Output 'PATH_GRANT_OK'
                 "security": {"signed_helper_required": self.config.security.require_signed_helpers,
                              "signed_agents_required": self.config.security.require_signed_agents,
                              "trusted_publishers_configured": bool(self.config.security.trusted_signers)},
+                "retention": {"automatic_archiving":True,"payload_bytes":self.journal.retention.max_payload_bytes,"archive_bytes":self.journal.retention.max_archive_bytes,"identity_capacity":self.journal.retention.max_identities},
+                "worker_verification": {"configured":bool(self.config.security.worker_sha256),"enforced":self.config.security.enforce_worker_attestation,"running_worker":"query-enclave_agent"},
                 "qualification": {"windows_guest": "not_verified", "rdpdr": "not_verified", "vendor_driver": "not_verified"}}
 
     def transaction_status(self, tx_id: str | None = None, *, limit: int = 25):

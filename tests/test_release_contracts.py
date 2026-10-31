@@ -45,12 +45,12 @@ class ReleaseContracts(unittest.TestCase):
         with TemporaryDirectory() as root:
             root=Path(root); helper=root/"fixture.exe"; helper.write_bytes(b"MZfixture")
             (root/"unrelated-secret.txt").write_text("not packaged")
-            output=root/"package"; report=prepare(output,helper)
+            output=root/"package"; report=prepare(output,helper,helper)
             self.assertEqual(report["status"],"unsigned")
             self.assertFalse(report["qualified_windows"])
             names={row["file"] for row in report["files"]}
-            self.assertEqual(names,{"egw-askpass.exe","bastion_worker.ps1","bastion_bootstrap.ps1","appliance_init.ps1","session_supervisor.ps1","verify_windows.ps1","install_windows.ps1"})
-            with self.assertRaises(FileExistsError): prepare(output,helper)
+            self.assertEqual(names,{"egw-askpass.exe","bastion_worker.ps1","bastion_bootstrap.ps1","appliance_init.ps1","session_supervisor.ps1","verify_windows.ps1","install_windows.ps1","egw-runtime.exe"})
+            with self.assertRaises(FileExistsError): prepare(output,helper,helper)
 
     def test_provider_probe_requires_exact_explicit_qualification(self):
         for name in ("vipnet","kontinent","custom","wireguard","anyconnect","openvpn"):
@@ -72,6 +72,16 @@ class ReleaseContracts(unittest.TestCase):
             generated=[provider_adapter(name).probe_script(ProviderSpec(type=name)) for name in ("vipnet","kontinent","wireguard","openvpn","anyconnect")]
             generated+=[build_parallel_striped_stage_ps(bastion_src_path="C:/fixture/file",vfs_spool="C:/fixture/spool",tx_id="test",block_size=65536,parallel_streams=2),
                         build_parallel_striped_assemble_ps(bastion_dest_path="C:/fixture/file",vfs_spool="C:/fixture/spool",tx_id="test",block_size=65536,parallel_streams=2,file_size=0,expected_sha256="0"*64,changed_indices=[],compress=True,use_delta=False)]
+            from enclave_gateway.providers.lifecycle import powershell
+            from enclave_gateway.security.scoped_sync import remote_script
+            from enclave_gateway.transports.owned_ssh import windows_script
+            from enclave_gateway.config import SecuritySpec,TargetNodeSpec
+            from enclave_gateway.transports.ssh_hop import build_powershell_ssh_hop_script
+            from types import SimpleNamespace
+            generated += [powershell({'executable':r'C:\lab\controller.exe','sha256':'a'*64,'publisher':'CN=Fixture','version':'1.0','architecture':'x86_64','arguments':["quoted ' value"],'success_codes':[0]},SecuritySpec()),
+                          remote_script({'root':r'C:\lab','action':'list'},windows=True,helper_path=r'C:\lab\runtime.exe'),
+                          windows_script({'action':'exec','token':'a'*64,'script':"Write-Output 'fixture'",'timeout_sec':3},SimpleNamespace(helper_options={'trusted_signers':(),'require_signed':True},runtime_helper_path=r'C:\lab\runtime.exe')),
+                          build_powershell_ssh_hop_script(TargetNodeSpec('fixture','127.0.0.1',os='windows',user='fixture'),"Write-Output 'fixture'")]
             for index,script in enumerate(generated): (root/f"generated{index}.ps1").write_text(script)
             files=list((ROOT/"src/enclave_gateway/agents").glob("*.ps1"))+list((ROOT/"scripts").rglob("*.ps1"))+list(root.glob("*.ps1"))
             listing=root/"files.json"; listing.write_text(json.dumps([str(path) for path in files]))
@@ -103,13 +113,14 @@ class NativeHelperTests(unittest.TestCase):
 
     def test_cross_compiled_pe_architectures(self):
         for rid,machine in (("win-x64",0x8664),("win-arm64",0xaa64)):
-            file=ROOT/"build"/("askpass-"+rid)/"egw-askpass.exe"
-            if not file.exists(): self.skipTest("Cross build missing")
-            with file.open("rb") as stream:
-                self.assertEqual(stream.read(2),b"MZ")
-                stream.seek(0x3c); offset=struct.unpack("<I",stream.read(4))[0]
-                stream.seek(offset); self.assertEqual(stream.read(4),b"PE\0\0")
-                self.assertEqual(struct.unpack("<H",stream.read(2))[0],machine)
+            for component in ('askpass','runtime'):
+                file=ROOT/'build'/(component+'-'+rid)/('egw-'+component+'.exe')
+                if not file.exists(): self.skipTest('Cross build missing')
+                with file.open('rb') as stream:
+                    self.assertEqual(stream.read(2),b'MZ')
+                    stream.seek(0x3c); offset=struct.unpack('<I',stream.read(4))[0]
+                    stream.seek(offset); self.assertEqual(stream.read(4),b'PE\0\0')
+                    self.assertEqual(struct.unpack('<H',stream.read(2))[0],machine)
 
     @unittest.skipUnless(os.environ.get("EGW_TEST_POWERSHELL"),"PowerShell wrapper runtime is opt-in")
     def test_real_wrapper_restores_process_environment(self):

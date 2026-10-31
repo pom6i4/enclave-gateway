@@ -54,6 +54,31 @@ class OperationTests(unittest.TestCase):
                     first.exec_node("@appliance","echo once",tx_id="stable")
             if os.name != "nt": self.assertEqual(first.journal.path.stat().st_mode & 0o777,0o600)
 
+    def test_late_cancellation_preserves_obtained_result(self):
+        with TemporaryDirectory() as root:
+            from enclave_gateway.operations.context import current
+            control=Mock()
+            def complete(*args,**kwargs):
+                mark_dispatched()
+                return ExecResult(0,'retained-result','',1)
+            control.exec_powershell.side_effect=complete
+            engine=engine_at(root,control)
+            original=engine.recorder.record
+            def acknowledge_then_cancel(*args,**kwargs):
+                result=original(*args,**kwargs)
+                current().cancel()
+                return result
+            engine.recorder.record=acknowledge_then_cancel
+            with self.assertRaises(OperationError) as caught:
+                engine.exec_node('@appliance','fixture',tx_id='late')
+            self.assertTrue(caught.exception.as_dict()['known_outcome'])
+            self.assertFalse(caught.exception.indeterminate)
+            row=engine.transaction_status('late')
+            self.assertEqual(row['state'],'completed')
+            self.assertEqual(row['result']['value']['stdout'],'retained-result')
+            self.assertEqual(engine.exec_node('@appliance','fixture',tx_id='late').stdout,'retained-result')
+            self.assertEqual(control.exec_powershell.call_count,1)
+
     def test_concurrent_duplicate_is_reserved_before_dispatch(self):
         with TemporaryDirectory() as root:
             entered,release=threading.Event(),threading.Event()
@@ -197,10 +222,23 @@ class PolicyTests(unittest.TestCase):
                           ("node_read_file",{"node":"app01","remote_path":"/srv/allowed/../secret"}),
                           ("node_http_request",{"node":"app01","url":"http://127.0.0.1/"}),
                           ("node_http_request",{"node":"app01","url":"http://app01.enclave.internal/"}),
-                          ("node_sync",{"node":"app01","remote_dir":"/srv/allowed"})]:
+                          ("node_sync",{"node":"app01","remote_dir":"/srv/other"})]:
             with self.subTest(tool=tool,args=args), self.assertRaises(OperationError):
                 self.policy.authorize("alice",tool,args,self.config)
         self.policy.authorize("alice","node_http_request",{"node":"app01","url":"http://10.0.20.11/"},self.config)
+
+    def test_diagnostic_grant_does_not_allow_repair(self):
+        grant=Grant('viewer',('enclave_doctor',),nodes=('@appliance','@bastion'))
+        policy=AccessPolicy({'viewer':grant})
+        policy.authorize('viewer','enclave_doctor',{'fix':False},self.config)
+        with self.assertRaises(OperationError): policy.authorize('viewer','enclave_doctor',{'fix':True},self.config)
+
+    def test_per_tool_nodes_do_not_grant_controller_shell_via_status(self):
+        grant=Grant('fixture',('node_exec','enclave_status'),nodes=('@appliance','@bastion','app01'),tool_nodes={'node_exec':['app01']},allow_arbitrary_exec=True)
+        policy=AccessPolicy({'fixture':grant})
+        policy.authorize('fixture','enclave_status',{},self.config)
+        policy.authorize('fixture','node_exec',{'node':'app01','script':'id'},self.config)
+        with self.assertRaises(OperationError): policy.authorize('fixture','node_exec',{'node':'@bastion','script':'id'},self.config)
 
     def test_windows_paths_reject_ads_traversal_and_ambiguous_names(self):
         root=[r"C:\allowed"]

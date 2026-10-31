@@ -48,13 +48,17 @@ def tracked(operation: str):
             budget(timeout)
             tx_id = requested or "tx_" + secrets.token_hex(16)
             node = str(bound.arguments.get("node", "@appliance"))
+            if len(node)>128 or not __import__('re').fullmatch(r'@?[A-Za-z0-9_.-]+',node):
+                raise OperationError('invalid_node','dispatch',tx_id=tx_id)
             identity = principal()
             arguments = {key: _serializable(value) for key, value in bound.arguments.items() if key not in ("self", "actor", "timeout_sec")}
             fingerprint = hashlib.sha256(json.dumps(arguments, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
             previous = self.journal.reserve(tx_id, identity, operation, node, fingerprint, timeout)
             if previous:
                 if previous["state"] in TERMINAL:
-                    if previous["error"]:
+                    if previous.get('payload_status') in ('expired','archive_unavailable'):
+                        raise OperationError('result_expired' if previous['payload_status']=='expired' else 'archive_unavailable', 'journal',tx_id=tx_id,node=node,message='Original outcome identity retained; automatic replay is forbidden')
+                    if previous["error"] and not previous["result"]:
                         data = previous["error"]
                         raise OperationError(data["code"], data["stage"], tx_id=tx_id, node=node,
                                              indeterminate=data.get("indeterminate", False), message=data.get("message", ""))
@@ -71,11 +75,11 @@ def tracked(operation: str):
                 if (identity, tx_id) in self._pending_cancels:
                     context.cancelled.set()
                     self._pending_cancels.discard((identity, tx_id))
+            captured=None
             try:
                 with activate(context):
                     self.journal.update(tx_id, identity, "running")
                     value = function(*bound.args, **bound.kwargs)
-                    context.check("completed")
                     if hasattr(value, "exit_code"):
                         value.tx_id = tx_id
                         value.timings_ms = dict(context.timings_ms)
@@ -90,19 +94,30 @@ def tracked(operation: str):
                     # Dataclass field names are protocol keys, never credential data.
                     saved = ({key: self.vault.scrubber.scrub(item) for key, item in serialized.items()}
                              if kind == "exec" else self.vault.scrubber.scrub(serialized))
-                    self.journal.update(tx_id, identity, state, result={"kind": kind, "value": saved}, timings=context.timings_ms)
+                    captured={"kind":kind,"value":saved}
+                    if getattr(context,'worker_evidence',None): captured['worker_evidence']=context.worker_evidence
+                    context.check("completed")
+                    self.journal.update(tx_id, identity, state, result=captured, timings=context.timings_ms)
                     return value
             except BaseException as exc:
                 error = exc if isinstance(exc, OperationError) else OperationError(
                     "deadline_exceeded" if isinstance(exc, TimeoutError) else "operation_failed", context.stage,
                     tx_id=tx_id, node=node, indeterminate=context.dispatched,
-                    message=self.vault.scrubber.scrub(str(exc)))
+                    message=self.vault.scrubber.scrub(str(exc))[:8192])
                 try:
                     exc.operation_error = error
                 except (AttributeError, TypeError):
                     pass
                 state = "indeterminate" if error.indeterminate else "cancelled" if error.code == "cancelled" else "failed"
-                self.journal.update(tx_id, identity, state, error=error.as_dict(), timings=context.timings_ms)
+                if captured and error.code in ('cancelled','deadline_exceeded'):
+                    # A late delivery/cancellation does not erase an already
+                    # obtained terminal result. Keep it available by operation id.
+                    error.indeterminate=False
+                    error.known_outcome=True
+                    state='failed' if kind=='exec' and value.exit_code else 'completed'
+                data=error.as_dict()
+                if getattr(error,'known_outcome',False): data['known_outcome']=True
+                self.journal.update(tx_id, identity, state, result=captured, error=data, timings=context.timings_ms)
                 # Preserve established exception types for local callers.
                 raise
             finally:

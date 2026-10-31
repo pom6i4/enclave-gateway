@@ -240,8 +240,8 @@ class LoopbackControlChannel:
                 candidate = base64.b64decode(encoded, validate=True).decode("utf-8")
             except (ValueError, UnicodeError):
                 continue
-            if candidate.startswith("unset HISTFILE;"):
-                decoded_sh = candidate
+            if candidate.startswith("unset HISTFILE;") or "unset HISTFILE\n" in candidate:
+                decoded_sh = candidate[candidate.index('unset HISTFILE'): ]
                 break
         if decoded_sh is not None:
             m_ver = re.search(r"if \[ \"\$sha\" != '([0-9a-f]{64})' \]", decoded_sh)
@@ -387,8 +387,8 @@ targets:
         )
         self.assertIn("SSH_ASKPASS_REQUIRE = 'force'", hop_ps)
         self.assertIn("BatchMode=no", hop_ps)
-        self.assertIn("'-i' '~/.ssh/id_ed25519'", hop_ps)
-        self.assertIn("'-p' '2222'", hop_ps)
+        self.assertIn("-i ~/.ssh/id_ed25519", hop_ps)
+        self.assertIn("-p 2222", hop_ps)
 
         with TemporaryDirectory() as tmp:
             control = LoopbackControlChannel()
@@ -948,7 +948,8 @@ targets:
             )
             self.assertNotIn("cmd.exe", sudo_hop_ps)
             self.assertNotIn("s_", sudo_hop_ps)
-            self.assertIn("openssl enc -base64 -d -A", sudo_hop_ps)
+            self.assertIn('RedirectStandardInput=$true', sudo_hop_ps)
+            self.assertNotIn('SudoRootPassword#1', sudo_hop_ps)
 
             # 8. Verify N-hop cascading Multi-Hop SSH (dmz01 -> app01 -> db01) & Windows TargetNode (os: windows)
             multi_cfg = EnclaveConfig.from_dict(

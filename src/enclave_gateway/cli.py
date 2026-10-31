@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -304,7 +305,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_sshcfg = sub.add_parser(
         "ssh-config",
-        help="Generate an OpenSSH ~/.ssh/config block using `egw stdio-proxy %h %p`.",
+        help="Generate an OpenSSH ~/.ssh/config block using `egw stdio-proxy %%h %%p`.",
     )
     p_sshcfg.add_argument(
         "--prefix",
@@ -379,6 +380,9 @@ def build_parser() -> argparse.ArgumentParser:
         "mcp",
         help="Run the MCP JSON-RPC 2.0 server over stdio or HTTP (/mcp, /v1/tools, /openapi.json).",
     )
+    p_mcp.add_argument("--isolation-map",type=Path,help="Trusted map of principals to separate OS-account backend profiles.")
+    p_mcp.add_argument("--worker-state-dir",type=Path,help=argparse.SUPPRESS)
+    p_mcp.add_argument("--worker-identity-handshake",action="store_true",help=argparse.SUPPRESS)
     p_mcp.add_argument("--policy", type=Path, help="JSON principal/tool/node/path/network policy.")
     p_mcp.add_argument("--principal", default="local", help="Trusted launcher identity for stdio or the legacy HTTP bearer token.")
     p_mcp.add_argument(
@@ -443,9 +447,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Target IDE or local LLM client (default: all).",
     )
 
+    p_provider=sub.add_parser('provider',help='Plan/apply an approved version-pinned provider lifecycle recipe.')
+    p_provider.add_argument('action',choices=['install','connect','disconnect','import_key'])
+    p_provider.add_argument('--apply',action='store_true')
+    p_provider.add_argument('--approval-digest',default='')
+    p_provider.add_argument('--tx-id',default=None)
+    sub.add_parser('agent-verify',help='Verify fresh evidence from the running Bastion worker.')
     sub.add_parser("capabilities", help="Report local capabilities without contacting a live enclave.")
     p_tx = sub.add_parser("transactions", help="Retrieve durable results and request cancellation without replaying work.")
-    p_tx.add_argument("action", choices=["get", "list", "cancel", "reconcile"])
+    p_tx.add_argument("action", choices=["get", "list", "cancel", "reconcile", "maintain"])
     p_tx.add_argument("tx_id", nargs="?")
     p_tx.add_argument("--limit", type=int, default=25)
     for transactional_parser in (p_exec, p_cp, p_sync):
@@ -459,7 +469,15 @@ def _main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     cfg = EnclaveConfig.load(args.config)
-    engine = EnclaveEngine(config=cfg)
+    if args.command=='mcp' and args.worker_identity_handshake:
+        from enclave_gateway.security.secrets import SecretVault
+        from enclave_gateway.operations.retention import private_directory
+        from enclave_gateway.audit.flight_recorder import FlightRecorder
+        if not args.worker_state_dir: raise ValueError('Worker state directory is required')
+        private_directory(args.worker_state_dir)
+        engine=EnclaveEngine(config=cfg,vault=SecretVault(env_file=Path(args.config).resolve().parent/'.env'),recorder=FlightRecorder(args.worker_state_dir/'audit.jsonl'))
+    else:
+        engine = EnclaveEngine(config=cfg)
 
     if args.command == "mcp-config":
         configs = generate_client_configs(config_path=args.config)
@@ -481,8 +499,20 @@ def _main(argv: list[str] | None = None) -> int:
             print(json.dumps(export_openapi_spec(), indent=2, ensure_ascii=False))
             return 0
         policy = AccessPolicy.load(args.policy) if args.policy else None
+        router=None
+        if args.isolation_map:
+            if not policy: raise ValueError('Isolation requires an explicit principal policy')
+            from enclave_gateway.security.isolation import PrincipalRouter
+            router=PrincipalRouter(args.isolation_map,vault=engine.vault,policy=policy)
+        if args.worker_identity_handshake:
+            if os.name!='nt':
+                import signal
+                def terminate_worker(_signal,_frame): raise KeyboardInterrupt()
+                signal.signal(signal.SIGTERM,terminate_worker)
+            from enclave_gateway.security.isolation import process_identity,process_privileged
+            print(json.dumps({'egw_worker_identity':process_identity(),'privileged':process_privileged(),'principal':args.principal,'config':str(Path(args.config).resolve())}),flush=True)
         server = McpJsonRpcServer(
-            engine,
+            engine,router=router,
             policy=policy, principal=args.principal,
             read_only=bool(args.read_only),
             max_output_chars=int(args.max_output_chars),
@@ -524,7 +554,15 @@ def _main(argv: list[str] | None = None) -> int:
             return 0
         finally:
             server.stop_all_tunnels()
+            if router: router.close()
 
+    if args.command=='provider':
+        result=engine.provider_manage(args.action,apply=args.apply,approval_digest=args.approval_digest,tx_id=args.tx_id)
+        print(json.dumps(result,indent=2))
+        return 1 if result.get('cleanup_pending') else 0
+    if args.command=='agent-verify':
+        print(json.dumps(engine.attest_worker(),indent=2))
+        return 0
     if args.command == "capabilities":
         print(json.dumps(engine.capabilities(), indent=2))
         return 0
@@ -532,7 +570,9 @@ def _main(argv: list[str] | None = None) -> int:
     if args.command == "transactions":
         if args.action in ("get", "cancel") and not args.tx_id:
             parser.error("transactions get/cancel requires a tx_id")
-        if args.action == "cancel":
+        if args.action=='maintain':
+            value=engine.journal.maintain(force=True)
+        elif args.action == "cancel":
             value = engine.cancel_transaction(args.tx_id)
         elif args.action == "reconcile":
             from enclave_gateway.operations.context import principal

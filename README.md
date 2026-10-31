@@ -5,6 +5,8 @@
 ---
 
 Local security audit and compatibility limits: [31 October 2026 audit](docs/SECURITY_AUDIT_2026-10-31.md).
+Functional follow-up: [scoped sync, provider lifecycle, OS isolation and running-worker verification](docs/FUNCTIONAL_HARDENING_2026-10-31.md).
+
 Operation journals, principal grants, isolated qualification and Windows release procedure: [hardening guide](docs/HARDENING_AND_QUALIFICATION.md). Windows, RDPdr, vendor-driver and Authenticode acceptance remain separate from local runtime tests.
 
 ## Overview
@@ -48,7 +50,7 @@ Connecting modern developer workstations (**macOS on Apple Silicon `M1–M5`**, 
    * `egw top` renders a live terminal dashboard tracking `Host -> Appliance -> VPN -> Bastion -> TargetNodes`, while `egw watch` runs an autonomous self-healing loop (`doctor --fix`).
 
 6. **VFS Transit, Binary SSH Streams, & `sudo` Injection**
-   * Payloads destined for upstream Linux `TargetNodes` are Base64-encoded end-to-end and stripped of `CR` (`\r`) characters (`tr -d '\r'`), reducing newline and quoting ambiguities; command arguments and file paths are escaped separately.
+   * Command scripts stream over SSH stdin with UTF-8 and normalized line endings; payloads are encoded where required by the control protocol. Command arguments and file paths are escaped separately.
    * File transfers to `TargetNodes` (`via: bastion`) transit directly through `\\tsclient\C\EnclaveGateway\spool` without writing temporary staging copies onto the Bastion's local `C:` disk, and automatically fall back to pure `ssh.exe` streaming (`cat > ...`) if `scp` / `sftp-server` is disabled on a hardened target.
    * Elevated `--sudo` operations use `sudo -S -p ''` without temporary password files. SSH askpass requires the managed native `egw-askpass.exe`, a valid Authenticode signature and an explicitly trusted signer by default. Its process environment is serialized. Base64 is transport encoding, not protection from privileged process inspection. Host keys must be provisioned before SSH connections.
 

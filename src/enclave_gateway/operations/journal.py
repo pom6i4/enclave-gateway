@@ -7,6 +7,7 @@ import os
 import re
 import sqlite3
 import time
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -16,8 +17,12 @@ TERMINAL = frozenset(("completed", "failed", "cancelled"))
 
 
 class TransactionJournal:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, retention=None) -> None:
+        from enclave_gateway.operations.retention import RetentionPolicy
         self.path = Path(path)
+        self.retention = retention or RetentionPolicy()
+        self._maintenance_lock = threading.Lock()
+        self._last_maintenance = 0.0
 
     @contextmanager
     def connect(self, wait_sec: float = 0.2):
@@ -38,6 +43,11 @@ class TransactionJournal:
                 node TEXT NOT NULL, fingerprint TEXT NOT NULL, state TEXT NOT NULL,
                 created REAL NOT NULL, updated REAL NOT NULL, expires REAL NOT NULL,
                 result TEXT, error TEXT, timings TEXT NOT NULL DEFAULT '{}')""")
+            columns = {row[1] for row in connection.execute('PRAGMA table_info(transactions)')}
+            if 'archive_ref' not in columns:
+                try: connection.execute("ALTER TABLE transactions ADD COLUMN archive_ref TEXT NOT NULL DEFAULT ''")
+                except sqlite3.OperationalError:
+                    if 'archive_ref' not in {row[1] for row in connection.execute('PRAGMA table_info(transactions)')}: raise
             yield connection
         finally:
             connection.close()
@@ -54,7 +64,9 @@ class TransactionJournal:
                     if row["principal"] != principal or row["fingerprint"] != fingerprint or row["operation"] != operation:
                         raise OperationError("transaction_conflict", "journal", tx_id=tx_id, node=node)
                     db.execute("COMMIT")
-                    return self.decode(row)
+                    return self.hydrate(self.decode(row))
+                if db.execute('SELECT COUNT(*) FROM transactions').fetchone()[0] >= self.retention.max_identities:
+                    raise OperationError('journal_capacity', 'journal', tx_id=tx_id, message='Identity capacity reached; choose an explicitly new journal namespace')
                 db.execute("INSERT INTO transactions (tx_id,principal,operation,node,fingerprint,state,created,updated,expires) VALUES (?,?,?,?,?,'accepted',?,?,?)",
                            (tx_id, principal, operation, node, fingerprint, now, now, now + timeout))
                 db.execute("COMMIT")
@@ -74,7 +86,35 @@ class TransactionJournal:
     def get(self, tx_id: str, principal: str):
         with self.connect() as db:
             row = db.execute("SELECT * FROM transactions WHERE tx_id=? AND principal=?", (tx_id, principal)).fetchone()
-        return self.decode(row) if row else None
+        return self.hydrate(self.decode(row)) if row else None
+
+    def hydrate(self, row):
+        if row.get('archive_ref'):
+            from enclave_gateway.operations.retention import read_archive
+            try:
+                archived = read_archive(self.path.with_suffix('.archives'),row['archive_ref'],row['tx_id'],row['principal'])
+                row['result'],row['error'] = archived['result'],archived['error']
+                row['payload_status'] = 'archived'
+            except FileNotFoundError:
+                row['payload_status'] = 'expired'
+            except (ValueError, OSError):
+                row['payload_status'] = 'archive_unavailable'
+        else:
+            row['payload_status'] = 'retained'
+        return row
+
+    def maintain(self, *, force=False):
+        from enclave_gateway.operations.retention import maintain
+        if not self._maintenance_lock.acquire(blocking=force):
+            return {'deferred':True}
+        try:
+            if force or time.monotonic()-self._last_maintenance >= self.retention.interval_seconds:
+                result = maintain(self)
+                self._last_maintenance = time.monotonic()
+                return result
+            return {'deferred':True}
+        finally:
+            self._maintenance_lock.release()
 
     def recent(self, principal: str, limit: int = 25):
         with self.connect() as db:
@@ -91,6 +131,16 @@ class TransactionJournal:
                                   json.dumps(timings or {}), tx_id, principal)).rowcount
             if changed != 1:
                 raise OperationError("transaction_not_found", "journal", tx_id=tx_id)
+
+        if state in TERMINAL or state=='indeterminate':
+            # A maintenance failure cannot replace an already committed outcome.
+            # Capacity/identity protection remains active before any new dispatch.
+            try:
+                with self.connect() as db:
+                    count,size=db.execute("SELECT COUNT(*),COALESCE(SUM(length(CAST(COALESCE(result,'') AS BLOB))+length(CAST(COALESCE(error,'') AS BLOB))),0) FROM transactions WHERE archive_ref='' AND state IN ('completed','failed','cancelled','indeterminate')").fetchone()
+                self.maintain(force=count>self.retention.max_results or size>self.retention.max_payload_bytes)
+            except (OSError,ValueError,sqlite3.Error) as exc:
+                self._maintenance_error=type(exc).__name__
 
     def request_cancel(self, tx_id: str, principal: str) -> bool:
         with self.connect() as db:

@@ -15,6 +15,8 @@ foreach ($directory in @($bin,$agents)) {
 foreach ($name in @('bastion_worker.ps1','bastion_bootstrap.ps1','appliance_init.ps1','session_supervisor.ps1')) {
     Copy-Item -LiteralPath (Join-Path $PackageDir $name) -Destination (Join-Path $agents $name) -Force
 }
-Copy-Item -LiteralPath (Join-Path $PackageDir 'egw-askpass.exe') -Destination (Join-Path $bin 'egw-askpass.exe') -Force
+foreach ($name in @('egw-askpass.exe','egw-runtime.exe')) {
+    Copy-Item -LiteralPath (Join-Path $PackageDir $name) -Destination (Join-Path $bin $name) -Force
+}
 # Installation does not launch a worker, modify VPN state, or reconnect sessions.
 @{ status='installed_files_only'; worker_started=$false; helper_path=(Join-Path $bin 'egw-askpass.exe'); agents_path=$agents } | ConvertTo-Json

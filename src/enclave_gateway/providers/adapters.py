@@ -17,7 +17,7 @@ class ProviderAdapter:
 
     def capabilities(self):
         return {"provider": self.name, "adapter_revision": self.revision, "status_probe": True,
-                "automatic_key_import": False, "automatic_install": False,
+                "automatic_key_import": False, "automatic_install": False,"managed_lifecycle":True,"approved_recipe_required":True,
                 "qualification": "requires-installed-version-and-driver-validation"}
 
     def probe_script(self, spec) -> str:

@@ -5,7 +5,11 @@ param(
     [int]$MaxMuxSessions = 256,
     [int]$MaxRequestsPerTick = 32,
     [int]$MaxTransactionRecords = 100000,
-    [string]$StopFile = ""
+    [string]$StopFile = "",
+    [bool]$ProcessIsolation = ($env:OS -eq 'Windows_NT'),
+    [string]$RuntimeHelper = "$env:LOCALAPPDATA\EnclaveGateway\bin\egw-runtime.exe",
+    [string[]]$TrustedSignerThumbprints = @(),
+    [switch]$AllowUnsignedLab
 )
 
 if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
@@ -28,6 +32,31 @@ $pool.Open()
 $clock = [Diagnostics.Stopwatch]::StartNew()
 $lastHeartbeat = -2000
 $completedCount = 0
+$workerInstance=[Guid]::NewGuid().ToString('N')
+$loadedWorkerHash=(Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$workerSignatureStatus='NotSupported'
+$workerSigner=''
+$runtimeHash=''
+$workerSid=''
+if ($env:OS -eq 'Windows_NT') {
+    $signature=Get-AuthenticodeSignature -LiteralPath $PSCommandPath
+    $workerSignatureStatus=[string]$signature.Status
+    if ($signature.SignerCertificate) { $workerSigner=$signature.SignerCertificate.Thumbprint }
+    $workerSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+}
+if ($ProcessIsolation) {
+    if (-not (Test-Path -LiteralPath $RuntimeHelper -PathType Leaf)) { throw 'Install the managed runtime before isolated execution' }
+    $runtimeHash=(Get-FileHash -LiteralPath $RuntimeHelper -Algorithm SHA256).Hash.ToLowerInvariant()
+    if (-not $AllowUnsignedLab) {
+        $signature=Get-AuthenticodeSignature -LiteralPath $RuntimeHelper
+        if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Thumbprint -notin $TrustedSignerThumbprints) { throw 'Untrusted process runtime' }
+    }
+}
+function Stop-Execution($Job) {
+    $Job.Cancelled=$true
+    if ($Job.Native) { try { if (-not $Job.Process.HasExited) { $Job.Process.Kill() } } catch {} }
+    else { $Job.StopHandle=$Job.Pipe.BeginStop($null,$null) }
+}
 $transactionCount = @(Get-ChildItem -LiteralPath $stateDir -Filter '*.json' -File).Count
 
 function Write-DurableText([string]$Path, [string]$Text) {
@@ -49,7 +78,7 @@ function Write-State {
 
 function Write-Response {
     param([string]$TxId, [int]$ExitCode=0, [string]$Stdout='', [string]$Stderr='', [int]$DurationMs=0, [string]$State='completed', [bool]$StoreState=$true)
-    $result = @{ tx_id=$TxId; exit_code=$ExitCode; state=$State;
+    $result = @{ tx_id=$TxId; exit_code=$ExitCode; state=$State; worker_instance=$workerInstance; worker_sha256=$loadedWorkerHash;
         stdout_b64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Stdout));
         stderr_b64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Stderr)); duration_ms=$DurationMs }
     $temporary = Join-Path $SpoolDir "res_$TxId.tmp"
@@ -96,8 +125,7 @@ try {
                 [IO.File]::WriteAllText((Join-Path $stateDir "$cancelId.cancel"), '')
                 foreach ($job in @($activeTxJobs.ToArray())) {
                     if ($job.TxId -eq $cancelId -and -not $job.Cancelled) {
-                        $job.Cancelled=$true
-                        $job.StopHandle=$job.Pipe.BeginStop($null, $null)
+                        Stop-Execution $job
                     }
                 }
                 foreach ($job in @($pendingMux.ToArray())) { if ($job.TxId -eq $cancelId) { $job.Cancelled=$true } }
@@ -107,13 +135,16 @@ try {
         # Reap shell pipelines without waiting for incomplete work.
         foreach ($job in @($activeTxJobs.ToArray())) {
             if (-not $job.Handle.IsCompleted -and $job.Timer.ElapsedMilliseconds -ge $job.TimeoutMs -and -not $job.Cancelled) {
-                $job.Cancelled=$true
-                $job.StopHandle=$job.Pipe.BeginStop($null, $null)
+                Stop-Execution $job
             }
-            if (-not $job.Handle.IsCompleted) { continue }
+            if (-not $job.Handle.IsCompleted -or ($job.Native -and -not $job.Process.HasExited)) { continue }
             $activeTxJobs.Remove($job) | Out-Null
             try {
-                $values=$job.Pipe.EndInvoke($job.Handle)
+                if ($job.Native) {
+                    $raw=$job.Handle.GetAwaiter().GetResult()
+                    $values=@(($raw | ConvertFrom-Json))
+                    if ($job.Process.ExitCode -ne 0) { if ($job.Process.ExitCode -in @(124,125)) { $job.Cancelled=$true }; throw 'Owned process failed or timed out' }
+                } else { $values=$job.Pipe.EndInvoke($job.Handle) }
                 if ($job.Cancelled) { throw 'Execution interrupted; external effects may continue' }
                 if ($values.Count -ne 1) { throw 'Execution ended without a result' }
                 $value=$values[0]
@@ -124,8 +155,11 @@ try {
                 $code=if ($job.Cancelled) { 125 } else { 1 }
                 Write-Response $job.TxId $code '' ($_ | Out-String) ([int]$job.Timer.ElapsedMilliseconds) $state
             } finally {
-                if ($job.StopHandle -and $job.StopHandle.IsCompleted) { try { $job.Pipe.EndStop($job.StopHandle) } catch {} }
-                $job.Pipe.Dispose()
+                if ($job.Native) { $job.Process.Dispose() }
+                else {
+                    if ($job.StopHandle -and $job.StopHandle.IsCompleted) { try { $job.Pipe.EndStop($job.StopHandle) } catch {} }
+                    $job.Pipe.Dispose()
+                }
             }
         }
 
@@ -200,6 +234,10 @@ try {
                 $request=Get-Content -LiteralPath $claim -Raw -Encoding UTF8 | ConvertFrom-Json
                 $txId=[string]$request.tx_id
                 if ($txId -notmatch '^[A-Za-z0-9_-]{1,128}$' -or $file.Name -ne "req_$txId.json") { throw 'Invalid transaction identifier' }
+                if ($request.expected_worker_instance -and ($request.expected_worker_instance -ne $workerInstance -or $request.expected_worker_sha256 -ne $loadedWorkerHash)) {
+                    Write-Response $txId 125 '' 'Worker instance/release changed before dispatch' 0 'cancelled'
+                    continue
+                }
                 if (Test-Path -LiteralPath (Join-Path $stateDir "$txId.cancel")) {
                     Write-Response $txId 125 '' 'Cancelled before dispatch' 0 'cancelled'
                     continue
@@ -218,13 +256,54 @@ try {
                 }
                 $timeout=if ($request.timeout_ms) { [int]$request.timeout_ms } else { 120000 }
                 if ($timeout -lt 1 -or $timeout -gt 86400000) { throw 'Invalid request timeout' }
+                if ($request.expires_unix_ms) {
+                    $remaining=[double]$request.expires_unix_ms-[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+                    if ($remaining -le 0) { Write-Response $txId 125 '' 'Deadline expired before dispatch' 0 'cancelled'; continue }
+                    $timeout=[int][Math]::Max(1,[Math]::Min($timeout,$remaining))
+                } elseif ($ProcessIsolation) { throw 'Isolated execution requires a request deadline' }
                 $action=[string]$request.mux_action
                 if (-not $action -and $activeTxJobs.Count -ge 4*$ParallelStreams) {
                     Move-Item -LiteralPath $claim -Destination $file.FullName
                     continue
                 }
                 Write-State $txId 'running'
-                if ($action) {
+                if ($request.op -eq 'attest') {
+                    $nonce=[string]$request.attestation_nonce
+                    if ($nonce -notmatch '^[a-f0-9]{64}$') { throw 'Invalid attestation challenge' }
+                    $evidence=@{ protocol_revision=1; version='0.3.0'; runtime_loaded_sha256=$runtimeHash; runtime_current_sha256='';
+                        nonce=$nonce; instance_id=$workerInstance; pid=$PID; loaded_sha256=$loadedWorkerHash; current_sha256='';
+                        signature_status='NotSupported'; signer=''; loaded_signature_status=$workerSignatureStatus; loaded_signer=$workerSigner;
+                        os_user=[Environment]::UserName; sid=$workerSid;
+                        execution_model=if ($ProcessIsolation) {'owned-process-job'} else {'runspace-lab'} }
+                    $query=@{ evidence=$evidence; worker_path=$PSCommandPath; runtime_path=$RuntimeHelper; process_isolation=$ProcessIsolation } | ConvertTo-Json -Compress -Depth 5
+                    $query64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($query))
+                    # Signature verification may consult OS trust/revocation services.
+                    # Run it outside the dispatcher so it cannot stall socket turns.
+                    $probe=@'
+param($Encoded)
+$q=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Encoded)) | ConvertFrom-Json
+$e=$q.evidence
+$e.current_sha256=(Get-FileHash -LiteralPath $q.worker_path -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($q.process_isolation) { $e.runtime_current_sha256=(Get-FileHash -LiteralPath $q.runtime_path -Algorithm SHA256).Hash.ToLowerInvariant() }
+if ($env:OS -eq 'Windows_NT') {
+    $s=Get-AuthenticodeSignature -LiteralPath $q.worker_path
+    $e.signature_status=[string]$s.Status
+    if ($s.SignerCertificate) {$e.signer=$s.SignerCertificate.Thumbprint}
+    if ($q.process_isolation) {
+        $s=Get-AuthenticodeSignature -LiteralPath $q.runtime_path
+        $e | Add-Member -NotePropertyName runtime_signature_status -NotePropertyValue ([string]$s.Status)
+        $e | Add-Member -NotePropertyName runtime_signer -NotePropertyValue $(if ($s.SignerCertificate) {$s.SignerCertificate.Thumbprint} else {''})
+    }
+}
+$e | ConvertTo-Json -Compress -Depth 5
+'@
+                    $probe64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($probe))
+                    $text="& ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$probe64')))) '$query64'"
+                    $pipe=[powershell]::Create(); $pipe.RunspacePool=$pool
+                    [void]$pipe.AddScript($execute).AddArgument($text)
+                    try {$handle=$pipe.BeginInvoke()} catch {$pipe.Dispose();throw}
+                    $activeTxJobs.Add(@{TxId=$txId;Pipe=$pipe;Handle=$handle;StopHandle=$null;Timer=[Diagnostics.Stopwatch]::StartNew();TimeoutMs=$timeout;Cancelled=$false})
+                } elseif ($action) {
                     $connectionId=[string]$request.conn_id
                     if ($connectionId -notmatch '^mux_[0-9a-f]+$' -and $action -ne 'close_all') { throw 'Invalid mux identifier' }
                     if ($action -eq 'open') {
@@ -261,11 +340,30 @@ try {
                 } else {
                     $scriptText=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$request.payload_b64))
                     if ($scriptText -match '\$Global:EnclaveMuxSockets|\$Global:EnclaveRunspacePool') { throw 'Worker state is accessible only through structured mux operations' }
-                    $pipe=[powershell]::Create()
-                    $pipe.RunspacePool=$pool
-                    [void]$pipe.AddScript($execute).AddArgument($scriptText)
-                    try { $handle=$pipe.BeginInvoke() } catch { $pipe.Dispose(); throw }
-                    $activeTxJobs.Add(@{ TxId=$txId; Pipe=$pipe; Handle=$handle; StopHandle=$null; Timer=[Diagnostics.Stopwatch]::StartNew(); TimeoutMs=$timeout; Cancelled=$false })
+                    if ($ProcessIsolation) {
+                        $encodedScript=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($scriptText))
+                        $child="[Console]::OutputEncoding=New-Object Text.UTF8Encoding(`$false); & { $($execute.ToString()) } ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$encodedScript'))) | ConvertTo-Json -Compress"
+                            $powerShellPath=[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+                        $psi=New-Object Diagnostics.ProcessStartInfo
+                        $psi.FileName=$RuntimeHelper; $psi.Arguments='run'; $psi.UseShellExecute=$false
+                        $psi.RedirectStandardInput=$true; $psi.RedirectStandardOutput=$true; $psi.RedirectStandardError=$true
+                        $psi.StandardOutputEncoding=New-Object Text.UTF8Encoding($false); $psi.StandardErrorEncoding=New-Object Text.UTF8Encoding($false)
+                        $proc=New-Object Diagnostics.Process; $proc.StartInfo=$psi
+                        try {
+                            [void]$proc.Start()
+                            $outTask=$proc.StandardOutput.ReadToEndAsync(); $errTask=$proc.StandardError.ReadToEndAsync()
+                            $bootstrap='[Console]::InputEncoding=New-Object Text.UTF8Encoding($false); & ([scriptblock]::Create([Console]::In.ReadToEnd()))'
+                            $inputJson=@{command=@($powerShellPath,'-NoProfile','-NonInteractive','-Command',$bootstrap); timeout_ms=$timeout; stdin_b64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($child))} | ConvertTo-Json -Compress
+                            $proc.StandardInput.WriteLine($inputJson); $proc.StandardInput.Close()
+                        } catch { try { $proc.Kill() } catch {}; $proc.Dispose(); throw }
+                        $activeTxJobs.Add(@{TxId=$txId; Native=$true; Process=$proc; Handle=$outTask; ErrorTask=$errTask; Timer=[Diagnostics.Stopwatch]::StartNew(); TimeoutMs=$timeout; Cancelled=$false})
+                    } else {
+                        $pipe=[powershell]::Create()
+                        $pipe.RunspacePool=$pool
+                        [void]$pipe.AddScript($execute).AddArgument($scriptText)
+                        try { $handle=$pipe.BeginInvoke() } catch { $pipe.Dispose(); throw }
+                        $activeTxJobs.Add(@{ TxId=$txId; Pipe=$pipe; Handle=$handle; StopHandle=$null; Timer=[Diagnostics.Stopwatch]::StartNew(); TimeoutMs=$timeout; Cancelled=$false })
+                    }
                 }
             } catch {
                 if ($txId -match '^[A-Za-z0-9_-]{1,128}$') { Write-Response $txId 1 '' ($_ | Out-String) 0 'failed' }
@@ -282,7 +380,7 @@ try {
             Get-ChildItem -LiteralPath $SpoolDir -Filter 'res_*.json' -File | Where-Object { $_.Length -eq 0 -or ((Get-Date)-$_.LastWriteTime).TotalSeconds -gt 300 } | Remove-Item -Force -ErrorAction SilentlyContinue
             $self=[Diagnostics.Process]::GetCurrentProcess()
             $state=@{ working_set_bytes=$self.WorkingSet64; handles=$self.HandleCount; threads=$self.Threads.Count; pid=$PID; language_mode=[string]$ExecutionContext.SessionState.LanguageMode; uptime_sec=[int]$clock.Elapsed.TotalSeconds;
-                parallel_streams=$ParallelStreams; active_mux_streams=$Global:EnclaveMuxSockets.Count; active_tx_jobs=$activeTxJobs.Count;
+                execution_model=if ($ProcessIsolation) {"owned-process-job"} else {"runspace-lab"}; parallel_streams=$ParallelStreams; active_mux_streams=$Global:EnclaveMuxSockets.Count; active_tx_jobs=$activeTxJobs.Count;
                 pending_mux=$pendingMux.Count; completed_transactions=$completedCount; transaction_records=$transactionCount; transaction_capacity=$MaxTransactionRecords; last_heartbeat_utc=(Get-Date).ToUniversalTime().ToString('o') }
             $self.Dispose()
             $temporary=Join-Path $SpoolDir 'worker_state.tmp'
@@ -293,7 +391,10 @@ try {
         Start-Sleep -Milliseconds ([Math]::Max(1, [Math]::Min($PollIntervalMs, 50)))
     }
 } finally {
-    foreach ($job in @($activeTxJobs.ToArray())) { try { $job.Pipe.Stop() } catch {} finally { $job.Pipe.Dispose() } }
+    foreach ($job in @($activeTxJobs.ToArray())) {
+        try { if ($job.Native) { $job.Process.Kill(); $job.Process.WaitForExit(5000) | Out-Null } else { $job.Pipe.Stop() } }
+        catch {} finally { if ($job.Native) { $job.Process.Dispose() } else { $job.Pipe.Dispose() } }
+    }
     foreach ($job in @($pendingMux.ToArray())) {
         if ($job.ConnectHandle) { $job.ConnectHandle.AsyncWaitHandle.Close() }
         if ($job.Receive) { $job.Receive.Dispose() }

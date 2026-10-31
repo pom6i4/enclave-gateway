@@ -310,6 +310,41 @@ class RdpVfsTransport:
     def __init__(self, control: ControlChannel, spec: BastionSpec) -> None:
         self.control = control
         self.spec = spec
+        self._attestation_lock=threading.RLock()
+        self._verified_worker=None
+        self._verified_until=0.0
+
+    def _verify_dispatch(self,op):
+        guard=getattr(self,'attestation_guard',None)
+        if not guard or op=='attest': return None
+        context=current()
+        deadline=time.monotonic()+budget(10,'attestation.lock')
+        while True:
+            checkpoint('attestation.lock')
+            remaining=deadline-time.monotonic()
+            if remaining<=0: raise OperationError('attestation_timeout','attestation')
+            if self._attestation_lock.acquire(timeout=min(0.1,remaining)): break
+        try:
+            if context and getattr(context,'worker_invalidated',False): raise OperationError('agent_instance_changed','attestation',indeterminate=True)
+            if context and getattr(context,'worker_evidence',None): return context.worker_evidence
+            if context is None and self._verified_worker and time.monotonic()<self._verified_until: return self._verified_worker
+            evidence=guard()
+            if not isinstance(evidence,dict) or not evidence.get('verified'): raise OperationError('agent_attestation_failed','attestation')
+            self._verified_worker=evidence; self._verified_until=time.monotonic()+2
+            if context: context.worker_evidence=evidence
+            return evidence
+        finally: self._attestation_lock.release()
+
+    def _parse_worker_response(self,raw,duration,tx_id,evidence):
+        if evidence:
+            try: response=json.loads(raw.lstrip('\ufeff'))
+            except ValueError: response={}
+            if not isinstance(response,dict): response={}
+            if response.get('worker_instance')!=evidence['instance_id'] or response.get('worker_sha256')!=evidence['loaded_sha256']:
+                self._verified_worker=None;self._verified_until=0
+                if current(): current().worker_invalidated=True
+                raise OperationError('agent_instance_changed','vfs.response',tx_id=current().tx_id if current() else tx_id,indeterminate=True)
+        return self._parse_envelope_response(raw,duration,tx_id)
 
     def exec_bastion(
         self,
@@ -358,8 +393,14 @@ class RdpVfsTransport:
     def _dispatch_envelope_impl(
         self, envelope: dict[str, Any], timeout_sec: float = 120.0
     ) -> ExecResult:
+        evidence=self._verify_dispatch(envelope.get('op'))
         timeout_sec = budget(timeout_sec, "vfs.dispatch")
         deadline = time.monotonic() + timeout_sec
+        envelope=dict(envelope)
+        envelope.setdefault('expires_unix_ms',int((time.time()+timeout_sec)*1000))
+        if evidence:
+            envelope['expected_worker_instance']=evidence['instance_id']
+            envelope['expected_worker_sha256']=evidence['loaded_sha256']
         tx_id = str(envelope["tx_id"])
         if not re.fullmatch(r"[A-Za-z0-9_]+", tx_id):
             raise ValueError("Invalid transaction identifier")
@@ -405,7 +446,7 @@ class RdpVfsTransport:
                         stderr=f"Timed out waiting for BastionWorker response for {tx_id}",
                         duration_ms=int((time.monotonic() - started) * 1000),
                     )
-                result = self._parse_envelope_response(raw_res_text, int((time.monotonic() - started) * 1000), tx_id)
+                result = self._parse_worker_response(raw_res_text, int((time.monotonic() - started) * 1000), tx_id,evidence)
                 consumer = getattr(self.control, "consume_file", None)
                 if callable(consumer) and not result.stderr.startswith("Malformed BastionWorker response:"):
                     consumer(res_guest)
@@ -457,7 +498,12 @@ exit 124
                 stderr=res.stderr or f"Bastion IPC failed (code {res.exit_code})",
                 duration_ms=int((time.monotonic() - started) * 1000),
             )
-        return self._parse_envelope_response(res.stdout, res.duration_ms, tx_id)
+        return self._parse_worker_response(res.stdout, res.duration_ms, tx_id,evidence)
+
+    def attest(self, nonce, timeout_sec=10):
+        result=self.exec_bastion('',timeout_sec=timeout_sec,op='attest',extra_fields={'attestation_nonce':nonce})
+        if result.exit_code: raise OperationError('agent_attestation_failed','attestation',message=result.stderr)
+        return json.loads(result.stdout)
 
     def request_cancel(self, request_id: str) -> None:
         if not re.fullmatch(r"[A-Za-z0-9_]{1,128}", request_id):

@@ -76,6 +76,11 @@ class ProviderSpec:
     qualified_versions: list[str] = field(default_factory=list)
     qualified_architectures: list[str] = field(default_factory=list)
     expected_publisher: str = ""
+    lifecycle_manifest: str = ''
+    lifecycle_manifest_sha256: str = ''
+    lifecycle_inputs: dict[str,str] = field(default_factory=dict)
+    lifecycle_local_artifacts: dict[str,str] = field(default_factory=dict)
+    lifecycle_artifact_publishers: dict[str,str] = field(default_factory=dict)
     probe_host: str = "10.0.1.10"
     probe_port: int = 3389
     routes: list[str] = field(default_factory=list)
@@ -147,13 +152,29 @@ class PortForwardSpec:
 class SecuritySpec:
     askpass_helper_path: str = r"%LOCALAPPDATA%\EnclaveGateway\bin\egw-askpass.exe"
     trusted_signers: list[str] = field(default_factory=list)
+    runtime_helper_path: str = r"%LOCALAPPDATA%\EnclaveGateway\bin\egw-runtime.exe"
     require_signed_helpers: bool = True
     require_signed_agents: bool = True
+    worker_sha256: str = ''
+    worker_version: str = '0.3.0'
+    runtime_sha256: str = ''
+    worker_account: str = ''
+    enforce_worker_attestation: bool = False
+    require_process_isolation: bool = False
+    owned_ssh_commands: bool = False
 
 
     def __post_init__(self):
-        if type(self.require_signed_helpers) is not bool or type(self.require_signed_agents) is not bool:
-            raise ValueError("Signature requirements must be boolean")
+        if any(type(getattr(self,name)) is not bool for name in ('require_signed_helpers','require_signed_agents','enforce_worker_attestation','require_process_isolation','owned_ssh_commands')):
+            raise ValueError("Security requirements must be boolean")
+        if any(value and not re.fullmatch('[a-fA-F0-9]{64}',value) for value in (self.worker_sha256,self.runtime_sha256)):
+            raise ValueError('Worker SHA-256 must be a release digest')
+        if not isinstance(self.worker_version,str) or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?',self.worker_version):
+            raise ValueError('Worker version must be explicit')
+        if self.worker_account and not re.fullmatch(r'S-1-(?:[0-9]+-)*[0-9]+',self.worker_account):
+            raise ValueError('Pin a Windows worker SID; display names are not identity')
+        if not isinstance(self.worker_account,str) or not isinstance(self.runtime_helper_path,str):
+            raise ValueError('Worker identity/runtime path must be strings')
         if not isinstance(self.trusted_signers, list) or any(not isinstance(value, str) or not re.fullmatch(r"[A-Fa-f0-9]{40,64}", value.replace(" ", "")) for value in self.trusted_signers):
             raise ValueError("Trusted signers must be certificate thumbprints")
 
@@ -165,6 +186,7 @@ class EnclaveConfig:
     provider: ProviderSpec = field(default_factory=ProviderSpec)
     bastion: BastionSpec = field(default_factory=BastionSpec)
     security: SecuritySpec = field(default_factory=SecuritySpec)
+    journal_retention: dict = field(default_factory=dict)
     targets: dict[str, TargetNodeSpec] = field(default_factory=dict)
     forwards: dict[str, PortForwardSpec] = field(default_factory=dict)
 
@@ -173,6 +195,9 @@ class EnclaveConfig:
         app_raw = dict(raw.get("appliance") or {})
         prov_raw = dict(raw.get("provider") or {})
         bast_raw = dict(raw.get("bastion") or {})
+        security_raw=dict(raw.get('security') or {})
+        if set(security_raw)-set(SecuritySpec.__dataclass_fields__):
+            raise ValueError('Unknown security setting')
         targets_raw = dict(raw.get("targets") or {})
         forwards_raw = dict(raw.get("forwards") or {})
 
@@ -225,7 +250,8 @@ class EnclaveConfig:
 
         return cls(
             profile=str(raw.get("profile", "default")),
-            security=SecuritySpec(**{key: value for key, value in dict(raw.get("security") or {}).items() if key in SecuritySpec.__dataclass_fields__}),
+            journal_retention=dict(raw.get("journal_retention") or {}),
+            security=SecuritySpec(**security_raw),
             appliance=ApplianceSpec(
                 **{k: v for k, v in app_raw.items() if k in ApplianceSpec.__dataclass_fields__}
             ),

@@ -20,6 +20,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--python", action="append", dest="interpreters", default=[])
     parser.add_argument("--powershell")
+    parser.add_argument("--runtime",type=Path)
+    parser.add_argument("--allow-unsigned-lab",action="store_true")
     parser.add_argument("--transactions", type=int, default=100)
     parser.add_argument("--output-dir", type=Path, default=ROOT / "build/qualification")
     parser.add_argument("--timeout", type=float, default=300)
@@ -39,6 +41,10 @@ def main():
     if args.powershell:
         commands.append(("worker-loopback", [sys.executable, "scripts/qualification/worker_loopback.py", "--powershell", args.powershell,
                                               "--transactions", str(args.transactions), "--output", str(args.output_dir / "worker.json")]))
+    if args.powershell and args.runtime:
+        commands[-1][1].extend(['--runtime',str(args.runtime)])
+    if args.powershell and args.allow_unsigned_lab:
+        commands[-1][1].append('--allow-unsigned-lab')
     environment = {**os.environ, "PYTHONPATH": str(ROOT / "src")}
     for label, command in commands:
         log = args.output_dir / (label + ".log")

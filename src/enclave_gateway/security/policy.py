@@ -19,6 +19,7 @@ class Grant:
     name: str
     tools: tuple[str, ...]
     nodes: tuple[str, ...] = ()
+    tool_nodes: dict[str,list[str]] = field(default_factory=dict)
     read_roots: dict[str, list[str]] = field(default_factory=dict)
     write_roots: dict[str, list[str]] = field(default_factory=dict)
     local_read_roots: tuple[str, ...] = ()
@@ -30,9 +31,16 @@ class Grant:
     unrestricted_paths: bool = False
     unrestricted_network: bool = False
     allow_cancel: bool = False
+    allow_provider_management: bool = False
+    allow_repair: bool = False
 
     def permits_tool(self, tool: str) -> bool:
         return tool in self.tools or "*" in self.tools
+
+    def permits_tool_node(self,tool,node):
+        allowed=self.tool_nodes.get(tool)
+        if allowed is None: return self.permits_node(node)
+        return self.permits_node(node) and (canonical_node(node) in {canonical_node(item) for item in allowed} or '*' in allowed)
 
     def permits_node(self, node: str) -> bool:
         node = canonical_node(node)
@@ -108,6 +116,9 @@ class AccessPolicy:
                 entries = values.get(key, [])
                 if not isinstance(entries, list) or any(not isinstance(item, str) for item in entries):
                     raise ValueError("Policy lists must contain strings")
+            overrides=values.get('tool_nodes',{})
+            if not isinstance(overrides,dict) or any(not isinstance(key,str) or not isinstance(nodes,list) or any(not isinstance(node,str) for node in nodes) for key,nodes in overrides.items()):
+                raise ValueError('Invalid per-tool node grants')
             for key in ("read_roots", "write_roots"):
                 roots = values.get(key, {})
                 if not isinstance(roots, dict) or any(not isinstance(v, list) or any(not isinstance(p, str) for p in v) for v in roots.values()):
@@ -115,7 +126,7 @@ class AccessPolicy:
                 for paths in roots.values():
                     for item in paths:
                         remote_path(item)
-            for key in ("allow_root", "allow_arbitrary_exec", "unrestricted_paths", "unrestricted_network", "allow_cancel"):
+            for key in ("allow_root", "allow_arbitrary_exec", "unrestricted_paths", "unrestricted_network", "allow_cancel", "allow_provider_management", "allow_repair"):
                 if key in values and type(values[key]) is not bool:
                     raise ValueError("Policy flags must be booleans")
             for network in values.get("destinations", []):
@@ -148,20 +159,23 @@ class AccessPolicy:
     def authorize(self, principal: str, tool: str, args: dict, config) -> Grant:
         grant = self.grant(principal)
         self.require(grant.permits_tool(tool), "Tool is not granted")
+        if tool=='enclave_provider':
+            self.require(grant.allow_provider_management and grant.permits_node('@appliance'),'Provider management requires an explicit administrative grant')
+        if tool=='enclave_agent': self.require(grant.permits_node('@bastion'),'Worker verification requires the Bastion grant')
         if tool in ("enclave_status", "enclave_doctor"):
             self.require(grant.permits_node("@appliance") and grant.permits_node("@bastion"), "Diagnostics access Appliance and Bastion")
         if tool == "enclave_audit":
             self.require("*" in grant.nodes, "The shared audit requires an explicit all-nodes grant")
         node = canonical_node(str(args.get("node", "")))
         if node:
-            self.require(grant.permits_node(node), "Node is not granted")
+            self.require(grant.permits_tool_node(tool,node), "Node is not granted for this tool")
         self.require(not (args.get("as_root") or args.get("confirm_destructive")) or grant.allow_root, "Elevated or destructive execution is not granted")
         if tool in ("node_exec", "node_db_query"):
             self.require(grant.allow_arbitrary_exec, "Arbitrary command/SQL execution requires an explicit grant")
-        if tool == "node_sync":
-            self.require(grant.unrestricted_paths, "Scoped directory sync is unsupported: remote tar extraction cannot prove link-safe containment")
-        if tool == "enclave_transaction" and args.get("action", "get") in ("cancel", "reconcile"):
+        if tool == "enclave_transaction" and args.get("action", "get") in ("cancel", "reconcile", "maintain"):
             self.require(grant.allow_cancel, "Transaction cancellation/reconciliation is not granted")
+        if tool=='enclave_transaction' and args.get('action')=='maintain':
+            self.require('*' in grant.nodes,'Journal maintenance requires an explicit all-nodes grant')
         path = args.get("remote_path") or args.get("remote_dir")
         if path and not grant.unrestricted_paths:
             writing = tool == "node_patch_file" or args.get("direction") == "push"
@@ -183,6 +197,7 @@ class AccessPolicy:
             url = urlsplit(args.get("url", ""))
             self.authorize_destination(grant, url.hostname or "", url.port or (443 if url.scheme == "https" else 80))
         if tool in ("enclave_heal", "enclave_clean") or (tool == "enclave_doctor" and args.get("fix")):
+            self.require(grant.allow_repair,'Controller repair requires an explicit grant')
             self.require(grant.permits_node("@appliance") and grant.permits_node("@bastion"), "Repair requires Appliance and Bastion grants")
         return grant
 

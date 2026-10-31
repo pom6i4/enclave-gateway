@@ -39,7 +39,7 @@ if ($RegisterStartup) {
     $thumbprints=$trusted -join ','
     $launch="powershell.exe -NoProfile -File `"$bootstrapDst`" -SourceSpool `"$SourceSpool`" -WorkerPath `"$workerDst`" -TrustedSignerThumbprintsCsv $thumbprints"
     Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'EnclaveBastionWorker' -Value $launch
-    & $workerDst -SpoolDir $SourceSpool
+    & $workerDst -SpoolDir $SourceSpool -TrustedSignerThumbprints $trusted
     return
 }
-& $workerSrc -SpoolDir $SourceSpool
+& $workerSrc -SpoolDir $SourceSpool -TrustedSignerThumbprints $trusted -AllowUnsignedLab:$AllowUnsignedLab

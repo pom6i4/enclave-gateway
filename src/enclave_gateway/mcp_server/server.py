@@ -469,19 +469,28 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
 
 
 for definition in TOOL_DEFINITIONS:
-    if definition["name"] in {"node_exec", "node_transfer", "node_sync", "node_read_file", "node_patch_file", "enclave_heal", "enclave_clean"}:
+    if definition["name"] in {"node_exec", "node_transfer", "node_sync", "node_read_file", "node_patch_file", "enclave_heal", "enclave_clean", "enclave_provider"}:
         definition["inputSchema"]["properties"]["tx_id"] = {"type": "string", "description": "Optional stable transaction id. Reuse retrieves the original operation and never replays ambiguous work."}
 
 TOOL_DEFINITIONS.append({
     "name": "enclave_transaction", "description": "Get/list operation state and retained result, request cancellation, or mark expired execution indeterminate. Identity comes from the authenticated connection.",
     "inputSchema": {"type": "object", "properties": {
-        "action": {"type": "string", "enum": ["get", "list", "cancel", "reconcile"], "default": "get"},
+        "action": {"type": "string", "enum": ["get", "list", "cancel", "reconcile", "maintain"], "default": "get"},
         "tx_id": {"type": "string"}, "limit": {"type": "integer", "default": 25}}, "additionalProperties": False},
 })
 
 
 TOOL_DEFINITIONS.append({"name": "enclave_capabilities", "description": "Report local capabilities and explicit unverified qualification boundaries without probing a live enclave.",
                          "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}})
+
+TOOL_DEFINITIONS.append({'name':'enclave_agent','description':'Verify fresh running-worker evidence against pinned release hash, signer, OS account and execution model.',
+                         'inputSchema':{'type':'object','properties':{},'additionalProperties':False}})
+
+TOOL_DEFINITIONS.append({'name':'enclave_provider','description':'Plan/apply an administrator-approved, version-pinned provider lifecycle recipe. No inferred proprietary commands.',
+                         'inputSchema':{'type':'object','properties':{
+                             'action':{'type':'string','enum':['install','connect','disconnect','import_key']},
+                             'apply':{'type':'boolean','default':False},'approval_digest':{'type':'string'},'tx_id':{'type':'string'}},
+                             'required':['action'],'additionalProperties':False}})
 
 
 class McpJsonRpcServer:
@@ -495,8 +504,10 @@ class McpJsonRpcServer:
         max_output_chars: int = DEFAULT_MAX_OUTPUT_CHARS,
         policy: AccessPolicy | None = None,
         principal: str = "local",
+        router=None,
     ) -> None:
         self.engine = engine
+        self.router=router
         self.policy, self.principal = policy, principal
         if policy:
             policy.grant(principal)
@@ -512,6 +523,45 @@ class McpJsonRpcServer:
     def handle_message(self, msg: Any, *, principal: str | None = None) -> Any:
         verified = principal or self.principal
         with identity(verified), grant_scope(self.policy.grant(verified) if self.policy else None):
+            if self.router:
+                if isinstance(msg,list):
+                    if not msg or len(msg)>128 or any(isinstance(item,list) for item in msg): return self._error(None,-32600,'Invalid Request')
+                    responses=[self.handle_message(item,principal=verified) for item in msg]
+                    return [response for response in responses if response is not None] or None
+                if not isinstance(msg,dict): return self._error(None,-32600,'Invalid Request')
+                req_id=msg.get('id')
+                if msg.get('jsonrpc')!='2.0' or not isinstance(msg.get('method'),str) or isinstance(req_id,(dict,list,bool)) or (isinstance(req_id,float) and not math.isfinite(req_id)):
+                    return self._error(None,-32600,'Invalid Request')
+                if not isinstance(msg.get('params',{}),dict): return self._error(req_id,-32602,'Named params required')
+                key=(verified,req_id)
+                tracked=False
+                try:
+                    if msg.get('method')=='notifications/cancelled':
+                        target=msg.get('params',{}).get('requestId')
+                        if not isinstance(target,(dict,list,bool)):
+                            with self._request_lock:
+                                if (verified,target) in self._queued_requests: self._queued_cancels.add((verified,target))
+                    if msg.get('method')=='tools/call':
+                        params=msg.get('params',{}); name=params.get('name',''); args=params.get('arguments',{})
+                        error=validate_tool_arguments(name,args)
+                        if error: return self._error(req_id,-32602,error)
+                        if self.policy: self.policy.authorize(verified,name,args,self.engine.config)
+                        violation=self._check_read_only_violation(name,args)
+                        if violation: return self._tool_result(req_id,violation,is_error=True)
+                        with self._request_lock:
+                            if key in self._request_transactions: raise OperationError('duplicate_request_id','isolation')
+                            self._request_transactions[key]='isolated'
+                            self._queued_requests.add(key)
+                            tracked=True
+                    def cancelled():
+                        with self._request_lock: return key in self._queued_cancels
+                    return self.router.handle(verified,msg,cancel_requested=cancelled)
+                except OperationError as exc:
+                    return {'jsonrpc':'2.0','id':req_id,'error':{'code':-32003 if exc.code=='access_denied' else -32001,'message':str(exc),'data':exc.as_dict()}}
+                finally:
+                    if tracked:
+                        with self._request_lock:
+                            self._request_transactions.pop(key,None);self._queued_requests.discard(key);self._queued_cancels.discard(key)
             return self._handle_message_impl(msg)
 
     def _handle_message_impl(self, msg: Any) -> Any:
@@ -716,7 +766,7 @@ class McpJsonRpcServer:
             )
 
     def _call_tool(self, req_id, tool_name, args):
-        transactional = tool_name in {"node_exec", "node_transfer", "node_sync", "node_read_file", "node_patch_file", "enclave_heal", "enclave_clean"}
+        transactional = tool_name in {"node_exec", "node_transfer", "node_sync", "node_read_file", "node_patch_file", "enclave_heal", "enclave_clean", "enclave_provider"}
         key = (operation_principal(), req_id)
         if transactional:
             args = dict(args)
@@ -758,7 +808,7 @@ class McpJsonRpcServer:
     ) -> str | None:
         if not self.read_only:
             return None
-        permitted = {"enclave_status", "enclave_audit", "enclave_ssh_config", "node_read_file", "enclave_doctor", "enclave_tunnel", "enclave_transaction", "enclave_capabilities"}
+        permitted = {"enclave_status", "enclave_audit", "enclave_ssh_config", "node_read_file", "enclave_doctor", "enclave_tunnel", "enclave_transaction", "enclave_capabilities", "enclave_agent"}
         if tool_name not in permitted:
             return f"Tool '{tool_name}' is blocked in --read-only mode."
         if tool_name == "enclave_transaction" and args.get("action", "get") not in ("get", "list"):
@@ -778,6 +828,12 @@ class McpJsonRpcServer:
         if ro_err is not None:
             return self._tool_result(req_id, ro_err, is_error=True)
 
+        if tool_name=='enclave_provider':
+            result=self.engine.provider_manage(args['action'],apply=args.get('apply',False),approval_digest=args.get('approval_digest',''),tx_id=args.get('tx_id'),actor='mcp')
+            return self._tool_result(req_id,self._json_dump(result,indent=2),is_error=bool(result.get('cleanup_pending')))
+        if tool_name == 'enclave_agent':
+            return self._tool_result(req_id,self._json_dump(self.engine.attest_worker(),indent=2))
+
         if tool_name == "enclave_capabilities":
             return self._tool_result(req_id, self._json_dump(self.engine.capabilities(), indent=2))
 
@@ -790,7 +846,9 @@ class McpJsonRpcServer:
                 record = self.engine.transaction_status(tx_id)
                 if not self.node_visible(record["node"]):
                     raise OperationError("access_denied", "policy")
-            if action == "cancel":
+            if action=='maintain':
+                value=self.engine.journal.maintain(force=True)
+            elif action == "cancel":
                 value = self.engine.cancel_transaction(tx_id)
             elif action == "reconcile":
                 grant = self.policy.grant(operation_principal()) if self.policy else None
@@ -1132,9 +1190,11 @@ class McpJsonRpcServer:
             except KeyboardInterrupt:
                 with self._request_lock:
                     pending = list(self._request_transactions.values())
-                with identity(self.principal):
-                    for tx_id in pending:
-                        self.engine.request_cancel_pending(tx_id)
+                if self.router: self.router.close()
+                else:
+                    with identity(self.principal):
+                        for tx_id in pending:
+                            self.engine.request_cancel_pending(tx_id)
                 raise
 
     def _read_stdio(self, source, binary_input, emit, process, executor, slots):

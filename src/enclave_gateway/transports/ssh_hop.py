@@ -124,9 +124,39 @@ try {{
 def build_powershell_ssh_hop_script(node, bash_script, *, as_root=False, ssh_password="", sudo_password="",
                                    connect_timeout_sec=15, stage_dir=r"%LOCALAPPDATA%\EnclaveGateway\stage", jump_node=None,
                                    helper_path=r"%LOCALAPPDATA%\EnclaveGateway\bin\egw-askpass.exe", trusted_signers=(), require_signed=True):
-    remote = build_remote_bash_invocation(bash_script, as_root=as_root, sudo_password=sudo_password, target_os=node.os)
-    args = _build_ssh_common_opts(node, has_ssh_password=bool(ssh_password), connect_timeout_sec=connect_timeout_sec, jump_node=jump_node)
-    script = f"& ssh.exe -n -T {args} {ps_quote(_node_uri(node))} {ps_quote(remote)}\nif ($LASTEXITCODE -ne 0) {{ throw \"SSH failed with exit code $LASTEXITCODE\" }}"
+    if node.os in ('windows','win','powershell'):
+        if as_root: raise ValueError('sudo is unsupported for Windows targets')
+        bootstrap='[Console]::InputEncoding=New-Object Text.UTF8Encoding($false); [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false); & ([scriptblock]::Create([Console]::In.ReadToEnd()))'
+        remote='powershell.exe -NoProfile -NonInteractive -EncodedCommand '+base64.b64encode(bootstrap.encode('utf-16le')).decode()
+        payload=bash_script
+    else:
+        shell="if command -v bash >/dev/null 2>&1; then exec bash -s; else exec sh -s; fi"
+        remote=('sudo -S -p '+shlex.quote('')+' sh -c '+shlex.quote(shell)) if as_root else shell
+        if as_root and any(char in sudo_password for char in ('\r','\n','\0')): raise ValueError('sudo password must be a single line')
+        payload=(sudo_password+'\n' if as_root else '')+'unset HISTFILE\n'+bash_script.replace('\r','')+'\n'
+    arguments=['-T']+_ssh_args(node,has_ssh_password=bool(ssh_password),connect_timeout_sec=connect_timeout_sec,jump_node=jump_node)+[_node_uri(node),remote]
+    encoded=base64.b64encode(payload.encode()).decode()
+    script=f"""
+$psi=New-Object Diagnostics.ProcessStartInfo
+$psi.FileName='ssh.exe'
+$psi.Arguments={ps_quote(subprocess.list2cmdline(arguments))}
+$psi.UseShellExecute=$false
+$psi.RedirectStandardInput=$true; $psi.RedirectStandardOutput=$true; $psi.RedirectStandardError=$true
+$psi.StandardOutputEncoding=New-Object Text.UTF8Encoding($false); $psi.StandardErrorEncoding=New-Object Text.UTF8Encoding($false)
+$proc=New-Object Diagnostics.Process; $proc.StartInfo=$psi
+try {{
+    [void]$proc.Start()
+    $output=$proc.StandardOutput.ReadToEndAsync(); $errorOutput=$proc.StandardError.ReadToEndAsync()
+    $bytes=[Convert]::FromBase64String('{encoded}')
+    $copy=$proc.StandardInput.BaseStream.WriteAsync($bytes,0,$bytes.Length)
+    [void]$copy.GetAwaiter().GetResult(); $proc.StandardInput.Close()
+    $proc.WaitForExit()
+    $outText=$output.GetAwaiter().GetResult(); $errText=$errorOutput.GetAwaiter().GetResult()
+    if ($outText) {{[Console]::Out.Write($outText)}}
+    if ($errText) {{[Console]::Error.Write($errText)}}
+    if ($proc.ExitCode -ne 0) {{throw "SSH failed with exit code $($proc.ExitCode)"}}
+}} finally {{try {{if (-not $proc.HasExited) {{$proc.Kill()}}}} catch {{}}; $proc.Dispose()}}
+"""
     return _wrap_with_askpass_ps(script, ssh_password, secrets.token_hex(12), stage_dir=stage_dir, helper_path=helper_path, trusted_signers=trusted_signers, require_signed=require_signed)
 
 
@@ -155,7 +185,7 @@ def _stream_ps(node, stage, remote_path, *, pulling, password, jump_node, timeou
     arguments = ps_quote(subprocess.list2cmdline(args))
     redirect = "$psi.RedirectStandardOutput = $true" if pulling else "$psi.RedirectStandardInput = $true"
     copy_call = "$proc.StandardOutput.BaseStream.CopyToAsync($file)" if pulling else "$file.CopyToAsync($proc.StandardInput.BaseStream)"
-    copy = f"$copy = {copy_call}; if (-not $copy.Wait({int(timeout_sec * 1000)})) {{ $proc.Kill(); throw 'SSH binary stream timed out' }}; $copy.GetAwaiter().GetResult();" + ("" if pulling else "$proc.StandardInput.Close()")
+    copy = f"$copy = {copy_call}; if (-not $copy.Wait({int(timeout_sec * 1000)})) {{ $proc.Kill(); throw 'SSH binary stream timed out' }}; [void]$copy.GetAwaiter().GetResult();" + ("" if pulling else "$proc.StandardInput.Close()")
     mode = "Create" if pulling else "OpenRead"
     return f"""
 $psi = New-Object Diagnostics.ProcessStartInfo
@@ -183,7 +213,9 @@ try {{
 class SshHopExecutor:
     def __init__(self, exec_hop_fn: Callable[[str, float], ExecResult], push_hop_fn: Callable[[Path, str, float], str],
                  pull_hop_fn: Callable[[str, Path, float], str], *, stage_dir=r"%LOCALAPPDATA%\EnclaveGateway\stage",
-                 helper_path=r"%LOCALAPPDATA%\EnclaveGateway\bin\egw-askpass.exe", trusted_signers=(), require_signed=True):
+                 helper_path=r"%LOCALAPPDATA%\EnclaveGateway\bin\egw-askpass.exe", trusted_signers=(), require_signed=True, owned_commands=False, runtime_helper_path=r"%LOCALAPPDATA%\EnclaveGateway\bin\egw-runtime.exe"):
+        self.runtime_helper_path=runtime_helper_path
+        self.owned_commands=owned_commands
         self._exec_hop = exec_hop_fn
         self._push_hop = push_hop_fn
         self._pull_hop = pull_hop_fn
@@ -191,6 +223,12 @@ class SshHopExecutor:
         self.helper_options = dict(helper_path=helper_path, trusted_signers=tuple(trusted_signers), require_signed=require_signed)
 
     def exec_node(self, node, bash_script, *, as_root=False, ssh_password="", sudo_password="", timeout_sec=120.0, jump_node=None):
+        if self.owned_commands:
+            from enclave_gateway.transports.owned_ssh import run
+            return run(self,node,bash_script,dict(as_root=as_root,ssh_password=ssh_password,sudo_password=sudo_password,timeout_sec=timeout_sec,jump_node=jump_node))
+        return self._exec_plain(node,bash_script,as_root=as_root,ssh_password=ssh_password,sudo_password=sudo_password,timeout_sec=timeout_sec,jump_node=jump_node)
+
+    def _exec_plain(self, node, bash_script, *, as_root=False, ssh_password="", sudo_password="", timeout_sec=120.0, jump_node=None):
         script = build_powershell_ssh_hop_script(node, bash_script, as_root=as_root, ssh_password=ssh_password,
                                                 sudo_password=sudo_password, stage_dir=self.stage_dir, jump_node=jump_node, **self.helper_options)
         mark_dispatched()

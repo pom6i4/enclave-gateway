@@ -111,8 +111,9 @@ class EchoServer:
 
 
 class Worker:
-    def __init__(self, powershell: str, directory: Path):
+    def __init__(self, powershell: str, directory: Path, runtime=None, allow_unsigned_lab=False):
         self.powershell, self.directory = powershell, directory
+        self.runtime,self.allow_unsigned_lab=runtime,allow_unsigned_lab
         self.spool = directory / "spool"
         self.spool.mkdir(exist_ok=True)
         self.stop_file = directory / "stop"
@@ -126,15 +127,19 @@ class Worker:
         (self.spool / "worker_state.json").unlink(missing_ok=True)
         self.output = (self.directory / "worker.log").open("ab")
         environment = {key: value for key, value in os.environ.items() if not key.startswith(("ENCLAVE_", "EGW_", "SSH_"))}
-        self.process = subprocess.Popen([self.powershell, "-NoProfile", "-NonInteractive", "-File",
+        command=[self.powershell, "-NoProfile", "-NonInteractive", "-File",
             str(ROOT / "src/enclave_gateway/agents/bastion_worker.ps1"), "-SpoolDir", str(self.spool),
-            "-StopFile", str(self.stop_file), "-PollIntervalMs", "2"], stdout=self.output, stderr=self.output, env=environment)
+            "-StopFile", str(self.stop_file), "-PollIntervalMs", "2"]
+        if self.runtime: command+=['-RuntimeHelper',str(self.runtime)]
+        if self.allow_unsigned_lab: command+=['-AllowUnsignedLab']
+        self.process = subprocess.Popen(command, stdout=self.output, stderr=self.output, env=environment)
         deadline = time.monotonic() + 15
         while not (self.spool / "worker_state.json").exists():
             if self.process.poll() is not None or time.monotonic() >= deadline:
                 self.close()
                 raise RuntimeError((self.directory / "worker.log").read_text(errors="replace"))
             time.sleep(0.02)
+        self.transport._verified_worker=None;self.transport._verified_until=0
         return self
 
     def close(self):
@@ -153,18 +158,29 @@ class Worker:
         return self.transport._dispatch_envelope(envelope, timeout_sec=6)
 
 
-def run(powershell: str, transactions: int = 100):
+def run(powershell: str, transactions: int = 100, runtime=None, allow_unsigned_lab=False):
     findings = {"scope": "isolated-files-and-loopback", "platform": sys.platform, "transactions": transactions,
                 "worker_sha256": hashlib.sha256((ROOT / "src/enclave_gateway/agents/bastion_worker.ps1").read_bytes()).hexdigest()}
     with TemporaryDirectory(prefix="egw-worker-") as temporary:
         root = Path(temporary)
-        worker = Worker(powershell, root)
+        worker = Worker(powershell, root, runtime, allow_unsigned_lab)
         fast, slow = EchoServer(), EchoServer(silent=True)
         try:
             worker.start()
             response = worker.raw("tx_basic", "Write-Output 'fixture-ok'")
             assert response.exit_code == 0 and response.stdout == "fixture-ok", response
             transport = worker.transport
+            from enclave_gateway.security.attestation import verify
+            challenge=__import__('secrets').token_hex(32)
+            evidence=transport.attest(challenge)
+            assert verify(evidence,challenge,expected_sha256=findings['worker_sha256'],require_signed=False)['verified']
+            def guard():
+                nonce=__import__('secrets').token_hex(32)
+                data=transport.attest(nonce)
+                runtime_hash=hashlib.sha256(Path(runtime).read_bytes()).hexdigest() if runtime else ''
+                return verify(data,nonce,expected_sha256=findings['worker_sha256'],require_signed=False,
+                              require_process_isolation=(os.name=='nt'),expected_runtime_sha256=runtime_hash)
+            transport.attestation_guard=guard
             first = transport.mux_open("127.0.0.1", fast.port)
             blocked = transport.mux_open("127.0.0.1", slow.port)
             with ThreadPoolExecutor(max_workers=2) as pool:
@@ -251,7 +267,7 @@ def run(powershell: str, transactions: int = 100):
                     assert handle_growth <= 64, handle_growth
                     findings['post_warmup_handle_growth'] = handle_growth
             assert final['active_tx_jobs'] == 0 and final['pending_mux'] == 0 and final['active_mux_streams'] == 0, final
-            findings["checks"] = ["script-execution", "mux-fairness", "binary-io", "half-close", "striped-files", "restart-no-replay", "cancellation", "remote-timeout", "malformed-envelope", "refused-connect", "soak"]
+            findings["checks"] = ["script-execution", "fresh-attestation", "mux-fairness", "binary-io", "half-close", "striped-files", "restart-no-replay", "cancellation", "remote-timeout", "malformed-envelope", "refused-connect", "soak"]
             findings["status"] = "passed"
         finally:
             worker.close(); fast.close(); slow.close()
@@ -263,10 +279,13 @@ def main():
     parser.add_argument("--powershell", default=shutil.which("pwsh") or shutil.which("powershell"))
     parser.add_argument("--transactions", type=int, default=100)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--runtime",type=Path)
+    parser.add_argument("--allow-unsigned-lab",action="store_true")
     args = parser.parse_args()
     if not args.powershell: parser.error("A PowerShell executable is required")
     if not 1 <= args.transactions <= 100000: parser.error("transactions must be in 1..100000")
-    result = run(args.powershell, args.transactions)
+    if os.name=='nt' and (not args.runtime or not args.allow_unsigned_lab): parser.error('Disposable Windows fixture requires --runtime and --allow-unsigned-lab; signing is qualified separately')
+    result = run(args.powershell, args.transactions,args.runtime,args.allow_unsigned_lab)
     text = json.dumps(result, indent=2, ensure_ascii=False)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

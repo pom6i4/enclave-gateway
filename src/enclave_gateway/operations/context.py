@@ -20,8 +20,10 @@ class OperationError(RuntimeError):
         super().__init__(message or code.replace("_", " ").capitalize())
 
     def as_dict(self) -> dict:
-        return {"code": self.code, "stage": self.stage, "tx_id": self.tx_id, "node": self.node,
+        result={"code": self.code, "stage": self.stage, "tx_id": self.tx_id, "node": self.node,
                 "retryable": self.retryable, "indeterminate": self.indeterminate, "message": str(self)}
+        if getattr(self,'known_outcome',False): result['known_outcome']=True
+        return result
 
 
 @dataclass

@@ -1,6 +1,6 @@
 # Operation safety and isolated qualification
 
-This guide describes the current hardening implementation and its acceptance boundaries. The earlier [security audit](SECURITY_AUDIT_2026-10-31.md) remains a historical record. Hosted Actions are unchanged. No customer enclave, VPN credentials, key container, signing certificate or live RDP session is needed for the local checks below.
+The [functional follow-up](FUNCTIONAL_HARDENING_2026-10-31.md) extends scoped sync, lifecycle management, retention, process isolation and worker verification. This guide describes the baseline hardening implementation and its acceptance boundaries. The earlier [security audit](SECURITY_AUDIT_2026-10-31.md) remains a historical record. Hosted Actions are unchanged. No customer enclave, VPN credentials, key container, signing certificate or live RDP session is needed for the local checks below.
 
 ## Implemented contracts
 
@@ -40,7 +40,7 @@ States are `accepted`, `running`, `cancel_requested`, `completed`, `failed`, `ca
 
 MCP operation errors carry `code`, `stage`, `tx_id`, `node`, `retryable` and `indeterminate`. HTTP tool endpoints map operation failures to 422 and policy denials to 403; JSON-RPC exposes structured error data. Returned execution metadata includes `tx_id` and stage `timings_ms`.
 
-The journal is adjacent to the audit log, with suffix `.transactions.sqlite3`. It uses SQLite transactions and `synchronous=FULL`; POSIX permissions are 0600. On Windows, put the audit/journal directory under a private user ACL. The journal retains scrubbed outputs, including file contents when read through the API, and hashes of arguments. Scrubbing cannot recognize every sensitive document: protect, back up and retain this database as sensitive local data. It is not an encrypted vault. There is no automatic deletion of transaction identity.
+The journal is adjacent to the audit log, with suffix `.transactions.sqlite3`. It uses SQLite transactions and `synchronous=FULL`; POSIX permissions are 0600. On Windows, put the audit/journal directory under a private user ACL. The journal retains scrubbed outputs, including file contents when read through the API, and hashes of arguments. Scrubbing cannot recognize every sensitive document: protect, back up and retain this database as sensitive local data. It is not an encrypted vault. Result payloads now have automatic archival/expiry limits; transaction identities are retained to prevent replay.
 
 The worker flushes metadata/response temporary files before publication and leaves transaction tombstones across worker restarts. Responses are transient (five minutes); use the Host journal for retained results. The default worker capacity is 100,000 tombstones, after which new payloads fail before execution. Archive an old spool only after stopping its owned worker, resolving outstanding work and preserving the journal; start a distinct spool namespace afterward. Deleting tombstones and replaying old envelopes destroys duplicate protection. This is not a distributed exactly-once or power-loss qualification claim.
 
@@ -59,7 +59,7 @@ Each HTTP `token_env` names a distinct credential of at least 16 characters. The
 - `tools`, `nodes`: explicit names or `*`. `@appliance` and `@bastion` are canonical reserved nodes. Read-only mode remains an additional restriction.
 - `read_roots`, `write_roots`: remote roots keyed by node. `local_read_roots`, `local_write_roots`: Host roots for explicit transfer endpoints. Patch requires both remote read and write access. Internal disposable staging is not a user-selected export path.
 - Remote paths must be absolute, without traversal, environment expansion, alternate data streams, reserved Windows device names or ambiguous trailing dots/spaces. File operations reject detected symbolic/reparse-point ancestors. Local containment resolves links before checking roots.
-- Scoped directory sync fails closed. General remote `tar` extraction cannot establish confinement through existing links. It requires `unrestricted_paths`; it should not be offered to a narrowly scoped account.
+- Scoped directory sync uses the rooted regular-file protocol described in the functional follow-up. Trusted unrestricted sync retains the tar path.
 - `destinations`: strict IPv4/IPv6 CIDRs. Scoped network endpoints require IP literals; arbitrary DNS resolution is not an authorization proof. Every proxy connection checks its captured grant in the listener thread. Scoped HTTP requests disable redirects. These are logical destination grants, not replacements for OS egress controls or a hostile remote account sandbox.
 - `allow_arbitrary_exec`: required for shell and SQL. Those languages can access whatever the remote account can access, irrespective of structured file/network grants. Do not give this permission to an untrusted principal in a shared worker process. Use distinct OS accounts/processes and ACLs when principals need stronger isolation.
 - `allow_root` permits explicitly requested elevated/destructive execution. `allow_cancel` permits cancellation/reconciliation of owned work. Tunnel list/stop is owner scoped.
@@ -96,17 +96,17 @@ security:
   require_signed_agents: true
 ```
 
-`require_signed_agents` reports the deployment requirement; Host engine calls do not attest what is already running remotely. The managed bootstrap enforces signatures independently. Use an approved Windows execution policy/WDAC/AppLocker deployment to enforce trust at the initial entry point as well; a script's own signature check cannot establish the trust of that script itself.
+`require_signed_agents` participates in running-worker verification when `enforce_worker_attestation` is enabled; use the release pins and strict profile settings described in the functional follow-up. The managed bootstrap enforces signatures independently. Use an approved Windows execution policy/WDAC/AppLocker deployment to enforce trust at the initial entry point as well; a script's own signature check cannot establish the trust of that script itself.
 
 Build and package without accessing a certificate:
 
 ```powershell
 ./scripts/release/build_helper.ps1 -Runtime win-x64 -OutputDir ./build/askpass-win-x64
 ./scripts/release/build_helper.ps1 -Runtime win-arm64 -OutputDir ./build/askpass-win-arm64
-python scripts/release/prepare_package.py --helper build/askpass-win-x64/egw-askpass.exe --output build/release-win-x64
+python scripts/release/prepare_package.py --helper build/askpass-win-x64/egw-askpass.exe --runtime build/runtime-win-x64/egw-runtime.exe --output build/release-win-x64
 ```
 
-The allow-list contains the helper, four agents and verifier/installer scripts. The manifest explicitly says `unsigned` and `qualified_windows: false`. It does not sweep local directories for binaries, keys or environment files. Binary outputs stay ignored by Git. Use separate packages for the two architectures.
+The allow-list contains both native executables, four agents and verifier/installer scripts. Build the runtime component as described in the functional follow-up. The manifest explicitly says `unsigned` and `qualified_windows: false`. It does not sweep local directories for binaries, keys or environment files. Binary outputs stay ignored by Git. Use separate packages for the two architectures.
 
 Only on a separate signing workstation, with its own code-signing certificate already available in the Windows certificate store:
 
@@ -151,7 +151,7 @@ python3 scripts/qualification/prepare_lab.py --arch x86_64 --output build/isolat
 It uses loopback endpoints, a custom provider with no installer/key, TCG configuration and separate ports. A licensed Windows ISO and matching VirtIO/QGA media must be supplied for an actual VM. Isolate the test guest from the client environment and use synthetic accounts. For real RDPdr acceptance, use a second disposable Windows session and redirected drive. Once inside that stand:
 
 ```powershell
-./scripts/qualification/windows.ps1 -PythonExecutables @('C:\lab\py310\python.exe','C:\lab\py311\python.exe','C:\lab\py312\python.exe','C:\lab\py313\python.exe','C:\lab\py314\python.exe') -Transactions 10000
+./scripts/qualification/windows.ps1 -PythonExecutables @('C:\lab\py310\python.exe','C:\lab\py311\python.exe','C:\lab\py312\python.exe','C:\lab\py313\python.exe','C:\lab\py314\python.exe') -Transactions 10000 -RuntimeHelper ./build/runtime-win-x64/egw-runtime.exe -AllowUnsignedLab
 ```
 
 The Windows runner records only the Windows-local test scope. QGA/RDPdr/driver qualification requires separate recorded evidence; it is not inferred from this command.

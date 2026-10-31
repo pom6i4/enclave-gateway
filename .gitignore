@@ -62,3 +62,7 @@ htmlcov/
 .DS_Store
 ._*
 Thumbs.db
+
+# Private transaction archives and sync stages
+*.archives/
+.egw_sync_*
