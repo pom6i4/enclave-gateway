@@ -388,6 +388,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional Bearer token for HTTP endpoints.",
     )
     p_mcp.add_argument(
+        "--token-env", default="ENCLAVE_MCP_TOKEN",
+        help="Vault/environment key for the HTTP bearer token when --token is omitted.",
+    )
+    p_mcp.add_argument(
+        "--allowed-origin", action="append", default=[],
+        help="Explicit browser origin allowed to access HTTP endpoints; repeat for multiple origins.",
+    )
+    p_mcp.add_argument(
         "--export-openai-tools",
         action="store_true",
         help="Print OpenAI / Ollama / vLLM / llama.cpp function-calling schema JSON and exit.",
@@ -400,7 +408,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_mcp.add_argument(
         "--read-only",
         action="store_true",
-        help="Run MCP server in Zero-Trust Read-Only mode (blocks file pushes, patches, root escalation, and mutating SQL/shell/HTTP commands).",
+        help="Expose structured reads only; block arbitrary commands, SQL/HTTP calls, transfers, sync, tunnels, and escalation.",
     )
     p_mcp.add_argument(
         "--max-output-chars",
@@ -474,7 +482,8 @@ def main(argv: list[str] | None = None) -> int:
                     server,
                     bind_host=bind_host,
                     bind_port=bind_port,
-                    bearer_token=args.token,
+                    bearer_token=args.token or engine.vault.get(args.token_env),
+                    allowed_origins=tuple(args.allowed_origin),
                 )
                 print(
                     f"Enclave Gateway HTTP MCP & Tool Server listening on http://{bind_host}:{bind_port} "
@@ -493,7 +502,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "init":
         admin_pw = (
-            engine.vault.get("ENCLAVE_APPLIANCE_PASSWORD") or "Enclave#Appliance2026"
+            engine.vault.get("ENCLAVE_APPLIANCE_PASSWORD") or ProvisionOptions().admin_password
         )
         opts = ProvisionOptions(
             arch=args.arch,

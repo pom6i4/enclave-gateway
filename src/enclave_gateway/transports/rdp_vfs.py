@@ -10,11 +10,15 @@ import socket
 import threading
 import time
 import zlib
+import re
+from tempfile import NamedTemporaryFile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from enclave_gateway.security.quoting import validate_endpoint
+from enclave_gateway.transports.listener import TcpListener
 from enclave_gateway.config import BastionSpec
 from enclave_gateway.control.qga_client import ControlChannel, ExecResult
 
@@ -36,6 +40,8 @@ def compute_file_sha256(path: Path) -> str:
 
 
 def compute_block_manifest(path: Path, block_size: int = 4 * 1024 * 1024) -> list[BlockDigest]:
+    if type(block_size) is not int or block_size <= 0:
+        raise ValueError("block_size must be a positive integer")
     blocks: list[BlockDigest] = []
     offset = 0
     idx = 0
@@ -68,48 +74,32 @@ def build_parallel_striped_assemble_ps(
     expected_sha256: str,
 ) -> str:
     """Build PowerShell script that uses a RunspacePool for parallel striped chunk reading & assembly."""
+    if not re.fullmatch(r"[A-Za-z0-9_]+", tx_id) or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        raise ValueError("Invalid transfer identifier or checksum")
+    if file_size < 0 or block_size <= 0 or any(i < 0 or i * block_size >= file_size for i in changed_indices):
+        raise ValueError("Invalid block geometry")
+    vfs_spool = vfs_spool.replace("'", "''")
+    bastion_dest_path = bastion_dest_path.replace("'", "''")
     idx_csv = ",".join(str(i) for i in changed_indices)
     compressed_flag = "$true" if compress else "$false"
     streams = max(1, int(parallel_streams))
 
     return f"""
+$ErrorActionPreference = 'Stop'
 $vfsSpool = '{vfs_spool}'
 $dst = [Environment]::ExpandEnvironmentVariables('{bastion_dest_path}')
 $tmp = "$dst.tmp_{tx_id}"
+try {{
 $parent = Split-Path -Parent $dst
-if ($parent -and -not (Test-Path $parent)) {{ New-Item -ItemType Directory -Force -Path $parent | Out-Null }}
+if ($parent -and -not (Test-Path -LiteralPath $parent)) {{ New-Item -ItemType Directory -Force -Path $parent | Out-Null }}
 $changed = @({idx_csv})
 
 if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {{
-    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
-    $first = $true
-    foreach ($idx in $changed) {{
-        $chunkName = ('chunk_{{0}}_{{1:D5}}.bin' -f '{tx_id}', [int]$idx)
-        $chunkPath = Join-Path $vfsSpool $chunkName
-        if ($first) {{
-            Copy-Item $chunkPath $tmp -Force
-            $first = $false
-        }} else {{
-            $chunkBytes = Get-Content -Path $chunkPath -Encoding Byte -Raw
-            if ($null -ne $chunkBytes) {{
-                Add-Content -Path $tmp -Value $chunkBytes -Encoding Byte
-            }}
-        }}
-        Remove-Item $chunkPath -Force -ErrorAction SilentlyContinue
-    }}
-    $actualSha = (Get-FileHash -Algorithm SHA256 $tmp).Hash.ToLower()
-    if ($actualSha -ne '{expected_sha256}') {{
-        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
-        Write-Error "SHA-256 verification failed on Bastion: expected {expected_sha256}, got $actualSha"
-        exit 1
-    }}
-    Move-Item $tmp $dst -Force
-    Write-Output "VERIFIED:$actualSha"
-    exit 0
+    throw 'File assembly requires a policy-approved FullLanguage worker'
 }}
 
-if ((Test-Path $dst) -and '{str(use_delta).lower()}' -eq 'true') {{
-    Copy-Item $dst $tmp -Force
+if ((Test-Path -LiteralPath $dst) -and '{str(use_delta).lower()}' -eq 'true') {{
+    Copy-Item -LiteralPath $dst -Destination $tmp -Force
 }} else {{
     $emptyFs = [IO.File]::Create($tmp)
     $emptyFs.SetLength({file_size})
@@ -117,28 +107,34 @@ if ((Test-Path $dst) -and '{str(use_delta).lower()}' -eq 'true') {{
 }}
 
 $maxStreams = [Math]::Max(1, {streams})
-$ownPool = $false
-if ($Global:EnclaveRunspacePool -and $Global:EnclaveRunspacePool.RunspacePoolStateInfo.State -eq 'Opened') {{
-    $pool = $Global:EnclaveRunspacePool
-}} else {{
-    $pool = [runspacefactory]::CreateRunspacePool(1, $maxStreams)
-    $pool.Open()
-    $ownPool = $true
-}}
+$ownPool = $true
+$pool = [runspacefactory]::CreateRunspacePool(1, $maxStreams)
+$pool.Open()
 
 $stripeWorker = {{
     param([int]$Idx, [string]$Spool, [string]$TxId, [string]$TmpPath, [int64]$BlockSize, [bool]$IsCompressed)
     $chunkName = ('chunk_{{0}}_{{1:D5}}.bin' -f $TxId, $Idx)
     $chunkPath = Join-Path $Spool $chunkName
-    $rawBytes = [IO.File]::ReadAllBytes($chunkPath)
+    $ErrorActionPreference = 'Stop'
+    for ($attempt = 0; ; $attempt++) {{
+        try {{ $rawBytes = [IO.File]::ReadAllBytes($chunkPath); break }} catch {{
+            if ($attempt -ge 19) {{ throw }}
+            Start-Sleep -Milliseconds 25
+        }}
+    }}
     if ($IsCompressed) {{
         $ms = New-Object IO.MemoryStream(,$rawBytes)
         $ms.Position = 2
         $ds = New-Object IO.Compression.DeflateStream($ms, [IO.Compression.CompressionMode]::Decompress)
         $outMs = New-Object IO.MemoryStream
-        $ds.CopyTo($outMs)
-        $ds.Close()
-        $dataBytes = $outMs.ToArray()
+        try {{
+            $buffer = New-Object byte[] 65536
+            while (($count = $ds.Read($buffer, 0, $buffer.Length)) -gt 0) {{
+                if ($outMs.Length + $count -gt $BlockSize) {{ throw 'Decompressed block exceeds block size' }}
+                $outMs.Write($buffer, 0, $count)
+            }}
+            $dataBytes = $outMs.ToArray()
+        }} finally {{ $ds.Dispose(); $outMs.Dispose(); $ms.Dispose() }}
     }} else {{
         $dataBytes = $rawBytes
     }}
@@ -159,16 +155,27 @@ try {{
         $ps = [powershell]::Create()
         $ps.RunspacePool = $pool
         [void]$ps.AddScript($stripeWorker).AddArgument([int]$idx).AddArgument($vfsSpool).AddArgument('{tx_id}').AddArgument($tmp).AddArgument([int64]{block_size}).AddArgument({compressed_flag})
-        $jobs.Add(@{{ Pipe = $ps; Handle = $ps.BeginInvoke() }})
+        try {{ $handle = $ps.BeginInvoke() }} catch {{ $ps.Dispose(); throw }}
+        $jobs.Add(@{{ Pipe = $ps; Handle = $handle }})
+        if ($jobs.Count -ge $maxStreams) {{
+            $job = $jobs[0]
+            $jobs.RemoveAt(0)
+            try {{
+                [void]$job.Pipe.EndInvoke($job.Handle)
+                if ($job.Pipe.Streams.Error.Count) {{ throw $job.Pipe.Streams.Error[0].Exception }}
+            }} finally {{ $job.Pipe.Dispose() }}
+        }}
     }}
     foreach ($job in $jobs) {{
         [void]$job.Pipe.EndInvoke($job.Handle)
         if ($job.Pipe.Streams.Error.Count -gt 0) {{
             throw $job.Pipe.Streams.Error[0].Exception
         }}
-        $job.Pipe.Dispose()
     }}
 }} finally {{
+    foreach ($job in $jobs) {{
+        try {{ if (-not $job.Handle.IsCompleted) {{ $job.Pipe.Stop() }} }} finally {{ $job.Pipe.Dispose() }}
+    }}
     if ($ownPool) {{
         $pool.Close()
         $pool.Dispose()
@@ -182,14 +189,21 @@ try {{
     $truncFs.Close()
 }}
 
-$actualSha = (Get-FileHash -Algorithm SHA256 $tmp).Hash.ToLower()
+$actualSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $tmp).Hash.ToLower()
 if ($actualSha -ne '{expected_sha256}') {{
     Remove-Item $tmp -Force -ErrorAction SilentlyContinue
     Write-Error "SHA-256 verification failed on Bastion: expected {expected_sha256}, got $actualSha"
-    exit 1
+    throw 'Transfer failed'
 }}
-Move-Item $tmp $dst -Force
+Move-Item -LiteralPath $tmp -Destination $dst -Force
 Write-Output "VERIFIED:$actualSha"
+}} finally {{
+    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    foreach ($idx in @({idx_csv})) {{
+        $chunkPath = Join-Path $vfsSpool ('chunk_{{0}}_{{1:D5}}.bin' -f '{tx_id}', [int]$idx)
+        Remove-Item -LiteralPath $chunkPath -Force -ErrorAction SilentlyContinue
+    }}
+}}
 """
 
 
@@ -202,35 +216,36 @@ def build_parallel_striped_stage_ps(
     parallel_streams: int,
 ) -> str:
     """Build PowerShell script that stages a file from Bastion to VFS spool using parallel striped RunspacePool I/O."""
+    if block_size <= 0 or not re.fullmatch(r"[A-Za-z0-9_]+", tx_id):
+        raise ValueError("Invalid staging geometry or identifier")
+    bastion_src_path = bastion_src_path.replace("'", "''")
+    vfs_spool = vfs_spool.replace("'", "''")
     streams = max(1, int(parallel_streams))
     return f"""
+$ErrorActionPreference = 'Stop'
 $src = [Environment]::ExpandEnvironmentVariables('{bastion_src_path}')
-if (-not (Test-Path $src)) {{ Write-Error "Source file not found: $src"; exit 1 }}
-$item = Get-Item $src
+if (-not (Test-Path -LiteralPath $src)) {{ Write-Error "Source file not found: $src"; throw 'Transfer failed' }}
+$item = Get-Item -LiteralPath $src
 $fileSize = [int64]$item.Length
-$sha = (Get-FileHash -Algorithm SHA256 $src).Hash.ToLower()
+$sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $src).Hash.ToLower()
 $blockSize = [int64]{block_size}
 
 if ($fileSize -le $blockSize -or {streams} -le 1 -or $ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {{
     $stagePath = Join-Path '{vfs_spool}' 'pull_{tx_id}.bin'
-    Copy-Item $src $stagePath -Force
+    Copy-Item -LiteralPath $src -Destination $stagePath -Force
     Write-Output "SHA256:$sha:CHUNKS:0"
-    exit 0
+    return
 }}
 
 $numChunks = [int][Math]::Ceiling([double]$fileSize / [double]$blockSize)
 $maxStreams = [Math]::Max(1, {streams})
-$ownPool = $false
-if ($Global:EnclaveRunspacePool -and $Global:EnclaveRunspacePool.RunspacePoolStateInfo.State -eq 'Opened') {{
-    $pool = $Global:EnclaveRunspacePool
-}} else {{
-    $pool = [runspacefactory]::CreateRunspacePool(1, $maxStreams)
-    $pool.Open()
-    $ownPool = $true
-}}
+$ownPool = $true
+$pool = [runspacefactory]::CreateRunspacePool(1, $maxStreams)
+$pool.Open()
 
 $stageWorker = {{
     param([int]$Idx, [string]$SrcPath, [string]$Spool, [string]$TxId, [int64]$BlockSize, [int64]$TotalSize)
+    $ErrorActionPreference = 'Stop'
     $offset = [int64]$Idx * $BlockSize
     $toRead = [int][Math]::Min($BlockSize, $TotalSize - $offset)
     $buf = New-Object byte[] $toRead
@@ -240,7 +255,7 @@ $stageWorker = {{
         $readTotal = 0
         while ($readTotal -lt $toRead) {{
             $r = $fs.Read($buf, $readTotal, $toRead - $readTotal)
-            if ($r -le 0) {{ break }}
+            if ($r -le 0) {{ throw 'Source file changed during staging' }}
             $readTotal += $r
         }}
     }} finally {{
@@ -257,16 +272,27 @@ try {{
         $ps = [powershell]::Create()
         $ps.RunspacePool = $pool
         [void]$ps.AddScript($stageWorker).AddArgument([int]$i).AddArgument($src).AddArgument('{vfs_spool}').AddArgument('{tx_id}').AddArgument($blockSize).AddArgument($fileSize)
-        $jobs.Add(@{{ Pipe = $ps; Handle = $ps.BeginInvoke() }})
+        try {{ $handle = $ps.BeginInvoke() }} catch {{ $ps.Dispose(); throw }}
+        $jobs.Add(@{{ Pipe = $ps; Handle = $handle }})
+        if ($jobs.Count -ge $maxStreams) {{
+            $job = $jobs[0]
+            $jobs.RemoveAt(0)
+            try {{
+                [void]$job.Pipe.EndInvoke($job.Handle)
+                if ($job.Pipe.Streams.Error.Count) {{ throw $job.Pipe.Streams.Error[0].Exception }}
+            }} finally {{ $job.Pipe.Dispose() }}
+        }}
     }}
     foreach ($job in $jobs) {{
         [void]$job.Pipe.EndInvoke($job.Handle)
         if ($job.Pipe.Streams.Error.Count -gt 0) {{
             throw $job.Pipe.Streams.Error[0].Exception
         }}
-        $job.Pipe.Dispose()
     }}
 }} finally {{
+    foreach ($job in $jobs) {{
+        try {{ if (-not $job.Handle.IsCompleted) {{ $job.Pipe.Stop() }} }} finally {{ $job.Pipe.Dispose() }}
+    }}
     if ($ownPool) {{
         $pool.Close()
         $pool.Dispose()
@@ -301,6 +327,8 @@ class RdpVfsTransport:
             "timeout_ms": int(timeout_sec * 1000),
         }
         if extra_fields:
+            if set(extra_fields) & set(envelope):
+                raise ValueError("Reserved envelope fields cannot be overridden")
             envelope.update(extra_fields)
         return self._dispatch_envelope(envelope, timeout_sec=timeout_sec)
 
@@ -308,6 +336,8 @@ class RdpVfsTransport:
         self, envelope: dict[str, Any], timeout_sec: float = 120.0
     ) -> ExecResult:
         tx_id = str(envelope["tx_id"])
+        if not re.fullmatch(r"[A-Za-z0-9_]+", tx_id):
+            raise ValueError("Invalid transaction identifier")
         raw_envelope = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
         spool = self.spec.appliance_spool_dir.rstrip("\\/")
         started = time.monotonic()
@@ -318,23 +348,24 @@ class RdpVfsTransport:
         ):
             req_guest = f"{spool}\\req_{tx_id}.json"
             res_guest = f"{spool}\\res_{tx_id}.json"
-            direct_write_ok = False
-            try:
-                self.control.write_bytes(raw_envelope, req_guest)
-                direct_write_ok = True
-            except Exception:
-                direct_write_ok = False
-
-            if direct_write_ok:
+            publisher = getattr(self.control, "publish_bytes", None)
+            if callable(publisher):
+                # Publication failure is ambiguous: never replay a mutating command.
+                publisher(raw_envelope, req_guest)
                 deadline = time.monotonic() + timeout_sec
                 delay = 0.005
                 raw_res_text = ""
                 while time.monotonic() < deadline:
-                    res_bytes = try_read_fn(res_guest, truncate_after_read=True)
+                    res_bytes = try_read_fn(res_guest, truncate_after_read=False)
                     if res_bytes:
                         raw_res_text = res_bytes.decode("utf-8", errors="replace").strip()
                         if raw_res_text:
-                            break
+                            try:
+                                json.loads(raw_res_text.lstrip("\ufeff"))
+                            except (ValueError, UnicodeError):
+                                raw_res_text = ""
+                            else:
+                                break
                     time.sleep(delay)
                     delay = min(0.035, delay * 1.4)
 
@@ -345,16 +376,19 @@ class RdpVfsTransport:
                         stderr=f"Timed out waiting for BastionWorker response for {tx_id}",
                         duration_ms=int((time.monotonic() - started) * 1000),
                     )
-                return self._parse_envelope_response(
-                    raw_res_text, int((time.monotonic() - started) * 1000)
-                )
+                result = self._parse_envelope_response(raw_res_text, int((time.monotonic() - started) * 1000), tx_id)
+                consumer = getattr(self.control, "consume_file", None)
+                if callable(consumer) and not result.stderr.startswith("Malformed BastionWorker response:"):
+                    consumer(res_guest)
+                return result
 
+        spool = spool.replace("'", "''")
         envelope_b64 = base64.b64encode(raw_envelope).decode("ascii")
         iters = max(10, int(timeout_sec / 0.15))
 
         appliance_ps = f"""
 $spool = '{spool}'
-if (-not (Test-Path $spool)) {{ New-Item -ItemType Directory -Force -Path $spool | Out-Null }}
+if (-not (Test-Path -LiteralPath $spool)) {{ New-Item -ItemType Directory -Force -Path $spool | Out-Null }}
 $reqTmp = Join-Path $spool 'req_{tx_id}.tmp'
 $reqFile = Join-Path $spool 'req_{tx_id}.json'
 $resFile = Join-Path $spool 'res_{tx_id}.json'
@@ -364,10 +398,10 @@ try {{
     [IO.File]::WriteAllBytes($reqTmp, [Convert]::FromBase64String('{envelope_b64}'))
     Move-Item $reqTmp $reqFile -Force
     for ($i = 0; $i -lt {iters}; $i++) {{
-        if (-not (Test-Path $resFile)) {{
+        if (-not (Test-Path -LiteralPath $resFile)) {{
             [void]$fsw.WaitForChanged([System.IO.WatcherChangeTypes]::Created -bor [System.IO.WatcherChangeTypes]::Renamed, 150)
         }}
-        if (Test-Path $resFile) {{
+        if (Test-Path -LiteralPath $resFile) {{
             Start-Sleep -Milliseconds 15
             $raw = Get-Content $resFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
             if ($raw) {{
@@ -393,20 +427,26 @@ exit 124
                 stderr=res.stderr or f"Bastion IPC failed (code {res.exit_code})",
                 duration_ms=int((time.monotonic() - started) * 1000),
             )
-        return self._parse_envelope_response(res.stdout, res.duration_ms)
+        return self._parse_envelope_response(res.stdout, res.duration_ms, tx_id)
 
     @staticmethod
-    def _parse_envelope_response(raw_stdout: str, fallback_duration_ms: int) -> ExecResult:
+    def _parse_envelope_response(raw_stdout: str, fallback_duration_ms: int, tx_id: str | None = None) -> ExecResult:
         try:
-            parsed = json.loads(raw_stdout)
+            parsed = json.loads(raw_stdout.lstrip("\ufeff"))
+            if not isinstance(parsed, dict) or any(key not in parsed for key in ("exit_code", "stdout_b64", "stderr_b64")):
+                raise ValueError("Missing response fields")
+            if tx_id is not None and parsed.get("tx_id") != tx_id:
+                raise ValueError("Response transaction mismatch")
+            if type(parsed["exit_code"]) is not int:
+                raise ValueError("Invalid exit status")
             stdout_str = (
-                base64.b64decode(parsed.get("stdout_b64", ""))
+                base64.b64decode(parsed.get("stdout_b64", ""), validate=True)
                 .decode("utf-8", errors="replace")
                 .replace("\r\n", "\n")
                 .strip()
             )
             stderr_str = (
-                base64.b64decode(parsed.get("stderr_b64", ""))
+                base64.b64decode(parsed.get("stderr_b64", ""), validate=True)
                 .decode("utf-8", errors="replace")
                 .replace("\r\n", "\n")
                 .strip()
@@ -417,10 +457,10 @@ exit 124
                 stderr=stderr_str,
                 duration_ms=int(parsed.get("duration_ms", fallback_duration_ms)),
             )
-        except (json.JSONDecodeError, KeyError, ValueError) as exc:
+        except (TypeError, AttributeError, KeyError, ValueError) as exc:
             return ExecResult(
                 exit_code=1,
-                stdout=raw_stdout,
+                stdout="",
                 stderr=f"Malformed BastionWorker response: {exc}",
                 duration_ms=fallback_duration_ms,
             )
@@ -434,26 +474,34 @@ exit 124
         timeout_sec: float = 900.0,
     ) -> str:
         """Push a file from Host to Bastion with SHA-256 verification, block delta sync, and Parallel Striped I/O."""
+        bastion_dest_literal = bastion_dest_path.replace("'", "''")
         file_sha = compute_file_sha256(local_path)
         file_size = local_path.stat().st_size
         block_size = self.spec.block_size_bytes
 
         # Step 1: Fast pre-check if identical file already exists on Bastion
         check_ps = f"""
-$dst = [Environment]::ExpandEnvironmentVariables('{bastion_dest_path}')
+$dst = [Environment]::ExpandEnvironmentVariables('{bastion_dest_literal}')
 $isFullLang = ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage')
-if (Test-Path $dst) {{
-    $item = Get-Item $dst
+if (Test-Path -LiteralPath $dst) {{
+    $item = Get-Item -LiteralPath $dst
     if ($item.Length -eq {file_size}) {{
-        $h = (Get-FileHash -Algorithm SHA256 $dst).Hash.ToLower()
-        if ($h -eq '{file_sha}') {{ Write-Output 'MATCH'; exit 0 }}
+        $h = (Get-FileHash -Algorithm SHA256 -LiteralPath $dst).Hash.ToLower()
+        if ($h -eq '{file_sha}') {{ Write-Output 'MATCH'; return }}
         if ('{str(use_delta).lower()}' -eq 'true' -and $isFullLang) {{
             $fs = [IO.File]::OpenRead($dst)
             $sha = [Security.Cryptography.SHA256]::Create()
             $buf = New-Object byte[] {block_size}
             $hashes = @()
             try {{
-                while (($read = $fs.Read($buf, 0, $buf.Length)) -gt 0) {{
+                while ($true) {{
+                    $read = 0
+                    while ($read -lt $buf.Length) {{
+                        $count = $fs.Read($buf, $read, $buf.Length - $read)
+                        if ($count -le 0) {{ break }}
+                        $read += $count
+                    }}
+                    if ($read -eq 0) {{ break }}
                     $hashBytes = $sha.ComputeHash($buf, 0, $read)
                     $hashes += ([BitConverter]::ToString($hashBytes).Replace('-', '').ToLower())
                 }}
@@ -462,11 +510,11 @@ if (Test-Path $dst) {{
                 $sha.Dispose()
             }}
             Write-Output ('BLOCKS:' + ($hashes -join ','))
-            exit 0
+            return
         }}
     }}
 }}
-if (-not $isFullLang) {{ Write-Output 'MISS_CLM'; exit 0 }}
+if (-not $isFullLang) {{ Write-Output 'MISS_CLM'; return }}
 Write-Output 'MISS'
 """
         probe = self.exec_bastion(check_ps, timeout_sec=60.0)
@@ -475,7 +523,7 @@ Write-Output 'MISS'
 
         is_clm = probe.exit_code == 0 and "MISS_CLM" in probe.stdout
         effective_compress = self.spec.compress and not is_clm
-        effective_delta = use_delta and not is_clm
+        effective_delta = use_delta and not is_clm and probe.stdout.startswith("BLOCKS:")
 
         remote_block_hashes: list[str] = []
         if probe.exit_code == 0 and probe.stdout.startswith("BLOCKS:"):
@@ -562,58 +610,57 @@ Write-Output 'MISS'
         expected_sha = parts[1].strip().lower()
         num_chunks = int(parts[3]) if len(parts) >= 4 and parts[2] == "CHUNKS" else 0
 
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_sha) or not 0 <= num_chunks <= 1000000:
+            raise ValueError("Invalid staging manifest")
         local_dest_path.parent.mkdir(parents=True, exist_ok=True)
-        if num_chunks <= 0:
-            appliance_stage = f"{self.spec.appliance_spool_dir}\\pull_{tx_id}.bin"
-            try:
-                self.control.read_file(appliance_stage, local_dest_path)
-            finally:
-                self.control.exec_powershell(
-                    f"Remove-Item '{appliance_stage}' -Force -ErrorAction SilentlyContinue"
-                )
-        else:
-            def _fetch_chunk(idx: int) -> tuple[int, bytes]:
-                chunk_guest = (
-                    f"{self.spec.appliance_spool_dir}\\pull_{tx_id}_{idx:05d}.bin"
-                )
+        with NamedTemporaryFile(dir=local_dest_path.parent, delete=False) as temporary:
+            temp_path = Path(temporary.name)
+        try:
+            if num_chunks <= 0:
+                appliance_stage = f"{self.spec.appliance_spool_dir}\\pull_{tx_id}.bin"
                 try:
-                    data = self.control.read_bytes(chunk_guest)
-                    return idx, data
+                    self.control.read_file(appliance_stage, temp_path)
                 finally:
-                    self.control.exec_powershell(
-                        f"Remove-Item '{chunk_guest}' -Force -ErrorAction SilentlyContinue"
-                    )
+                    self.control.exec_powershell(f"Remove-Item -LiteralPath '{appliance_stage.replace(chr(39), chr(39)*2)}' -Force -ErrorAction SilentlyContinue")
+            else:
+                def fetch(idx):
+                    path = f"{self.spec.appliance_spool_dir}\\pull_{tx_id}_{idx:05d}.bin"
+                    try:
+                        return self.control.read_bytes(path)
+                    finally:
+                        self.control.exec_powershell(f"Remove-Item -LiteralPath '{path.replace(chr(39), chr(39)*2)}' -Force -ErrorAction SilentlyContinue")
+                max_workers = max(1, min(self.spec.parallel_streams, num_chunks))
+                with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                    # Consume ordered chunks incrementally; avoid retaining the whole file.
+                    with temp_path.open("wb") as stream:
+                        for start in range(0, num_chunks, max_workers):
+                            for chunk in pool.map(fetch, range(start, min(num_chunks, start + max_workers))):
+                                stream.write(chunk)
+            actual_sha = compute_file_sha256(temp_path)
+            if actual_sha != expected_sha:
+                raise RuntimeError(f"SHA-256 mismatch on pulled file {local_dest_path}: expected {expected_sha}, got {actual_sha}")
+            temp_path.replace(local_dest_path)
+            return actual_sha
+        finally:
+            temp_path.unlink(missing_ok=True)
 
-            max_workers = max(1, min(self.spec.parallel_streams, num_chunks))
-            with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                chunks = list(pool.map(_fetch_chunk, range(num_chunks)))
-            chunks.sort(key=lambda item: item[0])
-            with local_dest_path.open("wb") as fp:
-                for _, chunk_bytes in chunks:
-                    fp.write(chunk_bytes)
-
-        actual_sha = compute_file_sha256(local_dest_path)
-        if actual_sha != expected_sha:
-            local_dest_path.unlink(missing_ok=True)
-            raise RuntimeError(
-                f"SHA-256 mismatch on pulled file {local_dest_path}: expected {expected_sha}, got {actual_sha}"
-            )
-        return actual_sha
 
     def mux_open(
         self, target_host: str, target_port: int, timeout_sec: float = 15.0
     ) -> str:
         """Open a persistent multiplexed TCP connection inside BastionWorker."""
+        validate_endpoint(target_host, target_port)
         conn_id = f"mux_{secrets.token_hex(6)}"
         open_ps = f"""
 if (-not $Global:EnclaveMuxSockets) {{
     $Global:EnclaveMuxSockets = [hashtable]::Synchronized(@{{}})
 }}
-$client = New-Object System.Net.Sockets.TcpClient
+$family = if ('{target_host}'.Contains(':')) {{ [Net.Sockets.AddressFamily]::InterNetworkV6 }} else {{ [Net.Sockets.AddressFamily]::InterNetwork }}
+$client = New-Object System.Net.Sockets.TcpClient($family)
 $client.NoDelay = $true
 $client.ReceiveTimeout = {int(timeout_sec * 1000)}
 $client.SendTimeout = {int(timeout_sec * 1000)}
-$client.Connect('{target_host}', {target_port})
+try {{ $client.Connect('{target_host}', {target_port}) }} catch {{ $client.Close(); throw }}
 $stream = $client.GetStream()
 $Global:EnclaveMuxSockets['{conn_id}'] = @{{
     Client     = $client
@@ -650,6 +697,10 @@ Write-Output 'MUX_OPEN_OK:{conn_id}'
         timeout_sec: float = 15.0,
     ) -> tuple[bytes, bool]:
         """Perform bidirectional write + read on an active multiplexed TCP connection on Bastion."""
+        if not re.fullmatch(r"mux_[0-9a-f]+", conn_id):
+            raise ValueError("Invalid mux identifier")
+        if not 1 <= max_read_bytes <= 4 * 1024 * 1024 or not 0 <= read_wait_ms <= 1000:
+            raise ValueError("Invalid mux I/O limits")
         b64_tx = base64.b64encode(tx_data).decode("ascii") if tx_data else ""
         io_ps = f"""
 if (-not $Global:EnclaveMuxSockets -or -not $Global:EnclaveMuxSockets.ContainsKey('{conn_id}')) {{
@@ -696,9 +747,8 @@ if (-not $eof -and $client.Client.Poll(0, [System.Net.Sockets.SelectMode]::Selec
 }}
 
 $rxB64 = [Convert]::ToBase64String($ms.ToArray())
+$ms.Dispose()
 if ($eof) {{
-    try {{ $client.Close() }} catch {{}}
-    $Global:EnclaveMuxSockets.Remove('{conn_id}')
     Write-Output "MUX_EOF:$rxB64"
 }} else {{
     Write-Output "MUX_DATA:$rxB64"
@@ -720,17 +770,32 @@ if ($eof) {{
             raise ConnectionError(
                 f"Multiplexed I/O error on {conn_id}: {res.stderr or res.stdout}"
             )
-        line = res.stdout.strip().splitlines()[-1] if res.stdout.strip() else "MUX_EOF:"
+        line = res.stdout.strip().splitlines()[-1] if res.stdout.strip() else ""
         if line.startswith("MUX_EOF:"):
             b64_part = line.partition("MUX_EOF:")[2].strip()
-            return (base64.b64decode(b64_part) if b64_part else b""), True
+            return (base64.b64decode(b64_part, validate=True) if b64_part else b""), True
         if line.startswith("MUX_DATA:"):
             b64_part = line.partition("MUX_DATA:")[2].strip()
-            return (base64.b64decode(b64_part) if b64_part else b""), False
-        return b"", True
+            return (base64.b64decode(b64_part, validate=True) if b64_part else b""), False
+        raise ConnectionError("Malformed multiplexed I/O response")
+
+    def mux_shutdown_write(self, conn_id: str, timeout_sec: float = 10.0) -> None:
+        if not re.fullmatch(r"mux_[0-9a-f]+", conn_id):
+            raise ValueError("Invalid mux identifier")
+        script = f"""
+if ($Global:EnclaveMuxSockets.ContainsKey('{conn_id}')) {{
+    $Global:EnclaveMuxSockets['{conn_id}'].Client.Client.Shutdown([Net.Sockets.SocketShutdown]::Send)
+}}
+Write-Output 'MUX_SHUTDOWN_OK'
+"""
+        result = self.exec_bastion(script, timeout_sec=timeout_sec, op="mux", extra_fields={"mux_action": "shutdown_write", "conn_id": conn_id})
+        if result.exit_code:
+            raise ConnectionError("Failed to half-close multiplexed stream")
 
     def mux_close(self, conn_id: str, timeout_sec: float = 10.0) -> None:
         """Close and remove a multiplexed TCP connection on Bastion."""
+        if not re.fullmatch(r"mux_[0-9a-f]+", conn_id):
+            raise ValueError("Invalid mux identifier")
         close_ps = f"""
 if ($Global:EnclaveMuxSockets -and $Global:EnclaveMuxSockets.ContainsKey('{conn_id}')) {{
     try {{ $Global:EnclaveMuxSockets['{conn_id}'].Client.Close() }} catch {{}}
@@ -749,9 +814,11 @@ Write-Output 'MUX_CLOSED'
         self, target_host: str, target_port: int, payload: bytes, timeout_sec: float = 30.0
     ) -> bytes:
         """Relay a single TCP request-response exchange through BastionWorker over [MS-RDPEFS]."""
+        validate_endpoint(target_host, target_port)
         b64_in = base64.b64encode(payload).decode("ascii")
         relay_ps = f"""
-$client = New-Object System.Net.Sockets.TcpClient
+$family = if ('{target_host}'.Contains(':')) {{ [Net.Sockets.AddressFamily]::InterNetworkV6 }} else {{ [Net.Sockets.AddressFamily]::InterNetwork }}
+$client = New-Object System.Net.Sockets.TcpClient($family)
 $client.ReceiveTimeout = {int(timeout_sec * 1000)}
 $client.SendTimeout = {int(timeout_sec * 1000)}
 try {{
@@ -796,47 +863,44 @@ def pump_multiplexed_socket(
 ) -> None:
     """Pump a full-duplex TCP connection over RdpVfsTransport stateful multiplexing."""
     conn_id = transport.mux_open(target_host, target_port)
-    client_sock.settimeout(0.03)
-    pending_tx = initial_tx
-    idle_streak = 0
+    pump_mux_connection(transport, client_sock, conn_id, stop_event=stop_event, initial_tx=initial_tx)
+
+
+def pump_mux_connection(transport, client_sock, conn_id, *, stop_event=None, initial_tx=b""):
+    write_shutdown = False
+    client_eof = False
+    remote_eof = False
+    pending = initial_tx
     try:
         while stop_event is None or not stop_event.is_set():
-            tx_chunks: list[bytes] = []
-            if pending_tx:
-                tx_chunks.append(pending_tx)
-                pending_tx = b""
-            client_eof = False
-            try:
-                data = client_sock.recv(65536)
-                if data == b"":
-                    client_eof = True
-                elif data:
-                    tx_chunks.append(data)
-            except (socket.timeout, BlockingIOError):
-                pass
-            except OSError:
-                client_eof = True
-
-            tx_payload = b"".join(tx_chunks)
-            wait_ms = 20 if tx_payload else min(450, 40 + idle_streak * 35)
-            rx_bytes, remote_eof = transport.mux_io(
-                conn_id,
-                tx_payload,
-                read_wait_ms=wait_ms,
-            )
-            if tx_payload or rx_bytes:
-                idle_streak = 0
-                client_sock.settimeout(0.015)
-            else:
-                idle_streak = min(idle_streak + 1, 12)
-                client_sock.settimeout(min(0.15, 0.02 + idle_streak * 0.01))
-            if rx_bytes:
-                client_sock.settimeout(5.0)
-                client_sock.sendall(rx_bytes)
-                client_sock.settimeout(0.015)
-
-            if remote_eof or client_eof:
+            client_sock.settimeout(0.03)
+            data = pending
+            pending = b""
+            if not client_eof:
+                try:
+                    chunk = client_sock.recv(65536)
+                    if chunk:
+                        data += chunk
+                    else:
+                        client_eof = True
+                except (socket.timeout, BlockingIOError):
+                    pass
+            if data or not remote_eof:
+                received, eof = transport.mux_io(conn_id, data, read_wait_ms=40 if data else 80)
+                if received:
+                    client_sock.settimeout(5.0)
+                    client_sock.sendall(received)
+                if eof and not remote_eof:
+                    remote_eof = True
+                    client_sock.shutdown(socket.SHUT_WR)
+            if client_eof:
+                if not write_shutdown:
+                    transport.mux_shutdown_write(conn_id)
+                    write_shutdown = True
+            if client_eof and remote_eof:
                 break
+            if remote_eof:
+                time.sleep(0.01)
     finally:
         try:
             transport.mux_close(conn_id)
@@ -844,7 +908,7 @@ def pump_multiplexed_socket(
             pass
 
 
-class RdpVfsTunnelServer:
+class RdpVfsTunnelServer(TcpListener):
     """Local TCP listener on 127.0.0.1 that tunnels connections over RdpVfsTransport."""
 
     def __init__(
@@ -855,37 +919,14 @@ class RdpVfsTunnelServer:
         target_port: int,
         *,
         multiplexed: bool = True,
+        bind_host: str = "127.0.0.1",
     ) -> None:
         self.transport = transport
         self.local_port = local_port
         self.target_host = target_host
         self.target_port = target_port
         self.multiplexed = multiplexed
-        self._stop_event = threading.Event()
-        self._server_socket: socket.socket | None = None
-
-    def serve_forever(self) -> None:
-        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.bind(("127.0.0.1", self.local_port))
-        self.local_port = srv.getsockname()[1]
-        srv.listen(16)
-        srv.settimeout(0.5)
-        self._server_socket = srv
-        try:
-            while not self._stop_event.is_set():
-                try:
-                    conn, _ = srv.accept()
-                except socket.timeout:
-                    continue
-                threading.Thread(
-                    target=self._handle_client, args=(conn,), daemon=True
-                ).start()
-        finally:
-            srv.close()
-
-    def stop(self) -> None:
-        self._stop_event.set()
+        self._init_listener(bind_host, "local_port")
 
     def _handle_client(self, conn: socket.socket) -> None:
         try:

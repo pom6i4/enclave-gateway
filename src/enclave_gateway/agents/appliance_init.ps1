@@ -69,18 +69,12 @@ if ($DnsServersCsv) {
 
 # 6. Optional silent installation of VPN client MSI and key deployment
 if ($MsiPath -and (Test-Path $MsiPath)) {
-    Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$MsiPath`" /qn /norestart" -Wait
+    $installer = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$MsiPath`" /qn /norestart" -Wait -PassThru
+    if ($installer.ExitCode -notin @(0, 3010)) { throw "VPN installer failed: $($installer.ExitCode)" }
 }
 
-if ($DstPath -and (Test-Path $DstPath)) {
-    $vipnetBin = "C:\Program Files\Mobile\bin\vipnetclient.exe"
-    if (Test-Path $vipnetBin) {
-        if ($DstPassword) {
-            & $vipnetBin installkey "$DstPath" --psw "$DstPassword" | Out-Null
-        } else {
-            & $vipnetBin installkey "$DstPath" | Out-Null
-        }
-    }
+if ($DstPath -and (Test-Path -LiteralPath $DstPath)) {
+    throw 'Automatic key import is not configured. Use the documented procedure for the installed provider version.'
 }
 
 Write-Output "APPLIANCE_INIT_OK"

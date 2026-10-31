@@ -59,7 +59,11 @@ if (-not $ForceReconnect -and $conn -and $hbFresh) {
     exit 0
 }
 
-Stop-Process -Name mstsc -Force -ErrorAction SilentlyContinue
+# Restrict reconnection to the managed RDP profile; preserve unrelated sessions.
+$rdpProfile = 'C:\EnclaveGateway\bastion.rdp'
+Get-CimInstance Win32_Process -Filter "Name='mstsc.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and $_.CommandLine.Contains($rdpProfile) } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 Start-Sleep -Seconds 1
 Start-ScheduledTask -TaskName $ScheduledTaskName -ErrorAction SilentlyContinue
 
@@ -79,5 +83,5 @@ for ($i = 0; $i -lt 30; $i++) {
     }
 }
 
-Write-Output "SESSION_PENDING_WORKER"
-exit 0
+Write-Error "SESSION_PENDING_WORKER"
+exit 124

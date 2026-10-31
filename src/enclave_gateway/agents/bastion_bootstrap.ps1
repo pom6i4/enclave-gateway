@@ -29,5 +29,4 @@ if (-not (Test-Path $workerSrc)) {
     Write-Error "BastionWorker script not found on VFS spool: $workerSrc"
     exit 1
 }
-$workerCode = [IO.File]::ReadAllText($workerSrc, [Text.Encoding]::UTF8)
-& ([scriptblock]::Create($workerCode)) -SpoolDir $SourceSpool
+& $workerSrc -SpoolDir $SourceSpool

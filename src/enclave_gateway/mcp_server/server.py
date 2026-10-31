@@ -7,6 +7,9 @@ import re
 import sys
 import threading
 import time
+import hmac
+import math
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, TextIO
@@ -16,23 +19,72 @@ from enclave_gateway.engine import EnclaveEngine
 from enclave_gateway.transports.rdp_vfs import RdpVfsTunnelServer
 from enclave_gateway.transports.socks5_mux import Socks5VfsServer
 
-MCP_PROTOCOL_VERSION = "2024-11-05"
+MCP_PROTOCOL_VERSION = "2025-03-26"
+MCP_PROTOCOL_VERSIONS = ("2024-11-05", "2025-03-26")
+MAX_RPC_BYTES = 8 * 1024 * 1024
+
+
+def strict_json_loads(raw):
+    def invalid_constant(_value):
+        raise ValueError("Invalid JSON constant")
+    return json.loads(raw, parse_constant=invalid_constant)
+
+
+class BoundedHttpServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, *args, **kwargs):
+        self._slots = threading.BoundedSemaphore(64)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, address):
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, address):
+        try:
+            super().process_request_thread(request, address)
+        finally:
+            self._slots.release()
+
 DEFAULT_MAX_OUTPUT_CHARS = 32000
 
-_READ_ONLY_MUTATING_SHELL_RE = re.compile(
-    r"(?:^|[;&|]\s*)(?:rm|mv|cp|chmod|chown|chgrp|dd|mkfs|mount|umount|kill|pkill|killall|"
-    r"reboot|shutdown|poweroff|useradd|userdel|usermod|passwd|apt|apt-get|yum|dnf|apk|pip|"
-    r"Remove-Item|Move-Item|Copy-Item|Set-Content|Add-Content|Out-File|Stop-Process|Stop-Service|"
-    r"Restart-Service|New-Item)\b|"
-    r"\b(?:systemctl\s+(?:start|stop|restart|reload|enable|disable|mask)|"
-    r"(?:docker|podman|nerdctl)\s+(?:rm|rmi|stop|kill|restart|run|exec|cp))\b|"
-    r"(?:^|[^0-9])>{1,2}\s*\S",
-    re.IGNORECASE,
-)
-_READ_ONLY_SAFE_SQL_RE = re.compile(
-    r"^\s*(?:SELECT|SHOW|EXPLAIN|DESCRIBE|DESC|WITH|VALUES|PRAGMA|\\[a-zA-Z])\b",
-    re.IGNORECASE,
-)
+def validate_tool_arguments(name: str, args: Any) -> str | None:
+    definition = next((item for item in TOOL_DEFINITIONS if item["name"] == name), None)
+    if definition is None:
+        return "Unknown tool"
+    schema = definition["inputSchema"]
+    if not isinstance(args, dict):
+        return "Tool arguments must be an object"
+    if set(schema.get("required", ())) - args.keys():
+        return "Missing required tool arguments"
+    if set(args) - schema["properties"].keys():
+        return "Unknown tool arguments"
+    types = {"string": str, "object": dict, "array": list, "boolean": bool, "integer": int, "number": (int, float)}
+    for key, value in args.items():
+        prop = schema["properties"][key]
+        kind = prop["type"]
+        if not isinstance(value, types[kind]) or (kind in ("integer", "number") and isinstance(value, bool)):
+            return f"Invalid type for {key}"
+        if kind == "number" and not math.isfinite(value):
+            return f"Invalid number for {key}"
+        if "enum" in prop and value not in prop["enum"]:
+            return f"Invalid value for {key}"
+        if kind == "array" and any(not isinstance(item, str) for item in value):
+            return f"Invalid array items for {key}"
+        if key in ("env", "secret_env", "headers") and any(not isinstance(k, str) or not isinstance(v, str) for k, v in value.items()):
+            return f"Invalid mapping for {key}"
+        if key.endswith("port") and not 0 <= value <= 65535:
+            return f"Invalid port for {key}"
+        if key == "timeout_sec" and not 0 < value <= 86400:
+            return "timeout_sec must be in (0, 86400]"
+    return None
 
 
 def truncate_for_context(text: str, max_chars: int = DEFAULT_MAX_OUTPUT_CHARS) -> str:
@@ -425,23 +477,55 @@ class McpJsonRpcServer:
         self.engine = engine
         self.read_only = read_only
         self.max_output_chars = max_output_chars
+        self._tunnel_lock = threading.RLock()
         self._active_tunnels: dict[int, tuple[Any, threading.Thread, dict[str, Any]]] = {}
 
-    def handle_message(self, msg: dict[str, Any]) -> dict[str, Any] | None:
+    def handle_message(self, msg: Any) -> Any:
+        if isinstance(msg, list):
+            if not msg or len(msg) > 128:
+                return self._error(None, -32600, "Invalid Request")
+            responses = [self._error(None, -32600, "Invalid Request") if isinstance(item, list) else self.handle_message(item) for item in msg]
+            return [item for item in responses if item is not None] or None
+        if not isinstance(msg, dict):
+            return self._error(None, -32600, "Invalid Request")
+        req_id = msg.get("id")
+        if (msg.get("jsonrpc") != "2.0" or not isinstance(msg.get("method"), str)
+                or isinstance(req_id, (dict, list, bool))
+                or (isinstance(req_id, float) and not math.isfinite(req_id))):
+            return self._error(None, -32600, "Invalid Request")
+        if "params" in msg and not isinstance(msg["params"], (dict, list)):
+            return None if "id" not in msg else self._error(req_id, -32602, "Invalid params")
+        if not isinstance(msg.get("params", {}), dict):
+            return None if "id" not in msg else self._error(req_id, -32602, "Named params required")
+        if "id" not in msg:
+            # Lifecycle notifications have no result. Other valid notifications
+            # execute once, but their result must never be sent to the client.
+            if msg["method"].startswith("notifications/"):
+                return None
+            self._handle_request({**msg, "id": "notification"})
+            return None
+        result = self._handle_request(msg)
+        if result and "result" in result:
+            result["result"] = self.engine.vault.scrubber.scrub(result["result"])
+        if result and "error" in result:
+            result["error"] = self.engine.vault.scrubber.scrub(result["error"])
+        return result
+
+    def _handle_request(self, msg: dict[str, Any]) -> dict[str, Any] | None:
         method = msg.get("method", "")
         req_id = msg.get("id")
         params = msg.get("params") or {}
 
-        if req_id is None:
-            # Notification (e.g., notifications/initialized)
-            return None
-
         try:
             if method == "initialize":
+                client = params.get("clientInfo")
+                if (not isinstance(params.get("protocolVersion"), str) or not isinstance(params.get("capabilities"), dict)
+                        or not isinstance(client, dict) or not isinstance(client.get("name"), str) or not isinstance(client.get("version"), str)):
+                    return self._error(req_id, -32602, "initialize requires protocolVersion, capabilities and clientInfo")
                 return self._ok(
                     req_id,
                     {
-                        "protocolVersion": MCP_PROTOCOL_VERSION,
+                        "protocolVersion": params.get("protocolVersion") if params.get("protocolVersion") in MCP_PROTOCOL_VERSIONS else MCP_PROTOCOL_VERSION,
                         "capabilities": {
                             "tools": {"listChanged": False},
                             "resources": {"subscribe": False, "listChanged": False},
@@ -459,7 +543,13 @@ class McpJsonRpcServer:
                 return self._ok(req_id, {"tools": TOOL_DEFINITIONS})
             if method == "tools/call":
                 tool_name = str(params.get("name", ""))
-                args = dict(params.get("arguments") or {})
+                args = params.get("arguments", {})
+                error = validate_tool_arguments(tool_name, args)
+                if error:
+                    return self._error(req_id, -32602, error)
+                if tool_name == "enclave_tunnel":
+                    with self._tunnel_lock:
+                        return self._dispatch_tool(req_id, tool_name, args)
                 return self._dispatch_tool(req_id, tool_name, args)
             if method == "resources/list":
                 return self._ok(
@@ -507,9 +597,9 @@ class McpJsonRpcServer:
                             for k, f in self.engine.config.forwards.items()
                         },
                     }
-                    text = json.dumps(topo, indent=2)
+                    text = self._json_dump(topo, indent=2)
                 elif uri == "enclave://status":
-                    text = json.dumps(self.engine.status(), indent=2)
+                    text = self._json_dump(self.engine.status(), indent=2)
                 else:
                     return self._error(req_id, -32602, f"Unknown resource URI: {uri}")
                 return self._ok(
@@ -538,6 +628,8 @@ class McpJsonRpcServer:
                     },
                 )
             if method == "prompts/get":
+                if params.get("name") != "enclave-diagnose":
+                    return self._error(req_id, -32602, "Unknown prompt")
                 return self._ok(
                     req_id,
                     {
@@ -547,7 +639,7 @@ class McpJsonRpcServer:
                                 "role": "user",
                                 "content": {
                                     "type": "text",
-                                    "text": "Call enclave_doctor with fix=true and probe_targets=true, then summarize the L1-L7 status.",
+                                    "text": "Call enclave_doctor with fix=false and probe_targets=true, then summarize the L1-L7 status.",
                                 },
                             }
                         ],
@@ -587,26 +679,15 @@ class McpJsonRpcServer:
     ) -> str | None:
         if not self.read_only:
             return None
-        if tool_name in ("node_patch_file", "enclave_heal", "enclave_clean"):
-            return f"Tool '{tool_name}' is blocked because the MCP server is running in --read-only mode."
-        if tool_name == "enclave_doctor" and bool(args.get("fix", False)):
-            return "enclave_doctor with fix=true is blocked in --read-only mode (use fix=false)."
-        if tool_name in ("node_transfer", "node_sync") and str(args.get("direction", "")).lower() == "push":
-            return f"{tool_name} with direction='push' is blocked in --read-only mode (only 'pull' is permitted)."
-        if bool(args.get("as_root", False)) or bool(args.get("confirm_destructive", False)):
-            return f"{tool_name} with as_root/confirm_destructive is blocked in --read-only mode."
-        if tool_name == "node_exec":
-            script = str(args.get("script", ""))
-            if _READ_ONLY_MUTATING_SHELL_RE.search(script):
-                return "Mutating shell/PowerShell command blocked by MCP --read-only mode."
-        if tool_name == "node_db_query":
-            query = str(args.get("query", "")).strip()
-            if not _READ_ONLY_SAFE_SQL_RE.match(query):
-                return "Only read-only SQL queries (SELECT/SHOW/EXPLAIN/DESCRIBE) are permitted in --read-only mode."
-        if tool_name == "node_http_request":
-            method = str(args.get("method", "GET")).upper()
-            if method not in ("GET", "HEAD", "OPTIONS"):
-                return f"HTTP method '{method}' is blocked in --read-only mode (only GET/HEAD/OPTIONS allowed)."
+        permitted = {"enclave_status", "enclave_audit", "enclave_ssh_config", "node_read_file", "enclave_doctor", "enclave_tunnel"}
+        if tool_name not in permitted:
+            return f"Tool '{tool_name}' is blocked in --read-only mode."
+        if tool_name == "enclave_tunnel" and args.get("action") != "list":
+            return "Tunnel changes are blocked in --read-only mode."
+        if tool_name == "enclave_doctor" and args.get("fix", False):
+            return "enclave_doctor with fix=true is blocked in --read-only mode."
+        if args.get("as_root", False) or args.get("confirm_destructive", False):
+            return "Privilege escalation is blocked in --read-only mode."
         return None
 
     def _dispatch_tool(
@@ -618,7 +699,7 @@ class McpJsonRpcServer:
 
         if tool_name == "enclave_status":
             status_data = self.engine.status()
-            return self._tool_result(req_id, json.dumps(status_data, indent=2))
+            return self._tool_result(req_id, self._json_dump(status_data, indent=2))
 
         if tool_name == "enclave_doctor":
             diag_data = self.engine.doctor(
@@ -628,7 +709,7 @@ class McpJsonRpcServer:
             )
             return self._tool_result(
                 req_id,
-                json.dumps(diag_data, indent=2),
+                self._json_dump(diag_data, indent=2),
                 is_error=not bool(diag_data.get("healthy", False)),
             )
 
@@ -641,7 +722,7 @@ class McpJsonRpcServer:
 
         if tool_name == "enclave_clean":
             clean_data = self.engine.clean_session(actor="mcp")
-            return self._tool_result(req_id, json.dumps(clean_data, indent=2))
+            return self._tool_result(req_id, self._json_dump(clean_data, indent=2))
 
         if tool_name == "node_exec":
             raw_env = dict(args.get("env") or {})
@@ -668,7 +749,7 @@ class McpJsonRpcServer:
                 use_delta=bool(args.get("use_delta", True)),
                 actor="mcp",
             )
-            return self._tool_result(req_id, json.dumps(meta, indent=2))
+            return self._tool_result(req_id, self._json_dump(meta, indent=2))
 
         if tool_name == "node_sync":
             raw_excl = list(args.get("exclude") or [])
@@ -681,7 +762,7 @@ class McpJsonRpcServer:
                 exclude=[str(x) for x in raw_excl],
                 actor="mcp",
             )
-            return self._tool_result(req_id, json.dumps(meta, indent=2))
+            return self._tool_result(req_id, self._json_dump(meta, indent=2))
 
         if tool_name == "node_read_file":
             meta = self.engine.read_remote_file(
@@ -692,7 +773,7 @@ class McpJsonRpcServer:
                 as_root=bool(args.get("as_root", False)),
                 actor="mcp",
             )
-            return self._tool_result(req_id, json.dumps(meta, ensure_ascii=False, indent=2))
+            return self._tool_result(req_id, self._json_dump(meta, ensure_ascii=False, indent=2))
 
         if tool_name == "node_patch_file":
             meta = self.engine.patch_remote_file(
@@ -704,14 +785,14 @@ class McpJsonRpcServer:
                 expected_sha256=str(args.get("expected_sha256", "")),
                 actor="mcp",
             )
-            return self._tool_result(req_id, json.dumps(meta, ensure_ascii=False, indent=2))
+            return self._tool_result(req_id, self._json_dump(meta, ensure_ascii=False, indent=2))
 
         if tool_name == "enclave_tunnel":
             action = str(args.get("action", "list")).lower()
             if action == "list":
                 active = [info for _, _, info in self._active_tunnels.values()]
                 return self._tool_result(
-                    req_id, json.dumps({"active_tunnels": active}, indent=2)
+                    req_id, self._json_dump({"active_tunnels": active}, indent=2)
                 )
             if action == "stop":
                 port = int(args.get("local_port", 0))
@@ -725,7 +806,7 @@ class McpJsonRpcServer:
                 else:
                     stopped = []
                 return self._tool_result(
-                    req_id, json.dumps({"stopped_ports": stopped}, indent=2)
+                    req_id, self._json_dump({"stopped_ports": stopped}, indent=2)
                 )
             if action == "start":
                 mode = str(args.get("mode", "tcp")).lower()
@@ -743,9 +824,7 @@ class McpJsonRpcServer:
                     )
                     th = threading.Thread(target=proxy_srv.serve_forever, daemon=True)
                     th.start()
-                    deadline = time.monotonic() + 2.5
-                    while proxy_srv.bind_port == 0 and time.monotonic() < deadline:
-                        time.sleep(0.01)
+                    proxy_srv.wait_ready()
                     bound = proxy_srv.bind_port
                     info = {
                         "mode": "proxy",
@@ -754,7 +833,7 @@ class McpJsonRpcServer:
                         "protocols": ["SOCKS5", "SOCKS4a", "HTTP CONNECT", "HTTP Proxy"],
                     }
                     self._active_tunnels[bound] = (proxy_srv, th, info)
-                    return self._tool_result(req_id, json.dumps(info, indent=2))
+                    return self._tool_result(req_id, self._json_dump(info, indent=2))
 
                 target_host_raw = str(args.get("target_host", "")).strip()
                 target_port = int(args.get("target_port", 0))
@@ -778,9 +857,7 @@ class McpJsonRpcServer:
                 )
                 th = threading.Thread(target=tun_srv.serve_forever, daemon=True)
                 th.start()
-                deadline = time.monotonic() + 2.5
-                while tun_srv.local_port == 0 and time.monotonic() < deadline:
-                    time.sleep(0.01)
+                tun_srv.wait_ready()
                 bound = tun_srv.local_port
                 info = {
                     "mode": "tcp",
@@ -791,7 +868,7 @@ class McpJsonRpcServer:
                     "target_port": target_port,
                 }
                 self._active_tunnels[bound] = (tun_srv, th, info)
-                return self._tool_result(req_id, json.dumps(info, indent=2))
+                return self._tool_result(req_id, self._json_dump(info, indent=2))
 
         if tool_name == "enclave_audit":
             limit = max(1, int(args.get("limit", 25)))
@@ -799,7 +876,7 @@ class McpJsonRpcServer:
             entries = self.engine.recorder.read_recent(limit=limit)
             return self._tool_result(
                 req_id,
-                json.dumps(
+                self._json_dump(
                     {
                         "integrity_verified": chain_ok,
                         "verified_records": verified_records,
@@ -848,17 +925,17 @@ class McpJsonRpcServer:
         payload = {
             "exit_code": res.exit_code,
             "duration_ms": res.duration_ms,
-            "stdout": truncate_for_context(res.stdout, self.max_output_chars),
-            "stderr": truncate_for_context(res.stderr, self.max_output_chars),
+            "stdout": truncate_for_context(self.engine.vault.scrubber.scrub(res.stdout), self.max_output_chars),
+            "stderr": truncate_for_context(self.engine.vault.scrubber.scrub(res.stderr), self.max_output_chars),
         }
         return self._tool_result(
             req_id,
-            json.dumps(payload, ensure_ascii=False, indent=2),
+            self._json_dump(payload, ensure_ascii=False, indent=2),
             is_error=(res.exit_code != 0),
         )
 
     def _tool_result(self, req_id: Any, text: str, *, is_error: bool = False) -> dict[str, Any]:
-        bounded_text = truncate_for_context(text, self.max_output_chars)
+        bounded_text = truncate_for_context(self.engine.vault.scrubber.scrub(text), self.max_output_chars)
         return {
             "jsonrpc": "2.0",
             "id": req_id,
@@ -867,6 +944,9 @@ class McpJsonRpcServer:
                 "isError": is_error,
             },
         }
+
+    def _json_dump(self, value, **kwargs):
+        return json.dumps(self.engine.vault.scrubber.scrub(value), **kwargs)
 
     @staticmethod
     def _ok(req_id: Any, result: dict[str, Any]) -> dict[str, Any]:
@@ -884,46 +964,62 @@ class McpJsonRpcServer:
         self, stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout
     ) -> None:
         """Serve MCP JSON-RPC 2.0 over stdio supporting both newline-JSON and Content-Length framing."""
-        while True:
-            raw_line = stdin.readline()
-            if not raw_line:
-                break
-            line = raw_line.strip()
-            if not line:
-                continue
-
-            use_content_length = False
-            if line.lower().startswith("content-length:"):
-                use_content_length = True
-                try:
-                    length = int(line.partition(":")[2].strip())
-                except ValueError:
-                    continue
-                while True:
-                    hdr = stdin.readline()
-                    if not hdr or hdr in ("\r\n", "\n", ""):
-                        break
-                body = stdin.read(length)
-                if not body:
-                    break
-                payload_str = body
-            else:
-                payload_str = line
-
+        # Use binary buffers when available: Content-Length counts UTF-8 bytes.
+        source = getattr(stdin, "buffer", stdin)
+        sink = getattr(stdout, "buffer", stdout)
+        binary_input = not isinstance(source.read(0), str)
+        def emit(response, framed):
+            raw = json.dumps(response, ensure_ascii=False)
+            message = (f"Content-Length: {len(raw.encode('utf-8'))}\r\n\r\n" if framed else "") + raw + ("" if framed else "\n")
             try:
-                msg = json.loads(payload_str)
-            except json.JSONDecodeError:
+                sink.write(message)
+            except TypeError:
+                sink.write(message.encode("utf-8"))
+            sink.flush()
+        while True:
+            line = source.readline(MAX_RPC_BYTES + 1)
+            if not line:
+                break
+            line_bytes = line.encode("utf-8") if isinstance(line, str) else line
+            if len(line_bytes) > MAX_RPC_BYTES:
+                emit(self._error(None, -32600, "Request too large"), False)
+                break
+            if not line_bytes.strip():
                 continue
-
-            resp = self.handle_message(msg)
-            if resp is not None:
-                out_json = json.dumps(resp, ensure_ascii=False)
-                if use_content_length:
-                    encoded = out_json.encode("utf-8")
-                    stdout.write(f"Content-Length: {len(encoded)}\r\n\r\n{out_json}")
+            framed = line_bytes.lower().startswith(b"content-length:")
+            try:
+                if framed:
+                    length = int(line_bytes.split(b":", 1)[1])
+                    if not 0 < length <= MAX_RPC_BYTES:
+                        raise ValueError("Invalid Content-Length")
+                    header_size = len(line_bytes)
+                    while True:
+                        header = source.readline(MAX_RPC_BYTES + 1)
+                        header_size += len(header)
+                        if not header or header_size > MAX_RPC_BYTES:
+                            raise ValueError("Invalid frame headers")
+                        if header in (b"\r\n", b"\n", "\r\n", "\n"):
+                            break
+                    data = bytearray()
+                    while len(data) < length:
+                        part = source.read(length - len(data)) if binary_input else source.read(1)
+                        if not part:
+                            raise ValueError("Truncated frame")
+                        data.extend(part.encode("utf-8") if isinstance(part, str) else part)
+                    if len(data) != length:
+                        raise ValueError("Invalid UTF-8 frame length")
+                    payload = bytes(data)
                 else:
-                    stdout.write(out_json + "\n")
-                stdout.flush()
+                    payload = line_bytes
+                msg = strict_json_loads(payload)
+            except (ValueError, UnicodeError, RecursionError):
+                emit(self._error(None, -32700, "Parse error"), framed)
+                if framed:
+                    break
+                continue
+            response = self.handle_message(msg)
+            if response is not None:
+                emit(response, framed)
 
 
 def export_openai_tools() -> list[dict[str, Any]]:
@@ -992,25 +1088,45 @@ class McpHttpServer:
         bind_port: int = 8765,
         *,
         bearer_token: str = "",
+        allowed_origins: tuple[str, ...] = (),
     ) -> None:
         self.rpc_server = rpc_server
         self.bind_host = bind_host
         self.bind_port = bind_port
         self.bearer_token = bearer_token
+        self.allowed_origins = frozenset(allowed_origins)
+        if bind_host not in ("127.0.0.1", "localhost", "::1") and not bearer_token:
+            raise ValueError("Non-loopback HTTP listeners require a bearer token")
         self._httpd: ThreadingHTTPServer | None = None
 
     def serve_forever(self) -> None:
         parent = self
 
         class _Handler(BaseHTTPRequestHandler):
+            def setup(self) -> None:
+                super().setup()
+                self.connection.settimeout(15.0)
+
             def log_message(self, _format: str, *_args: Any) -> None:
                 return
 
-            def _check_auth(self) -> bool:
-                if not parent.bearer_token:
+            def _check_auth(self, *, require_token: bool = True) -> bool:
+                authority = f"{parent.bind_host}:{parent.bind_port}"
+                local_authorities = {authority}
+                if parent.bind_host in ("127.0.0.1", "localhost"):
+                    local_authorities.update({f"127.0.0.1:{parent.bind_port}", f"localhost:{parent.bind_port}"})
+                if len(self.headers.get_all("Host", [])) != 1 or len(self.headers.get_all("Origin", [])) > 1 or self.headers.get("Host", "") not in local_authorities:
+                    self._send_json(403, {"error": "Invalid Host"})
+                    return False
+                origin = self.headers.get("Origin")
+                permitted = parent.allowed_origins | {f"http://{host}" for host in local_authorities}
+                if origin is not None and origin not in permitted:
+                    self._send_json(403, {"error": "Invalid Origin"})
+                    return False
+                if not require_token or not parent.bearer_token:
                     return True
                 auth = self.headers.get("Authorization", "")
-                if auth == f"Bearer {parent.bearer_token}":
+                if hmac.compare_digest(auth.encode(), f"Bearer {parent.bearer_token}".encode()):
                     return True
                 self._send_json(401, {"error": "Unauthorized"})
                 return False
@@ -1020,7 +1136,10 @@ class McpHttpServer:
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(raw)))
-                self.send_header("Access-Control-Allow-Origin", "*")
+                origin = self.headers.get("Origin")
+                if origin and origin in parent.allowed_origins:
+                    self.send_header("Access-Control-Allow-Origin", origin)
+                    self.send_header("Vary", "Origin")
                 self.send_header(
                     "Access-Control-Allow-Headers", "Content-Type, Authorization"
                 )
@@ -1029,12 +1148,19 @@ class McpHttpServer:
                 self.wfile.write(raw)
 
             def do_OPTIONS(self) -> None:
-                self._send_json(200, {"ok": True})
+                if self._check_auth(require_token=False):
+                    self._send_json(200, {"ok": True})
 
             def do_GET(self) -> None:
                 if not self._check_auth():
                     return
                 path = self.path.split("?", 1)[0]
+                if path == "/mcp":
+                    self.send_response(405)
+                    self.send_header("Allow", "POST")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 if path == "/openapi.json":
                     url = f"http://{parent.bind_host}:{parent.bind_port}"
                     self._send_json(200, export_openapi_spec(url))
@@ -1050,16 +1176,34 @@ class McpHttpServer:
             def do_POST(self) -> None:
                 if not self._check_auth():
                     return
-                length = int(self.headers.get("Content-Length", "0") or "0")
-                raw_body = self.rfile.read(length).decode("utf-8", errors="replace")
+                if self.headers.get("Transfer-Encoding") or len(self.headers.get_all("Content-Length", [])) != 1:
+                    self._send_json(400, {"error": "One Content-Length is required; chunked requests are unsupported"})
+                    return
                 try:
-                    body = json.loads(raw_body) if raw_body.strip() else {}
-                except json.JSONDecodeError:
+                    length = int(self.headers["Content-Length"])
+                except ValueError:
+                    self._send_json(400, {"error": "Invalid Content-Length"})
+                    return
+                if not 0 < length <= MAX_RPC_BYTES:
+                    self._send_json(413, {"error": "Invalid body size"})
+                    return
+                if self.headers.get_content_type() != "application/json":
+                    self._send_json(415, {"error": "Expected application/json"})
+                    return
+                try:
+                    raw_body = self.rfile.read(length)
+                    if len(raw_body) != length:
+                        raise ValueError("Truncated request")
+                    body = strict_json_loads(raw_body)
+                except (ValueError, UnicodeError, OSError, RecursionError):
                     self._send_json(400, {"error": "Invalid JSON body"})
                     return
 
                 path = self.path.split("?", 1)[0]
                 if path == "/mcp":
+                    if self.headers.get("MCP-Protocol-Version", MCP_PROTOCOL_VERSION) not in MCP_PROTOCOL_VERSIONS:
+                        self._send_json(400, {"error": "Unsupported protocol version"})
+                        return
                     resp = parent.rpc_server.handle_message(body)
                     if resp is None:
                         self.send_response(202)
@@ -1069,8 +1213,11 @@ class McpHttpServer:
                     return
 
                 if path == "/v1/tools/call":
+                    if not isinstance(body, dict):
+                        self._send_json(400, {"error": "Expected an object"})
+                        return
                     t_name = str(body.get("name", ""))
-                    t_args = dict(body.get("arguments") or {})
+                    t_args = body.get("arguments", {})
                     rpc_resp = parent.rpc_server.handle_message(
                         {
                             "jsonrpc": "2.0",
@@ -1092,6 +1239,9 @@ class McpHttpServer:
                             "params": {"name": t_name, "arguments": body},
                         }
                     )
+                    if "error" in (rpc_resp or {}):
+                        self._send_json(400, rpc_resp["error"])
+                        return
                     result = (rpc_resp or {}).get("result", {})
                     content = result.get("content") or []
                     text_out = content[0].get("text", "") if content else ""
@@ -1099,12 +1249,12 @@ class McpHttpServer:
                         parsed = json.loads(text_out)
                     except Exception:
                         parsed = {"output": text_out}
-                    self._send_json(200, parsed)
+                    self._send_json(422 if result.get("isError") else 200, parsed if isinstance(parsed, dict) else {"output": parsed})
                     return
 
                 self._send_json(404, {"error": f"Unknown endpoint: {path}"})
 
-        httpd = ThreadingHTTPServer((self.bind_host, self.bind_port), _Handler)
+        httpd = BoundedHttpServer((self.bind_host, self.bind_port), _Handler)
         self.bind_port = httpd.server_address[1]
         self._httpd = httpd
         try:
@@ -1122,7 +1272,7 @@ def generate_client_configs(
     http_url: str = "http://127.0.0.1:8765",
 ) -> dict[str, Any]:
     """Generate ready-to-use MCP / Tool configurations for all major IDEs and local LLM stacks."""
-    resolved_cfg = str(Path(config_path).expanduser().resolve())
+    resolved_cfg = str(Path(config_path or "./enclave.yaml").expanduser().resolve())
     args = ["-c", resolved_cfg, "mcp"]
 
     return {
@@ -1153,13 +1303,13 @@ def generate_client_configs(
             "    command: egw\n"
             "    args:\n"
             f'      - "-c"\n'
-            f'      - "{resolved_cfg}"\n'
+            f'      - {json.dumps(resolved_cfg)}\n'
             '      - "mcp"\n'
         ),
         "codex": (
             "[mcp_servers.enclave-gateway]\n"
             'command = "egw"\n'
-            f'args = ["-c", "{resolved_cfg}", "mcp"]\n'
+            f'args = {json.dumps(["-c", resolved_cfg, "mcp"])}\n'
         ),
         "claude-code": f'claude mcp add enclave-gateway -- egw -c "{resolved_cfg}" mcp',
         "lm-studio": {

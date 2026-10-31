@@ -1,467 +1,320 @@
-"""Multi-hop OpenSSH execution, SSH_ASKPASS password auth, key bootstrap, and verified file transfer."""
+"""Multi-hop OpenSSH execution and verified binary file transfer."""
 
 from __future__ import annotations
 
 import base64
+import re
 import secrets
+import shlex
+import subprocess
 from pathlib import Path
 from typing import Callable
 
 from enclave_gateway.config import TargetNodeSpec
 from enclave_gateway.control.qga_client import ExecResult
+from enclave_gateway.security.quoting import ps_quote, validate_endpoint
 
 
 def _build_b64_decode_expr(b64_str: str) -> str:
-    """Build a portable POSIX Base64 decode pipeline (GNU/BusyBox -d, BSD/macOS -D, OpenSSL fallback)."""
-    return (
-        f"(echo '{b64_str}' | base64 -d 2>/dev/null || "
-        f"echo '{b64_str}' | base64 -D 2>/dev/null || "
-        f"echo '{b64_str}' | openssl enc -base64 -d -A 2>/dev/null)"
-    )
+    return (f"(echo '{b64_str}' | base64 -d 2>/dev/null || "
+            f"echo '{b64_str}' | base64 -D 2>/dev/null || "
+            f"echo '{b64_str}' | openssl enc -base64 -d -A 2>/dev/null)")
 
 
-def build_remote_bash_invocation(
-    script: str,
-    *,
-    as_root: bool = False,
-    sudo_password: str = "",
-    target_os: str = "linux",
-) -> str:
-    """Encode a POSIX/bash or Windows PowerShell script in Base64, disable shell history, and execute portably."""
+def build_remote_bash_invocation(script: str, *, as_root: bool = False,
+                               sudo_password: str = "", target_os: str = "linux") -> str:
     if target_os.lower() in ("windows", "win", "powershell"):
-        win_script = (
-            "Set-PSReadLineOption -HistorySaveStyle SaveNothing -ErrorAction SilentlyContinue\n"
-            "[Console]::OutputEncoding = [Text.Encoding]::UTF8\n"
-            + script
-        )
-        utf16_b64 = base64.b64encode(win_script.encode("utf-16le")).decode("ascii")
-        return f"powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {utf16_b64}"
-
-    clean_script = "unset HISTFILE; export HISTFILE=/dev/null;\n" + script.replace("\r\n", "\n")
-    b64_script = base64.b64encode(clean_script.encode("utf-8")).decode("ascii")
-    polyglot_pipe = (
-        f"{_build_b64_decode_expr(b64_script)} | tr -d '\\r' | "
-        "(command -v bash >/dev/null 2>&1 && exec bash || exec sh)"
-    )
-    if as_root:
-        if sudo_password:
-            clean_pw = sudo_password.rstrip("\r\n")
-            pw_b64 = base64.b64encode(clean_pw.encode("utf-8")).decode("ascii")
-            pw_expr = _build_b64_decode_expr(pw_b64)
-            return (
-                f"if sudo -n true 2>/dev/null; then sudo -n sh -c \"{polyglot_pipe}\"; "
-                f"else printf '%s\\n' \"$({pw_expr})\" | sudo -S -p '' sh -c \"{polyglot_pipe}\"; fi"
-            )
-        return f"sudo -S -p '' sh -c \"{polyglot_pipe}\""
-    return polyglot_pipe
+        if as_root:
+            raise ValueError("sudo is unsupported for Windows targets")
+        payload = "[Console]::OutputEncoding = [Text.Encoding]::UTF8\n$ErrorActionPreference='Stop'\n$global:LASTEXITCODE=0\n" + script + "\nif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"
+        return "powershell.exe -NoProfile -NonInteractive -EncodedCommand " + base64.b64encode(payload.encode("utf-16le")).decode("ascii")
+    payload = "unset HISTFILE; export HISTFILE=/dev/null;\n" + script.replace("\r\n", "\n")
+    encoded = base64.b64encode(payload.encode()).decode("ascii")
+    command = f"{_build_b64_decode_expr(encoded)} | tr -d '\\r' | (command -v bash >/dev/null 2>&1 && exec bash || exec sh)"
+    if not as_root:
+        return command
+    invocation = "sh -c " + shlex.quote(command)
+    if sudo_password:
+        password = base64.b64encode(sudo_password.rstrip("\r\n").encode()).decode("ascii")
+        return (f"if sudo -n true 2>/dev/null; then sudo -n {invocation}; "
+                f"else printf '%s\\n' \"$( {_build_b64_decode_expr(password)} )\" | sudo -S -p '' {invocation}; fi")
+    return "sudo -S -p '' " + invocation
 
 
-def _build_ssh_common_opts(
-    node: TargetNodeSpec,
-    *,
-    port_flag: str = "-p",
-    has_ssh_password: bool = False,
-    connect_timeout_sec: int = 15,
-    jump_node: TargetNodeSpec | list[TargetNodeSpec] | None = None,
-) -> str:
-    batch_val = "no" if has_ssh_password else "yes"
-    opts = [
-        f"-o BatchMode={batch_val}",
-        "-o StrictHostKeyChecking=no",
-        "-o UserKnownHostsFile=NUL",
-        f"-o ConnectTimeout={connect_timeout_sec}",
-        "-o ServerAliveInterval=15",
-        "-o ServerAliveCountMax=3",
-        f"{port_flag} {node.port}",
-    ]
-    if jump_node is not None:
-        jumps = jump_node if isinstance(jump_node, list) else [jump_node]
-        if jumps:
-            jump_spec = ",".join(f"{j.user}@{j.host}:{j.port}" for j in jumps)
-            if port_flag == "-P":
-                opts.append(f"-o ProxyJump={jump_spec}")
-            else:
-                opts.append(f"-J {jump_spec}")
+def _node_uri(node: TargetNodeSpec) -> str:
+    validate_endpoint(node.host, node.port)
+    if not re.fullmatch(r"[A-Za-z0-9_.\\@-]+", node.user) or node.user.startswith("-"):
+        raise ValueError("Invalid SSH user")
+    host = f"[{node.host}]" if ":" in node.host else node.host
+    return f"{node.user}@{host}"
+
+
+def _ssh_args(node, *, scp=False, has_ssh_password=False, connect_timeout_sec=15, jump_node=None):
+    _node_uri(node)
+    args = ["-o", f"BatchMode={'no' if has_ssh_password else 'yes'}", "-o", "StrictHostKeyChecking=yes",
+            "-o", f"ConnectTimeout={int(connect_timeout_sec)}", "-o", "ServerAliveInterval=15",
+            "-o", "ServerAliveCountMax=3", "-P" if scp else "-p", str(node.port)]
+    jumps = jump_node if isinstance(jump_node, list) else ([jump_node] if jump_node else [])
+    if jumps:
+        if any(j.password_env for j in jumps):
+            raise ValueError("Per-hop password authentication requires independently configured OpenSSH host entries")
+        spec = ",".join(f"{_node_uri(j)}:{j.port}" for j in jumps)
+        if any(j.ssh_key_path for j in jumps):
+            def channel(host, port, index):
+                jump = jumps[index]
+                command = ["ssh.exe"] + _ssh_args(jump)
+                if index:
+                    command += ["-o", "ProxyCommand=" + channel(jump.host, jump.port, index - 1)]
+                command += ["-W", f"[{host}]:{port}", _node_uri(jump)]
+                return subprocess.list2cmdline(command)
+            args.extend(["-o", "ProxyCommand=" + channel(node.host, node.port, len(jumps) - 1)])
+        else:
+            args.extend(["-o", "ProxyJump=" + spec])
     if node.ssh_key_path:
-        opts.append(f"-i {node.ssh_key_path}")
-    return " ".join(opts)
+        args.extend(["-i", node.ssh_key_path])
+    return args
 
 
-def _wrap_with_askpass_ps(
-    inner_ps: str,
-    ssh_password: str,
-    token_id: str,
-    *,
-    stage_dir: str = r"%LOCALAPPDATA%\EnclaveGateway\stage",
-) -> str:
-    """Wrap a PowerShell SSH/SCP block with an ephemeral SSH_ASKPASS helper if ssh_password is set."""
+def _build_ssh_common_opts(node, *, port_flag="-p", has_ssh_password=False, connect_timeout_sec=15, jump_node=None):
+    return " ".join(ps_quote(arg) for arg in _ssh_args(node, scp=port_flag == "-P", has_ssh_password=has_ssh_password,
+                                                        connect_timeout_sec=connect_timeout_sec, jump_node=jump_node))
+
+
+def _wrap_with_askpass_ps(inner_ps: str, ssh_password: str, token_id: str, *, stage_dir=r"%LOCALAPPDATA%\EnclaveGateway\stage") -> str:
     if not ssh_password:
         return inner_ps.strip()
-
-    clean_ssh_pw = ssh_password.rstrip("\r\n")
-    # Escape special batch characters for cmd.exe echo
-    escaped_bat = (
-        clean_ssh_pw.replace("^", "^^")
-        .replace("&", "^&")
-        .replace("|", "^|")
-        .replace("<", "^<")
-        .replace(">", "^>")
-        .replace("%", "%%")
-    )
-    bat_content = f"@echo off\r\necho {escaped_bat}\r\n"
-    bat_b64 = base64.b64encode(bat_content.encode("utf-8")).decode("ascii")
-
+    # The helper contains only static code. Credentials live in the process
+    # environment, serialized across runspaces and restored on every exit path.
+    password_b64 = base64.b64encode(ssh_password.rstrip("\r\n").encode()).decode("ascii")
+    helper_code = "[Console]::WriteLine([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:EGW_ASKPASS_B64)))"
+    helper_b64 = base64.b64encode(helper_code.encode("utf-16le")).decode("ascii")
+    helper = f"@echo off\r\npowershell.exe -NoProfile -NonInteractive -EncodedCommand {helper_b64}\r\n"
+    content_b64 = base64.b64encode(helper.encode("ascii")).decode("ascii")
     return f"""
-$askDir = [Environment]::ExpandEnvironmentVariables('{stage_dir}')
-if (-not (Test-Path $askDir)) {{ New-Item -ItemType Directory -Force -Path $askDir | Out-Null }}
-$askCmd = Join-Path $askDir 'ask_{token_id}.cmd'
+$askMutex = New-Object Threading.Mutex($false, "Local\\EnclaveAskpass_$PID")
+$askAcquired = $false
+$oldAsk = @{{}}
 try {{
-    $askBytes = [Convert]::FromBase64String('{bat_b64}')
-    if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') {{
-        [IO.File]::WriteAllBytes($askCmd, $askBytes)
-    }} else {{
-        Set-Content -Path $askCmd -Value $askBytes -Encoding Byte -Force
+    $askAcquired = $askMutex.WaitOne(30000)
+    if (-not $askAcquired) {{ throw 'Timed out waiting for credential environment lock' }}
+    foreach ($key in @('SSH_ASKPASS','SSH_ASKPASS_REQUIRE','DISPLAY','EGW_ASKPASS_B64')) {{
+        $oldAsk[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
     }}
+    $askDir = [Environment]::ExpandEnvironmentVariables({ps_quote(stage_dir)})
+    [void][IO.Directory]::CreateDirectory($askDir)
+    $askCmd = Join-Path $askDir 'ask_{token_id}.cmd'
+    [IO.File]::WriteAllBytes($askCmd, [Convert]::FromBase64String('{content_b64}'))
+    $env:EGW_ASKPASS_B64 = '{password_b64}'
     $env:SSH_ASKPASS = $askCmd
     $env:SSH_ASKPASS_REQUIRE = 'force'
     $env:DISPLAY = 'localhost:0.0'
 {inner_ps}
 }} finally {{
-    if (Test-Path $askCmd) {{
-        $zeroBytes = New-Object byte[] 64
-        if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') {{
-            [IO.File]::WriteAllBytes($askCmd, $zeroBytes)
-        }} else {{
-            Set-Content -Path $askCmd -Value $zeroBytes -Encoding Byte -Force -ErrorAction SilentlyContinue
-        }}
-        Remove-Item $askCmd -Force -ErrorAction SilentlyContinue
+    if ($askAcquired) {{
+        foreach ($key in $oldAsk.Keys) {{ [Environment]::SetEnvironmentVariable($key, $oldAsk[$key], 'Process') }}
+        if ($askCmd) {{ Remove-Item -LiteralPath $askCmd -Force -ErrorAction SilentlyContinue }}
+        $askMutex.ReleaseMutex()
     }}
-    Remove-Item Env:\\SSH_ASKPASS -ErrorAction SilentlyContinue
-    Remove-Item Env:\\SSH_ASKPASS_REQUIRE -ErrorAction SilentlyContinue
+    $askMutex.Dispose()
 }}
 """.strip()
 
 
-def build_powershell_ssh_hop_script(
-    node: TargetNodeSpec,
-    bash_script: str,
-    *,
-    as_root: bool = False,
-    ssh_password: str = "",
-    sudo_password: str = "",
-    connect_timeout_sec: int = 15,
-    stage_dir: str = r"%LOCALAPPDATA%\EnclaveGateway\stage",
-    jump_node: TargetNodeSpec | list[TargetNodeSpec] | None = None,
-) -> str:
-    """Build a PowerShell script that invokes ssh.exe on the hop host safely without cmd.exe or temp sudo files."""
-    remote_cmd = build_remote_bash_invocation(
-        bash_script,
-        as_root=as_root,
-        sudo_password=sudo_password,
-        target_os=getattr(node, "os", "linux"),
-    )
-    opts_str = _build_ssh_common_opts(
-        node,
-        port_flag="-p",
-        has_ssh_password=bool(ssh_password),
-        connect_timeout_sec=connect_timeout_sec,
-        jump_node=jump_node,
-    )
-    target_uri = f"{node.user}@{node.host}"
-    token_id = secrets.token_hex(6)
+def build_powershell_ssh_hop_script(node, bash_script, *, as_root=False, ssh_password="", sudo_password="",
+                                   connect_timeout_sec=15, stage_dir=r"%LOCALAPPDATA%\EnclaveGateway\stage", jump_node=None):
+    remote = build_remote_bash_invocation(bash_script, as_root=as_root, sudo_password=sudo_password, target_os=node.os)
+    args = _build_ssh_common_opts(node, has_ssh_password=bool(ssh_password), connect_timeout_sec=connect_timeout_sec, jump_node=jump_node)
+    script = f"& ssh.exe -n -T {args} {ps_quote(_node_uri(node))} {ps_quote(remote)}\nif ($LASTEXITCODE -ne 0) {{ throw \"SSH failed with exit code $LASTEXITCODE\" }}"
+    return _wrap_with_askpass_ps(script, ssh_password, secrets.token_hex(12), stage_dir=stage_dir)
 
-    core_ps = f"""
-ssh.exe -n -T {opts_str} {target_uri} '{remote_cmd}'
-exit $LASTEXITCODE
+
+def _hash_sh(path: str) -> str:
+    path = shlex.quote(path)
+    return f"""if command -v sha256sum >/dev/null 2>&1; then
+    sha=$(sha256sum < {path} | awk '{{print tolower($1)}}')
+elif command -v shasum >/dev/null 2>&1; then
+    sha=$(shasum -a 256 < {path} | awk '{{print tolower($1)}}')
+elif command -v sha256 >/dev/null 2>&1; then
+    sha=$(sha256 -q < {path} | tr 'A-F' 'a-f')
+else
+    sha=$(openssl dgst -sha256 < {path} | awk '{{print tolower($NF)}}')
+fi"""
+
+
+def _stream_ps(node, stage, remote_path, *, pulling, password, jump_node, timeout_sec):
+    windows = node.os in ("windows", "win", "powershell")
+    if windows:
+        operation = (f"$s=[IO.File]::OpenRead([Environment]::ExpandEnvironmentVariables({ps_quote(remote_path)})); try {{$s.CopyTo([Console]::OpenStandardOutput())}} finally {{$s.Dispose()}}" if pulling
+                     else f"$s=[IO.File]::Create([Environment]::ExpandEnvironmentVariables({ps_quote(remote_path)})); try {{[Console]::OpenStandardInput().CopyTo($s)}} finally {{$s.Dispose()}}")
+        remote = build_remote_bash_invocation(operation, target_os="windows")
+    else:
+        remote = f"cat {'-- ' + shlex.quote(remote_path) if pulling else '> ' + shlex.quote(remote_path)}"
+    args = ["-T"] + _ssh_args(node, has_ssh_password=bool(password), jump_node=jump_node) + [_node_uri(node), remote]
+    arguments = ps_quote(subprocess.list2cmdline(args))
+    redirect = "$psi.RedirectStandardOutput = $true" if pulling else "$psi.RedirectStandardInput = $true"
+    copy_call = "$proc.StandardOutput.BaseStream.CopyToAsync($file)" if pulling else "$file.CopyToAsync($proc.StandardInput.BaseStream)"
+    copy = f"$copy = {copy_call}; if (-not $copy.Wait({int(timeout_sec * 1000)})) {{ $proc.Kill(); throw 'SSH binary stream timed out' }}; $copy.GetAwaiter().GetResult();" + ("" if pulling else "$proc.StandardInput.Close()")
+    mode = "Create" if pulling else "OpenRead"
+    return f"""
+$psi = New-Object Diagnostics.ProcessStartInfo
+$psi.FileName = 'ssh.exe'
+$psi.Arguments = {arguments}
+$psi.UseShellExecute = $false
+{redirect}
+$proc = New-Object Diagnostics.Process
+$proc.StartInfo = $psi
+$file = $null
+try {{
+    [void]$proc.Start()
+    $file = [IO.File]::{mode}($stage)
+    {copy}
+    if (-not $proc.WaitForExit({int(timeout_sec * 1000)})) {{ $proc.Kill(); throw 'SSH stream timed out' }}
+    if ($proc.ExitCode -ne 0) {{ throw 'SSH stream transfer failed' }}
+}} finally {{
+    if ($file) {{ $file.Dispose() }}
+    try {{ if (-not $proc.HasExited) {{ $proc.Kill() }} }} catch {{}}
+    $proc.Dispose()
+}}
 """
-    return _wrap_with_askpass_ps(
-        core_ps, ssh_password, token_id, stage_dir=stage_dir
-    )
 
 
 class SshHopExecutor:
-    """Executes commands and transfers files to TargetNodes via Bastion or Appliance."""
-
-    def __init__(
-        self,
-        exec_hop_fn: Callable[[str, float], ExecResult],
-        push_hop_fn: Callable[[Path, str, float], str],
-        pull_hop_fn: Callable[[str, Path, float], str],
-        *,
-        stage_dir: str = r"%LOCALAPPDATA%\EnclaveGateway\stage",
-    ) -> None:
+    def __init__(self, exec_hop_fn: Callable[[str, float], ExecResult], push_hop_fn: Callable[[Path, str, float], str],
+                 pull_hop_fn: Callable[[str, Path, float], str], *, stage_dir=r"%LOCALAPPDATA%\EnclaveGateway\stage"):
         self._exec_hop = exec_hop_fn
         self._push_hop = push_hop_fn
         self._pull_hop = pull_hop_fn
         self.stage_dir = stage_dir.rstrip("\\/")
 
-    def exec_node(
-        self,
-        node: TargetNodeSpec,
-        bash_script: str,
-        *,
-        as_root: bool = False,
-        ssh_password: str = "",
-        sudo_password: str = "",
-        timeout_sec: float = 120.0,
-        jump_node: TargetNodeSpec | None = None,
-    ) -> ExecResult:
-        hop_ps = build_powershell_ssh_hop_script(
-            node,
-            bash_script,
-            as_root=as_root,
-            ssh_password=ssh_password,
-            sudo_password=sudo_password,
-            stage_dir=self.stage_dir,
-            jump_node=jump_node,
-        )
-        return self._exec_hop(hop_ps, timeout_sec)
+    def exec_node(self, node, bash_script, *, as_root=False, ssh_password="", sudo_password="", timeout_sec=120.0, jump_node=None):
+        script = build_powershell_ssh_hop_script(node, bash_script, as_root=as_root, ssh_password=ssh_password,
+                                                sudo_password=sudo_password, stage_dir=self.stage_dir, jump_node=jump_node)
+        return self._exec_hop(script, timeout_sec)
 
-    def push_file_to_node(
-        self,
-        node: TargetNodeSpec,
-        local_path: Path,
-        remote_path: str,
-        *,
-        as_root: bool = False,
-        ssh_password: str = "",
-        sudo_password: str = "",
-        timeout_sec: float = 900.0,
-        jump_node: TargetNodeSpec | None = None,
-    ) -> str:
-        """Two-hop verified file delivery: Host -> VFS/Hop staging -> SCP (or zero-cmd SSH stream) -> TargetNode."""
-        stage_id = secrets.token_hex(6)
-        hop_stage = f"{self.stage_dir}\\egw_stage_{stage_id}_{local_path.name}"
-        expected_sha = self._push_hop(local_path, hop_stage, timeout_sec)
-
-        scp_opts = _build_ssh_common_opts(
-            node, port_flag="-P", has_ssh_password=bool(ssh_password), jump_node=jump_node
-        )
-        ssh_opts = _build_ssh_common_opts(
-            node, port_flag="-p", has_ssh_password=bool(ssh_password), jump_node=jump_node
-        )
-        remote_tmp = (
-            f"/tmp/.egw_stage_{stage_id}"
-            if as_root
-            else f"{remote_path}.tmp_{stage_id}"
-        )
-
-        scp_core_ps = f"""
-$stage = [Environment]::ExpandEnvironmentVariables('{hop_stage}')
+    def push_file_to_node(self, node, local_path, remote_path, *, as_root=False, ssh_password="", sudo_password="", timeout_sec=900.0, jump_node=None):
+        token = secrets.token_hex(12)
+        stage = f"{self.stage_dir}\\egw_stage_{token}"
+        windows = node.os in ("windows", "win", "powershell")
+        if windows and as_root:
+            raise ValueError("sudo is unsupported for Windows targets")
+        temporary = f".egw_stage_{token}" if windows else f"/tmp/.egw_stage_{token}"
+        expected = self._push_hop(local_path, stage, timeout_sec)
+        if not re.fullmatch(r"[0-9a-f]{64}", expected):
+            raise ValueError("Invalid staging checksum")
+        options = _build_ssh_common_opts(node, port_flag="-P", has_ssh_password=bool(ssh_password), jump_node=jump_node)
+        fallback = _stream_ps(node, stage, temporary, pulling=False, password=ssh_password, jump_node=jump_node, timeout_sec=timeout_sec)
+        script = f"""
+$ErrorActionPreference = 'Stop'
+$stage = [Environment]::ExpandEnvironmentVariables({ps_quote(stage)})
 try {{
-    scp.exe {scp_opts} $stage '{node.user}@{node.host}:{remote_tmp}'
+    & scp.exe {options} $stage {ps_quote(_node_uri(node) + ':' + temporary)}
     if ($LASTEXITCODE -ne 0) {{
-        if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') {{
-            $psi = New-Object System.Diagnostics.ProcessStartInfo
-            $psi.FileName = 'ssh.exe'
-            $psi.Arguments = "-T {ssh_opts} {node.user}@{node.host} `"cat > '{remote_tmp}'`""
-            $psi.UseShellExecute = $false
-            $psi.RedirectStandardInput = $true
-            $proc = [System.Diagnostics.Process]::Start($psi)
-            $fs = [IO.File]::OpenRead($stage)
-            try {{
-                $fs.CopyTo($proc.StandardInput.BaseStream)
-            }} finally {{
-                $fs.Close()
-                $proc.StandardInput.Close()
-            }}
-            $proc.WaitForExit()
-            $global:LASTEXITCODE = $proc.ExitCode
-        }} else {{
-            Get-Content -Path $stage -Encoding Byte -Raw | ssh.exe -T {ssh_opts} {node.user}@{node.host} "cat > '{remote_tmp}'"
-        }}
-        if ($LASTEXITCODE -ne 0) {{ Write-Error 'SCP and SSH stream transfer to target node failed'; exit 1 }}
+{fallback}
+        $global:LASTEXITCODE = 0
     }}
-}} finally {{
-    Remove-Item $stage -Force -ErrorAction SilentlyContinue
-}}
+}} finally {{ Remove-Item -LiteralPath $stage -Force -ErrorAction SilentlyContinue }}
 """
-        scp_ps = _wrap_with_askpass_ps(
-            scp_core_ps, ssh_password, stage_id, stage_dir=self.stage_dir
-        )
-        scp_res = self._exec_hop(scp_ps, timeout_sec)
-        if scp_res.exit_code != 0:
-            raise RuntimeError(
-                f"TargetNode SCP stage failed for {node.name}:{remote_path}: {scp_res.stderr or scp_res.stdout}"
-            )
-
-        verify_and_move_sh = f"""
-set -e
-if command -v sha256sum >/dev/null 2>&1; then
-    sha=$(sha256sum '{remote_tmp}' | awk '{{print tolower($1)}}')
-elif command -v shasum >/dev/null 2>&1; then
-    sha=$(shasum -a 256 '{remote_tmp}' | awk '{{print tolower($1)}}')
-elif command -v sha256 >/dev/null 2>&1; then
-    sha=$(sha256 -q '{remote_tmp}' | tr 'A-F' 'a-f')
-else
-    sha=$(openssl dgst -sha256 '{remote_tmp}' | awk '{{print tolower($NF)}}')
-fi
-if [ "$sha" != '{expected_sha}' ]; then
-    rm -f '{remote_tmp}'
+        try:
+            result = self._exec_hop(_wrap_with_askpass_ps(script, ssh_password, token, stage_dir=self.stage_dir), timeout_sec)
+            if result.exit_code:
+                raise RuntimeError(f"Target transfer failed: {result.stderr or result.stdout}")
+            if windows:
+                verify = f"""
+$tmp={ps_quote(temporary)}
+$dst=[Environment]::ExpandEnvironmentVariables({ps_quote(remote_path)})
+$sha=(Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash.ToLower()
+if ($sha -ne '{expected}') {{ throw 'Target checksum mismatch' }}
+$parent=Split-Path -Parent $dst
+if ($parent) {{ [void][IO.Directory]::CreateDirectory($parent) }}
+Move-Item -LiteralPath $tmp -Destination $dst -Force -ErrorAction Stop
+Write-Output "VERIFIED:$sha"
+"""
+            else:
+                tmp, dst = shlex.quote(temporary), shlex.quote(remote_path)
+                verify = f"""set -e
+{_hash_sh(temporary)}
+if [ "$sha" != '{expected}' ]; then
+    rm -f {tmp}
     echo "MISMATCH:$sha" >&2
     exit 1
 fi
-mkdir -p "$(dirname '{remote_path}')"
-mv -f '{remote_tmp}' '{remote_path}'
+mkdir -p -- "$(dirname -- {dst})"
+mv -f -- {tmp} {dst}
 echo "VERIFIED:$sha"
-""".strip()
-
-        verify_res = self.exec_node(
-            node,
-            verify_and_move_sh,
-            as_root=as_root,
-            ssh_password=ssh_password,
-            sudo_password=sudo_password,
-            timeout_sec=120.0,
-            jump_node=jump_node,
-        )
-        if verify_res.exit_code != 0 or f"VERIFIED:{expected_sha}" not in verify_res.stdout:
-            raise RuntimeError(
-                f"TargetNode verification/move failed for {node.name}:{remote_path}: {verify_res.stderr or verify_res.stdout}"
-            )
-        return expected_sha
-
-    def pull_file_from_node(
-        self,
-        node: TargetNodeSpec,
-        remote_path: str,
-        local_path: Path,
-        *,
-        as_root: bool = False,
-        ssh_password: str = "",
-        sudo_password: str = "",
-        timeout_sec: float = 600.0,
-        jump_node: TargetNodeSpec | None = None,
-    ) -> str:
-        """Two-hop verified file retrieval: TargetNode -> SCP (or SSH stream fallback) -> VFS/Hop staging -> Host."""
-        stage_id = secrets.token_hex(6)
-        hop_stage = f"{self.stage_dir}\\egw_pull_{stage_id}_{local_path.name}"
-        remote_src = f"/tmp/.egw_pull_{stage_id}" if as_root else remote_path
-
-        if as_root:
-            prep_sh = f"""
-set -e
-if [ -d /dev/shm ] && [ -w /dev/shm ]; then
-    avail_kb=$(df -Pk /dev/shm 2>/dev/null | awk 'NR==2 {{print $4}}')
-    fsize_kb=$(du -k '{remote_path}' 2>/dev/null | awk '{{print $1}}')
-    if [ -n "$avail_kb" ] && [ -n "$fsize_kb" ] && [ "$fsize_kb" -lt 16384 ] && [ "$avail_kb" -gt 65536 ]; then
-        cp -f '{remote_path}' '/dev/shm/.egw_pull_{stage_id}'
-        chown '{node.user}' '/dev/shm/.egw_pull_{stage_id}'
-        chmod 600 '/dev/shm/.egw_pull_{stage_id}'
-        ln -sf '/dev/shm/.egw_pull_{stage_id}' '{remote_src}'
-        exit 0
-    fi
-fi
-cp -f '{remote_path}' '{remote_src}'
-chown '{node.user}' '{remote_src}'
-chmod 600 '{remote_src}'
-""".strip()
-            prep_res = self.exec_node(
-                node,
-                prep_sh,
-                as_root=True,
-                ssh_password=ssh_password,
-                sudo_password=sudo_password,
-                timeout_sec=60.0,
-                jump_node=jump_node,
-            )
-            if prep_res.exit_code != 0:
-                raise RuntimeError(
-                    f"Failed to stage root-owned file {node.name}:{remote_path}: {prep_res.stderr or prep_res.stdout}"
-                )
-
-        scp_opts = _build_ssh_common_opts(
-            node, port_flag="-P", has_ssh_password=bool(ssh_password), jump_node=jump_node
-        )
-        ssh_opts = _build_ssh_common_opts(
-            node, port_flag="-p", has_ssh_password=bool(ssh_password), jump_node=jump_node
-        )
-        scp_core_ps = f"""
-$stage = [Environment]::ExpandEnvironmentVariables('{hop_stage}')
-$stageParent = Split-Path -Parent $stage
-if ($stageParent -and -not (Test-Path $stageParent)) {{ New-Item -ItemType Directory -Force -Path $stageParent | Out-Null }}
-scp.exe {scp_opts} '{node.user}@{node.host}:{remote_src}' $stage
-if ($LASTEXITCODE -ne 0) {{
-    $b64 = ssh.exe -n -T {ssh_opts} {node.user}@{node.host} "base64 '{remote_src}' | tr -d '\\r\\n'"
-    if ($LASTEXITCODE -ne 0) {{ Write-Error 'SCP and SSH stream pull from target node failed'; exit 1 }}
-    $pullBytes = [Convert]::FromBase64String(($b64 | Out-String).Trim())
-    if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') {{
-        [IO.File]::WriteAllBytes($stage, $pullBytes)
-    }} else {{
-        Set-Content -Path $stage -Value $pullBytes -Encoding Byte -Force
-    }}
-}}
 """
-        scp_ps = _wrap_with_askpass_ps(
-            scp_core_ps, ssh_password, stage_id, stage_dir=self.stage_dir
-        )
-        try:
-            res = self._exec_hop(scp_ps, timeout_sec)
-            if res.exit_code != 0:
-                raise RuntimeError(
-                    f"Failed to pull {node.name}:{remote_path} to hop host: {res.stderr or res.stdout}"
-                )
-            return self._pull_hop(hop_stage, local_path, timeout_sec)
+            result = self.exec_node(node, verify, as_root=as_root, ssh_password=ssh_password, sudo_password=sudo_password, timeout_sec=timeout_sec, jump_node=jump_node)
+            if result.exit_code or f"VERIFIED:{expected}" not in result.stdout:
+                raise RuntimeError(f"Target verification failed: {result.stderr or result.stdout}")
+            return expected
         finally:
-            self._exec_hop(
-                f"Remove-Item ([Environment]::ExpandEnvironmentVariables('{hop_stage}')) -Force -ErrorAction SilentlyContinue",
-                30.0,
-            )
-            if as_root:
-                self.exec_node(
-                    node,
-                    f"rm -f '{remote_src}' '/dev/shm/.egw_pull_{stage_id}'",
-                    as_root=True,
-                    ssh_password=ssh_password,
-                    sudo_password=sudo_password,
-                    timeout_sec=30.0,
-                    jump_node=jump_node,
-                )
+            self._exec_hop(f"Remove-Item -LiteralPath ([Environment]::ExpandEnvironmentVariables({ps_quote(stage)})) -Force -ErrorAction SilentlyContinue", 30.0)
+            cleanup = f"Remove-Item -LiteralPath {ps_quote(temporary)} -Force -ErrorAction SilentlyContinue" if windows else f"rm -f -- {shlex.quote(temporary)}"
+            self.exec_node(node, cleanup, ssh_password=ssh_password, timeout_sec=30.0, jump_node=jump_node)
 
-    def bootstrap_ssh_key(
-        self,
-        node: TargetNodeSpec,
-        *,
-        ssh_password: str = "",
-        timeout_sec: float = 60.0,
-        jump_node: TargetNodeSpec | None = None,
-    ) -> ExecResult:
-        """Ensure an ed25519 keypair exists on the hop host and install its public key onto TargetNode."""
-        gen_ps = """
-$sshDir = Join-Path $env:USERPROFILE '.ssh'
-if (-not (Test-Path $sshDir)) { New-Item -ItemType Directory -Force -Path $sshDir | Out-Null }
-$keyPath = Join-Path $sshDir 'id_ed25519'
-$pubPath = "$keyPath.pub"
-if (-not (Test-Path $pubPath)) {
-    ssh-keygen.exe -t ed25519 -N '""' -f $keyPath | Out-Null
+    def pull_file_from_node(self, node, remote_path, local_path, *, as_root=False, ssh_password="", sudo_password="", timeout_sec=600.0, jump_node=None):
+        token = secrets.token_hex(12)
+        stage = f"{self.stage_dir}\\egw_pull_{token}"
+        windows = node.os in ("windows", "win", "powershell")
+        if windows and as_root:
+            raise ValueError("sudo is unsupported for Windows targets")
+        source = remote_path
+        if as_root:
+            source = f"/tmp/.egw_pull_{token}"
+            prep = f"set -e; umask 077; set -C; cat -- {shlex.quote(remote_path)} > {shlex.quote(source)}; chown -- {shlex.quote(node.user)} {shlex.quote(source)}"
+            result = self.exec_node(node, prep, as_root=True, ssh_password=ssh_password, sudo_password=sudo_password, jump_node=jump_node)
+            if result.exit_code:
+                raise RuntimeError("Failed to stage root-owned file")
+        try:
+            if windows:
+                hash_script = f"Write-Output ('SHA256:' + (Get-FileHash -LiteralPath ([Environment]::ExpandEnvironmentVariables({ps_quote(source)})) -Algorithm SHA256).Hash.ToLower())"
+            else:
+                hash_script = "set -e\n" + _hash_sh(source) + '\necho "SHA256:$sha"'
+            result = self.exec_node(node, hash_script, ssh_password=ssh_password, timeout_sec=timeout_sec, jump_node=jump_node)
+            match = re.search(r"SHA256:([0-9a-f]{64})", result.stdout)
+            if result.exit_code or not match:
+                raise RuntimeError("Failed to hash target file")
+            expected = match.group(1)
+            # Binary streams preserve NUL bytes and avoid text transcoding in PS5.
+            stream = _stream_ps(node, stage, source, pulling=True, password=ssh_password, jump_node=jump_node, timeout_sec=timeout_sec)
+            script = f"$stage=[Environment]::ExpandEnvironmentVariables({ps_quote(stage)})\n[void][IO.Directory]::CreateDirectory((Split-Path -Parent $stage))\n" + stream
+            result = self._exec_hop(_wrap_with_askpass_ps(script, ssh_password, token, stage_dir=self.stage_dir), timeout_sec)
+            if result.exit_code:
+                raise RuntimeError(f"Target file retrieval failed: {result.stderr or result.stdout}")
+            from tempfile import NamedTemporaryFile
+            from enclave_gateway.transports.rdp_vfs import compute_file_sha256
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            with NamedTemporaryFile(dir=local_path.parent, delete=False) as fp:
+                temporary = Path(fp.name)
+            try:
+                self._pull_hop(stage, temporary, timeout_sec)
+                if compute_file_sha256(temporary) != expected:
+                    raise RuntimeError("Target file checksum mismatch")
+                temporary.replace(local_path)
+            finally:
+                temporary.unlink(missing_ok=True)
+            return expected
+        finally:
+            self._exec_hop(f"Remove-Item -LiteralPath ([Environment]::ExpandEnvironmentVariables({ps_quote(stage)})) -Force -ErrorAction SilentlyContinue", 30.0)
+            if as_root:
+                self.exec_node(node, f"rm -f -- {shlex.quote(source)}", as_root=True, ssh_password=ssh_password, sudo_password=sudo_password, jump_node=jump_node)
+
+    def bootstrap_ssh_key(self, node, *, ssh_password="", timeout_sec=60.0, jump_node=None):
+        if node.os in ("windows", "win", "powershell"):
+            raise ValueError("Windows authorized_keys provisioning requires an administrator-approved ACL policy")
+        result = self._exec_hop("""
+$ErrorActionPreference='Stop'
+$dir=Join-Path $env:USERPROFILE '.ssh'
+[void][IO.Directory]::CreateDirectory($dir)
+$key=Join-Path $dir 'id_ed25519'
+if (-not (Test-Path -LiteralPath "$key.pub")) {
+    & ssh-keygen.exe -t ed25519 -N '\"\"' -f $key
+    if ($LASTEXITCODE) { throw 'SSH key generation failed' }
 }
-(Get-Content $pubPath -Raw -Encoding UTF8).Trim()
-"""
-        pub_res = self._exec_hop(gen_ps, 30.0)
-        if pub_res.exit_code != 0 or not pub_res.stdout.strip():
-            return ExecResult(
-                exit_code=1,
-                stdout="",
-                stderr=f"Failed to read or generate hop SSH public key: {pub_res.stderr}",
-                duration_ms=pub_res.duration_ms,
-            )
-        pub_key = pub_res.stdout.strip().splitlines()[-1].strip()
-        pub_b64 = base64.b64encode(pub_key.encode("utf-8")).decode("ascii")
-        install_sh = f"""
-set -e
-mkdir -p ~/.ssh
-chmod 700 ~/.ssh
-touch ~/.ssh/authorized_keys
-chmod 600 ~/.ssh/authorized_keys
-PUB=$(echo '{pub_b64}' | base64 -d)
-grep -qxF "$PUB" ~/.ssh/authorized_keys || echo "$PUB" >> ~/.ssh/authorized_keys
-echo "SSH_KEY_INSTALLED"
-""".strip()
-        return self.exec_node(
-            node,
-            install_sh,
-            as_root=False,
-            ssh_password=ssh_password,
-            timeout_sec=timeout_sec,
-            jump_node=jump_node,
-        )
+(Get-Content -LiteralPath "$key.pub" -Raw).Trim()
+""", 30.0)
+        if result.exit_code or not result.stdout.strip():
+            return ExecResult(1, "", "Failed to obtain hop SSH public key", result.duration_ms)
+        key = result.stdout.strip().splitlines()[-1]
+        encoded = base64.b64encode(key.encode()).decode("ascii")
+        script = f"set -e; umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; PUB=$( {_build_b64_decode_expr(encoded)} ); grep -qxF \"$PUB\" ~/.ssh/authorized_keys || printf '%s\\n' \"$PUB\" >> ~/.ssh/authorized_keys"
+        return self.exec_node(node, script, ssh_password=ssh_password, timeout_sec=timeout_sec, jump_node=jump_node)

@@ -8,6 +8,9 @@ import platform
 import re
 import subprocess
 import urllib.parse
+import threading
+import hashlib
+from typing import Any
 from pathlib import Path
 
 KEYCHAIN_SERVICE_PREFIX = "enclave-gateway"
@@ -28,11 +31,18 @@ DESTRUCTIVE_PATTERNS = [
 
 
 def verify_command_safety(command: str, confirm_destructive: bool = False) -> None:
-    """Block destructive shell or SQL operations unless explicitly confirmed."""
+    """Detect common destructive operations; this is a guardrail, not a sandbox."""
     if confirm_destructive:
         return
-    for pattern in DESTRUCTIVE_PATTERNS:
-        match = pattern.search(command)
+    normalized = re.sub(r"/\*.*?\*/", " ", command, flags=re.DOTALL)
+    normalized = normalized.replace("\\\n", "").replace("`\n", "")
+    normalized = normalized.replace("'", "").replace('"', "")
+    patterns = DESTRUCTIVE_PATTERNS + [
+        re.compile(r"\brm\s+(?=[^;&|\n]*(?:--recursive|-[a-z]*r))(?=[^;&|\n]*(?:--force|-[a-z]*f))[^;&|\n]*\s/(?:\*|\s|$)", re.I),
+        re.compile(r"\b(?:Clear-Disk|Format-Volume|Stop-Computer|Restart-Computer)\b", re.I),
+    ]
+    for pattern in patterns:
+        match = pattern.search(normalized)
         if match:
             raise DestructiveOperationError(
                 f"Destructive operation blocked ('{match.group(0)}'). "
@@ -64,6 +74,7 @@ class SecretScrubber:
 
     def __init__(self, secrets: list[str] | None = None) -> None:
         self._tokens: set[str] = set()
+        self._lock = threading.RLock()
         if secrets:
             for item in secrets:
                 self.register(item)
@@ -72,21 +83,44 @@ class SecretScrubber:
         if not secret:
             return
         clean = secret.strip("\r\n")
-        if len(clean) < 4:
+        if not clean:
             return
-        self._tokens.add(clean)
-        self._tokens.add(urllib.parse.quote(clean, safe=""))
-        self._tokens.add(base64.b64encode(clean.encode("utf-8")).decode("ascii"))
+        with self._lock:
+            self._tokens.add(clean)
+            self._tokens.add(urllib.parse.quote(clean, safe=""))
+            self._tokens.add(base64.b64encode(clean.encode("utf-8")).decode("ascii"))
 
-    def scrub(self, text: str) -> str:
+    def scrub(self, text: Any) -> Any:
+        if isinstance(text, dict):
+            return {self.scrub(k): self.scrub(v) for k, v in text.items()}
+        if isinstance(text, (list, tuple)):
+            return [self.scrub(item) for item in text]
+        if not isinstance(text, str):
+            return text
         if not text:
             return text
         result = text
-        for token in sorted(self._tokens, key=len, reverse=True):
+        with self._lock:
+            tokens = sorted(self._tokens, key=len, reverse=True)
+        for token in tokens:
             if token in result:
-                result = result.replace(token, "[REDACTED]")
+                result = result.replace(token, "[REDACTED]" + "\n" * token.count("\n"))
         for pattern, replacement in self._HEURISTIC_PATTERNS:
-            result = pattern.sub(replacement, result)
+            result = pattern.sub(lambda match: match.expand(replacement) + "\n" * match.group(0).count("\n"), result)
+        result = re.sub(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*",
+                        lambda match: "[REDACTED_PRIVATE_KEY]" + "\n" * match.group(0).count("\n"), result)
+        # Captured output can end midway through a registered credential. Redact
+        # boundary fragments conservatively; never attempt to reconstruct secrets.
+        for token in tokens:
+            if len(token) >= 8:
+                for length in range(min(len(token) - 1, len(result)), 3, -1):
+                    if result.endswith(token[:length]):
+                        result = result[:-length] + "[REDACTED]"
+                        break
+                for length in range(min(len(token) - 1, len(result)), 3, -1):
+                    if result.startswith(token[-length:]):
+                        result = "[REDACTED]" + result[length:]
+                        break
         return result
 
 
@@ -123,12 +157,19 @@ class SecretVault:
         if not key:
             return default
 
-        val = os.environ.get(key) or self._env_cache.get(key) or self._get_from_keychain(key)
+        if key in os.environ:
+            val = os.environ[key]
+        elif key in self._env_cache:
+            val = self._env_cache[key]
+        else:
+            try:
+                val = self._get_from_keychain(key)
+            except FileNotFoundError:
+                val = None
         if val is None:
             return default
         clean = val.rstrip("\r\n")
-        if any(s in key.upper() for s in ("PASS", "SECRET", "TOKEN", "KEY")):
-            self.scrubber.register(clean)
+        self.scrubber.register(clean)
         return clean
 
     def set_in_keychain(self, key: str, value: str) -> bool:
@@ -173,13 +214,13 @@ class SecretVault:
             )
             return res.returncode == 0
         if sys_name == "Windows":
-            dpapi_file = Path.home() / ".enclave_gateway" / f"{key}.dpapi"
+            dpapi_file = Path.home() / ".enclave_gateway" / f"{hashlib.sha256(key.encode()).hexdigest()}.dpapi"
             dpapi_file.parent.mkdir(parents=True, exist_ok=True)
             b64_val = base64.b64encode(clean.encode("utf-8")).decode("ascii")
             ps_cmd = (
                 f"$s = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{b64_val}')); "
                 f"$sec = ConvertTo-SecureString $s -AsPlainText -Force; "
-                f"ConvertFrom-SecureString $sec | Set-Content -Path '{dpapi_file}' -NoNewline"
+                f"ConvertFrom-SecureString $sec | Set-Content -LiteralPath '{str(dpapi_file).replace(chr(39), chr(39)*2)}' -NoNewline"
             )
             res = subprocess.run(
                 ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
@@ -219,10 +260,10 @@ class SecretVault:
             if res.returncode == 0:
                 return res.stdout.rstrip("\r\n")
         elif sys_name == "Windows":
-            dpapi_file = Path.home() / ".enclave_gateway" / f"{key}.dpapi"
+            dpapi_file = Path.home() / ".enclave_gateway" / f"{hashlib.sha256(key.encode()).hexdigest()}.dpapi"
             if dpapi_file.is_file():
                 ps_cmd = (
-                    f"$sec = Get-Content -Path '{dpapi_file}' -Raw | ConvertTo-SecureString; "
+                    f"$sec = Get-Content -LiteralPath '{str(dpapi_file).replace(chr(39), chr(39)*2)}' -Raw | ConvertTo-SecureString; "
                     f"[System.Net.NetworkCredential]::new('', $sec).Password"
                 )
                 res = subprocess.run(

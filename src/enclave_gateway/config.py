@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 
 def _default_runtime_dir() -> str:
-    return "/tmp" if os.name != "nt" and Path("/tmp").is_dir() else tempfile.gettempdir()
+    return str(Path(tempfile.gettempdir()) / ("enclave-gateway-" + str(getattr(os, "getuid", lambda: "user")())))
 
 
 @dataclass(slots=True)
@@ -22,7 +23,7 @@ class ApplianceSpec:
     cpus: int = 4
     memory_mb: int = 4096
     disk_path: str = "~/.local/share/enclave-gateway/disk.qcow2"
-    efi_code_path: str = "/opt/homebrew/share/qemu/edk2-aarch64-code.fd"
+    efi_code_path: str = ""
     efi_vars_path: str = "~/.local/share/enclave-gateway/efi_vars.fd"
     golden_snapshot: str = "golden_ready"
     mtu: int = 1350
@@ -31,6 +32,12 @@ class ApplianceSpec:
     vm_rdp_forward_port: int = 13390
     vnc_display: int = 1
     runtime_dir: str = field(default_factory=_default_runtime_dir)
+
+    def __post_init__(self):
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", self.name):
+            raise ValueError("Invalid appliance name")
+        if self.cpus < 1 or self.memory_mb < 128 or not 576 <= self.mtu <= 9000:
+            raise ValueError("Invalid appliance resources or MTU")
 
     @property
     def resolved_disk_path(self) -> Path:
@@ -60,11 +67,12 @@ class ApplianceSpec:
 @dataclass(slots=True)
 class ProviderSpec:
     type: str = "vipnet"
-    binary_path: str = r"C:\Program Files\Mobile\bin\vipnetclient.exe"
+    binary_path: str = ""
     installer_path: str = "./vendor/ViPNet_Client.msi"
     dst_key_path: str = "./secrets/client.dst"
     dst_password_env: str = "ENCLAVE_VPN_KEY_PASSWORD"
     adapter_name: str = "Infotecs"
+    service_name: str = ""
     probe_host: str = "10.0.1.10"
     probe_port: int = 3389
     routes: list[str] = field(default_factory=list)
@@ -87,6 +95,12 @@ class BastionSpec:
     compress: bool = True
     block_size_bytes: int = 4 * 1024 * 1024
 
+    def __post_init__(self):
+        if type(self.block_size_bytes) is not int or not 1 <= self.block_size_bytes <= 48 * 1024 * 1024:
+            raise ValueError("block_size_bytes must be in 1..50331648")
+        if type(self.parallel_streams) is not int or not 1 <= self.parallel_streams <= 64:
+            raise ValueError("parallel_streams must be in 1..64")
+
 
 @dataclass(slots=True)
 class TargetNodeSpec:
@@ -99,6 +113,14 @@ class TargetNodeSpec:
     password_env: str = ""
     sudo_password_env: str = ""
     ssh_key_path: str = ""
+
+    def __post_init__(self):
+        from enclave_gateway.security.quoting import validate_endpoint
+        validate_endpoint(self.host, self.port)
+        if not re.fullmatch(r"[A-Za-z0-9_.@\\-]+", self.user) or self.user.startswith("-"):
+            raise ValueError("Invalid target user")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", self.name):
+            raise ValueError("Invalid target name")
 
 
 @dataclass(slots=True)
@@ -200,6 +222,8 @@ class EnclaveConfig:
                 Path("config/enclave.example.yaml"),
             ]
         )
+        if path is not None and not Path(path).is_file():
+            raise FileNotFoundError(f"Configuration file not found: {path}")
         for candidate in candidates:
             if candidate.is_file():
                 text = candidate.read_text(encoding="utf-8")
@@ -268,44 +292,43 @@ def parse_yaml_or_json(text: str) -> dict[str, Any]:
     except ImportError:
         pass
 
-    root: dict[str, Any] = {}
-    stack: list[tuple[int, dict[str, Any], str]] = [(-1, root, "")]
-
-    for raw_line in stripped.splitlines():
-        clean = _strip_inline_comment(raw_line)
+    tokens = []
+    for line in stripped.splitlines():
+        clean = _strip_inline_comment(line)
         if not clean.strip():
             continue
-        indent = len(clean) - len(clean.lstrip(" "))
-        trimmed = clean.strip()
+        if "\t" in clean[:len(clean) - len(clean.lstrip())]:
+            raise ValueError("Tabs are unsupported in YAML indentation")
+        tokens.append((len(clean) - len(clean.lstrip(" ")), clean.strip()))
 
-        if trimmed.startswith("- "):
-            item_val = _parse_scalar(trimmed[2:].strip())
-            while len(stack) > 1 and stack[-1][0] >= indent:
-                stack.pop()
-            parent_dict = stack[-1][1]
-            last_key = stack[-1][2]
-            if last_key and isinstance(parent_dict.get(last_key), dict) and not parent_dict[last_key]:
-                parent_dict[last_key] = [item_val]
-            elif last_key and isinstance(parent_dict.get(last_key), list):
-                parent_dict[last_key].append(item_val)
-            continue
+    def parse_block(index, indent):
+        is_list = tokens[index][1].startswith("- ")
+        result = [] if is_list else {}
+        while index < len(tokens):
+            level, text = tokens[index]
+            if level < indent:
+                break
+            if level != indent:
+                raise ValueError("Invalid YAML indentation")
+            if is_list:
+                if not text.startswith("- "):
+                    raise ValueError("Mixed YAML sequence and mapping")
+                result.append(_parse_scalar(text[2:]))
+                index += 1
+            else:
+                key, colon, value = text.partition(":")
+                if not colon or not key or key in result:
+                    raise ValueError("Invalid or duplicate YAML mapping key")
+                index += 1
+                if value.strip():
+                    result[key] = _parse_scalar(value)
+                elif index < len(tokens) and tokens[index][0] > level:
+                    result[key], index = parse_block(index, tokens[index][0])
+                else:
+                    result[key] = {}
+        return result, index
 
-        key_part, sep, val_part = trimmed.partition(":")
-        if not sep:
-            continue
-        key = key_part.strip()
-        val_str = val_part.strip()
-
-        while len(stack) > 1 and stack[-1][0] >= indent:
-            stack.pop()
-
-        current_dict = stack[-1][1]
-        stack[-1] = (stack[-1][0], current_dict, key)
-        if not val_str:
-            child: dict[str, Any] = {}
-            current_dict[key] = child
-            stack.append((indent, child, ""))
-        else:
-            current_dict[key] = _parse_scalar(val_str)
-
-    return root
+    result, end = parse_block(0, tokens[0][0])
+    if not isinstance(result, dict) or end != len(tokens):
+        raise ValueError("Configuration must be a YAML mapping")
+    return result

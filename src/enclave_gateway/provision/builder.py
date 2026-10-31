@@ -3,16 +3,24 @@
 from __future__ import annotations
 
 import shutil
+import secrets
+import re
+import json
+import hashlib
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace, asdict
 from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape
 
 from enclave_gateway.config import EnclaveConfig
+from enclave_gateway.security.quoting import ps_quote
 from enclave_gateway.hypervisor.driver import (
     ApplianceHypervisor,
     detect_host_arch,
+    resolve_efi_code_path,
+    resolve_efi_vars_template,
+    qemu_value,
 )
 
 
@@ -20,7 +28,7 @@ from enclave_gateway.hypervisor.driver import (
 class ProvisionOptions:
     arch: str = "auto"
     admin_user: str = "Admin"
-    admin_password: str = "Enclave#Appliance2026"
+    admin_password: str = field(default_factory=lambda: secrets.token_urlsafe(24))
     computer_name: str = "enclave-vm"
     disk_size_gb: int = 64
     auto_partition: bool = True
@@ -233,7 +241,7 @@ def generate_post_install_ps1(cfg: EnclaveConfig, opts: ProvisionOptions) -> str
 $ErrorActionPreference = "Continue"
 $SeedRoot = $PSScriptRoot
 $InstallRoot = "C:\\EnclaveGateway"
-$SpoolDir = "{spool_dir}"
+$SpoolDir = {ps_quote(spool_dir)}
 
 New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
 New-Item -ItemType Directory -Force -Path $SpoolDir | Out-Null
@@ -248,8 +256,8 @@ foreach ($scriptName in @("appliance_init.ps1", "session_supervisor.ps1", "basti
 }}
 
 # 2. Ensure QEMU Guest Agent service is running
-Get-Service -Name "QEMU-GA" -ErrorAction SilentlyContinue | Set-Service -StartupType Automatic
-Start-Service -Name "QEMU-GA" -ErrorAction SilentlyContinue
+Get-Service -Name "qemu-ga" -ErrorAction SilentlyContinue | Set-Service -StartupType Automatic
+Start-Service -Name "qemu-ga" -ErrorAction SilentlyContinue
 
 # 3. Synthesize RDP connection profile with rdpdr drive redirection enabled
 $RdpFile = Join-Path $InstallRoot "bastion.rdp"
@@ -263,20 +271,20 @@ redirectclipboard:i:1
 autoreconnection enabled:i:1
 bitmapcachepersistenable:i:0
 compression:i:1
-authentication level:i:0
+authentication level:i:1
 "@
 [IO.File]::WriteAllText($RdpFile, $RdpContent, [Text.Encoding]::ASCII)
 
 # 4. Register interactive Scheduled Task for Bastion RDP session
 $TaskCmd = "mstsc.exe `"$RdpFile`""
-& schtasks.exe /create /tn "{task_name}" /tr $TaskCmd /sc ONLOGON /ru "{opts.admin_user}" /it /rl HIGHEST /f | Out-Null
+& schtasks.exe /create /tn {ps_quote(task_name)} /tr $TaskCmd /sc ONLOGON /ru {ps_quote(opts.admin_user)} /it /rl HIGHEST /f | Out-Null
 
 # 5. Apply MTU={mtu}, fClientDisableUDP=1, and optional ViPNet MSI + DST installation
 $InitScript = Join-Path $InstallRoot "appliance_init.ps1"
 $MsiCandidate = Join-Path $SeedRoot "ViPNet_Client.msi"
 $DstCandidate = Join-Path $SeedRoot "client.dst"
 if (Test-Path $InitScript) {{
-    & $InitScript -Mtu {mtu} -AdapterName "{adapter_name}" -BastionHost "{bastion_host}" -BastionPort {bastion_port} -MsiPath $MsiCandidate -DstPath $DstCandidate
+    & $InitScript -Mtu {mtu} -AdapterName {ps_quote(adapter_name)} -BastionHost {ps_quote(bastion_host)} -BastionPort {bastion_port} -MsiPath $MsiCandidate -DstPath $DstCandidate
 }}
 
 Write-Output "ENCLAVE_PROVISION_COMPLETE"
@@ -301,7 +309,8 @@ class ApplianceProvisioner:
         """Generate Autounattend.xml, agent scripts, and optional qcow2/EFI storage."""
         options = opts or ProvisionOptions()
         out_path = output_dir.expanduser().resolve()
-        out_path.mkdir(parents=True, exist_ok=True)
+        out_path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        out_path.chmod(0o700)
 
         autounattend_path = out_path / "Autounattend.xml"
         autounattend_xml = generate_autounattend_xml(self.config, options)
@@ -331,11 +340,14 @@ class ApplianceProvisioner:
         efi_created = False
 
         if create_disk:
+            if self.config.appliance.pid_file.exists() or self.hypervisor.is_running()[0]:
+                raise RuntimeError("Stop the appliance before provisioning its disk")
             disk_created = self._ensure_qcow2_disk(
                 disk_path, options.disk_size_gb, force=force_disk
             )
-            if options.resolved_arch(self.config.appliance.arch) == "arm64":
-                efi_created = self._ensure_efi_vars(efi_vars_path, force=force_disk)
+            arch = options.resolved_arch(self.config.appliance.arch)
+            code = resolve_efi_code_path(arch, self.config.appliance.efi_code_path)
+            efi_created = self._ensure_efi_vars(efi_vars_path, template=resolve_efi_vars_template(arch, code), force=force_disk)
 
         qemu_cmd = self.build_install_qemu_command(out_path, options)
 
@@ -357,7 +369,8 @@ class ApplianceProvisioner:
         self, seed_dir: Path, opts: ProvisionOptions
     ) -> list[str]:
         """Construct the QEMU command line with Windows ISO, VirtIO ISO, and VVFAT Autounattend seed."""
-        cmd = list(self.hypervisor.build_qemu_command())
+        spec = replace(self.config.appliance, arch=opts.resolved_arch(self.config.appliance.arch))
+        cmd = list(ApplianceHypervisor(spec).build_qemu_command())
         # Remove -daemonize so interactive/automated installation can be monitored or awaited
         if "-daemonize" in cmd:
             cmd.remove("-daemonize")
@@ -367,7 +380,7 @@ class ApplianceProvisioner:
             cmd.extend(
                 [
                     "-drive",
-                    f"file={win_iso},media=cdrom,readonly=on,if=none,id=cdrom_win",
+                    f"file={qemu_value(win_iso)},media=cdrom,readonly=on,if=none,id=cdrom_win",
                     "-device",
                     "usb-storage,drive=cdrom_win,bootindex=0",
                 ]
@@ -377,7 +390,7 @@ class ApplianceProvisioner:
             cmd.extend(
                 [
                     "-drive",
-                    f"file={virtio_iso},media=cdrom,readonly=on,if=none,id=cdrom_virtio",
+                    f"file={qemu_value(virtio_iso)},media=cdrom,readonly=on,if=none,id=cdrom_virtio",
                     "-device",
                     "usb-storage,drive=cdrom_virtio",
                 ]
@@ -387,7 +400,7 @@ class ApplianceProvisioner:
         cmd.extend(
             [
                 "-drive",
-                f"file=fat:rw:{seed_dir.resolve()},format=raw,if=none,id=seed_vvfat",
+                f"file=fat:{qemu_value(seed_dir.resolve())},readonly=on,format=raw,if=none,id=seed_vvfat",
                 "-device",
                 "usb-storage,drive=seed_vvfat",
             ]
@@ -396,6 +409,8 @@ class ApplianceProvisioner:
 
     @staticmethod
     def _ensure_qcow2_disk(disk_path: Path, size_gb: int, *, force: bool = False) -> bool:
+        if size_gb < 1:
+            raise ValueError("Disk size must be positive")
         if disk_path.exists() and not force:
             return False
         disk_path.parent.mkdir(parents=True, exist_ok=True)
@@ -407,14 +422,11 @@ class ApplianceProvisioner:
         return True
 
     @staticmethod
-    def _ensure_efi_vars(efi_vars_path: Path, *, force: bool = False) -> bool:
+    def _ensure_efi_vars(efi_vars_path: Path, *, template: Path, force: bool = False) -> bool:
         if efi_vars_path.exists() and not force:
             return False
         efi_vars_path.parent.mkdir(parents=True, exist_ok=True)
-        # 64 MB pflash image required by QEMU edk2-aarch64
-        with efi_vars_path.open("wb") as fp:
-            fp.seek(64 * 1024 * 1024 - 1)
-            fp.write(b"\x00")
+        shutil.copyfile(template, efi_vars_path)
         return True
 
     def create_cow_profile(
@@ -426,6 +438,8 @@ class ApplianceProvisioner:
         create_disk: bool = False,
     ) -> dict[str, Any]:
         """Create a Copy-on-Write (CoW) qcow2 overlay profile and topology configuration."""
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", profile_name):
+            raise ValueError("Invalid profile name")
         base_path = (
             base_disk.expanduser().resolve()
             if base_disk is not None
@@ -454,40 +468,28 @@ class ApplianceProvisioner:
             str(overlay_disk),
         ]
 
+        if profile_yaml.exists():
+            raise FileExistsError("Profile configuration already exists")
         overlay_created = False
         if create_disk:
             self.hypervisor.create_profile_overlay(base_path, overlay_disk)
             overlay_created = True
 
-        yaml_text = f"""# Enclave Gateway Copy-on-Write Profile ({profile_name})
-profile: {profile_name}
-
-appliance:
-  name: enclave-{profile_name}
-  hypervisor: {self.config.appliance.hypervisor}
-  arch: {self.config.appliance.arch}
-  cpus: {self.config.appliance.cpus}
-  memory_mb: {self.config.appliance.memory_mb}
-  disk_path: {overlay_disk}
-  efi_code_path: {self.config.appliance.efi_code_path}
-  efi_vars_path: {self.config.appliance.efi_vars_path}
-  golden_snapshot: {self.config.appliance.golden_snapshot}
-  mtu: {self.config.appliance.mtu}
-  socks5_port: {self.config.appliance.socks5_port}
-
-provider:
-  type: {self.config.provider.type}
-  adapter_name: {self.config.provider.adapter_name}
-  probe_host: {self.config.provider.probe_host}
-  probe_port: {self.config.provider.probe_port}
-
-bastion:
-  enabled: {str(self.config.bastion.enabled).lower()}
-  host: {self.config.bastion.host}
-  port: {self.config.bastion.port}
-  transport: {self.config.bastion.transport}
-"""
-        profile_yaml.write_text(yaml_text, encoding="utf-8")
+        profile_data = asdict(self.config)
+        profile_data["profile"] = profile_name
+        profile_data["appliance"]["name"] = f"enclave-{profile_name}"
+        profile_data["appliance"]["disk_path"] = str(overlay_disk)
+        # Stable, distinct planned ports. Binding at VM start remains the final
+        # collision check; these ports are not reserved by profile generation.
+        port_base = 20000 + (int(hashlib.sha256(profile_name.encode()).hexdigest()[:8], 16) % 10000) * 3
+        for offset, key in enumerate(("rdp_forward_port", "vm_rdp_forward_port", "socks5_port")):
+            profile_data["appliance"][key] = port_base + offset
+        profile_data["appliance"]["vnc_display"] = 100 + port_base % 1000
+        profile_vars = prof_dir / "efi_vars.fd"
+        profile_data["appliance"]["efi_vars_path"] = str(profile_vars)
+        if self.config.appliance.resolved_efi_vars_path.is_file() and not profile_vars.exists():
+            shutil.copyfile(self.config.appliance.resolved_efi_vars_path, profile_vars)
+        profile_yaml.write_text(json.dumps(profile_data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
         return {
             "profile": profile_name,

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-import curses
+try:
+    import curses
+except ImportError:
+    curses = None
 import sys
 import time
 from datetime import datetime, timezone
@@ -150,7 +153,7 @@ def run_interactive_top(
     once: bool = False,
 ) -> int:
     """Run the TUI dashboard either once (snapshot mode) or interactively via curses."""
-    if once or not sys.stdout.isatty():
+    if once or curses is None or not sys.stdout.isatty():
         print(render_dashboard_text(engine))
         return 0
 

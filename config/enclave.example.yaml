@@ -18,8 +18,8 @@ appliance:
   vnc_display: 1                        # Local VNC display for Appliance console (127.0.0.1:5901)
 
 provider:
-  type: vipnet                          # vipnet | custom
-  binary_path: 'C:\Program Files\Mobile\bin\vipnetclient.exe'
+  type: vipnet                          # vipnet | wireguard | anyconnect | openvpn | kontinent | custom
+  binary_path: ''                       # Optional version-specific CLI; never infer Linux CLI commands on Windows
   installer_path: ./vendor/ViPNet_Client.msi
   dst_key_path: ./secrets/client.dst
   dst_password_env: ENCLAVE_VPN_KEY_PASSWORD

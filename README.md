@@ -4,6 +4,8 @@
 
 ---
 
+Local security audit and compatibility limits: [31 October 2026 audit](docs/SECURITY_AUDIT_2026-10-31.md).
+
 ## Overview
 
 Connecting modern developer workstations (**macOS on Apple Silicon `M1–M5`**, **modern Linux kernels `6.8+`**, or clean **Windows** hosts) to isolated corporate and government network enclaves protected by proprietary VPN clients (**InfoTeCS ViPNet Client 4/5**, etc.) and locked-down **RDP Jump Hosts (Bastions)** normally requires manual GUI workflows, dedicated laptops, or fragile nested quoting across multiple shells.
@@ -23,45 +25,45 @@ Connecting modern developer workstations (**macOS on Apple Silicon `M1–M5`**, 
 ## Key Engineering Capabilities
 
 1. **Hardware-Accelerated Cross-Platform Appliance (`HVF` / `KVM` / `WHPX`)**
-   * Runs `ViPNet Client 5` natively on **Apple Silicon (`ARM64`)** via `WINTUN-ARM64.SYS` inside an isolated QEMU appliance accelerated by Apple `Hypervisor.framework` (`-accel hvf -cpu host`).
+   * Builds ARM64 and x86_64 Windows appliance configurations. Native HVF/KVM/WHPX requires matching host and guest architectures; provider support must be qualified against the exact Windows installer and driver package. ViPNet Windows ARM64 compatibility is not established by this repository.
    * Keeps **Linux** (`6.8+` kernels where proprietary out-of-tree modules fail to build) and **Windows** host network stacks completely clean of third-party NDIS filter drivers.
-   * Supports instant **1-second rollback (`egw reset`)** via `qcow2` golden snapshots and lightweight **Copy-on-Write profile overlays** (~300 MB per customer enclave).
+   * Supports offline disk snapshots (`egw reset`) and Copy-on-Write profile overlays. Restore duration depends on storage and guest startup; disk snapshots do not include RAM or an independent NVRAM backup.
 
 2. **Transactional RDP Virtual File System IPC (`RdpVfsTransport` over `[MS-RDPEFS]`)**
    * When an enterprise firewall blocks `SSH (22)`, `SMB (445)`, and `WinRM (5985/5986)` on the Jump Host—leaving only `RDP (3389/TCP)` open—`egw` mounts a shared spool directory over the RDP File System Virtual Channel (`\\tsclient\C\EnclaveGateway\spool`).
-   * **In-Process `BastionWorker`**: executes payloads inside a warm PowerShell runspace (`& ([scriptblock]::Create(...))`) in `~200–350 ms` without spawning child `powershell.exe` processes (avoiding `AMSI` startup overhead and false-positive behavioral alerts from endpoint security suites).
+   * **In-Process `BastionWorker`**: dispatches payloads through PowerShell runspaces. The worker requires a policy-approved FullLanguage script; WDAC/AppLocker and endpoint controls remain applicable. Payloads may themselves launch native executables.
    * **Concurrency-Safe Envelopes**: pairs `req_<tx_id>.json` and `res_<tx_id>.json` with separated Base64-encoded `stdout` and `stderr` streams.
 
 3. **Accelerated File Delivery (`Block-Level Delta Sync` + `Parallel Striped I/O`)**
-   * Standard `[MS-RDPEFS]` single-stream file transfers are bottlenecked by RDP flow control (~140 KB/s).
-   * `egw cp` computes a **4 MB block-level `SHA-256` manifest** on both ends, compresses changed blocks with `zlib`, and reads/writes stripes in parallel via a warm PowerShell `RunspacePool` on `BastionWorker` (`Parallel Striped I/O`), verifying full-file `SHA-256` integrity before atomic rename.
+   * Transfer throughput depends on the RDP client, round-trip delay, channel flow control, storage, and QGA serialization; benchmark the intended deployment.
+   * `egw cp` computes a **4 MB block-level `SHA-256` manifest** on both ends, compresses changed blocks with `zlib`, and reads/writes stripes in parallel via a bounded PowerShell stripe `RunspacePool` (`Parallel Striped I/O`), verifying full-file `SHA-256` integrity before atomic rename.
 
 4. **Bidirectional `SOCKS5`, `OpenSSH ProxyCommand`, & Multi-Port Multiplexer (`egw socks5` / `egw forward` / `egw stdio-proxy`)**
-   * Exposes internal enclave web interfaces, APIs, and databases directly on the Host (`egw forward [--with-socks5]`, `egw tunnel`) or through a standards-compliant **RFC 1928 `SOCKS5` proxy** (`egw socks5`) with automatic `TargetNode` alias resolution even when only `TCP 3389` is reachable on the Bastion.
+   * Exposes internal enclave web interfaces, APIs, and databases directly on the Host (`egw forward [--with-socks5]`, `egw tunnel`) or through an **RFC 1928 `SOCKS5` CONNECT proxy** (`egw socks5`) with automatic `TargetNode` alias resolution even when only `TCP 3389` is reachable on the Bastion.
    * Native **`OpenSSH ProxyCommand`** bridge (`egw stdio-proxy <host> <port>` + `egw ssh-config`) lets `ssh`, `scp`, `sftp`, `rsync`, `ansible`, and VS Code / Cursor Remote-SSH connect directly to `TargetNodes` over the RDP VFS channel.
 
 5. **Automated Unattended Provisioning (`egw init`), CoW Profiles (`egw profile`), Watchdog (`egw watch`), & Interactive TUI (`egw top`)**
-   * `egw init` generates architecture-aware (`arm64` / `x86_64`) `Autounattend.xml` and post-install provisioning media with `VirtIO` drivers, `QEMU Guest Agent`, `MTU=1350`, and silent `ViPNet Client` installation; `egw profile create <name>` provisions lightweight Copy-on-Write (`qcow2 -b`) overlays.
+   * `egw init` generates architecture-aware (`arm64` / `x86_64`) `Autounattend.xml` and post-install provisioning media with `VirtIO` drivers, `QEMU Guest Agent`, `MTU=1350`, and optional MSI installation; key import requires a validated provider-specific procedure; `egw profile create <name>` provisions lightweight Copy-on-Write (`qcow2 -b`) overlays.
    * `egw top` renders a live terminal dashboard tracking `Host -> Appliance -> VPN -> Bastion -> TargetNodes`, while `egw watch` runs an autonomous self-healing loop (`doctor --fix`).
 
-6. **Zero-Disk VFS Transit, Pure-SSH Stream Fallback, & Ephemeral `sudo` Injection**
-   * Payloads destined for upstream Linux `TargetNodes` are Base64-encoded end-to-end and stripped of `CR` (`\r`) characters (`tr -d '\r'`), eliminating multi-shell quote escaping bugs and Windows PowerShell `CRLF` pipeline corruption.
+6. **VFS Transit, Binary SSH Streams, & `sudo` Injection**
+   * Payloads destined for upstream Linux `TargetNodes` are Base64-encoded end-to-end and stripped of `CR` (`\r`) characters (`tr -d '\r'`), reducing newline and quoting ambiguities; command arguments and file paths are escaped separately.
    * File transfers to `TargetNodes` (`via: bastion`) transit directly through `\\tsclient\C\EnclaveGateway\spool` without writing temporary staging copies onto the Bastion's local `C:` disk, and automatically fall back to pure `ssh.exe` streaming (`cat > ...`) if `scp` / `sftp-server` is disabled on a hardened target.
-   * Elevated `--sudo` operations inject credentials from the OS Keychain via zero-filled ephemeral files deleted in a `finally` block—passwords never appear in command-line arguments or process tables.
+   * Elevated `--sudo` operations use `sudo -S -p ''` without temporary password files. SSH askpass uses a static helper and a serialized process environment. Base64 is transport encoding, not protection from privileged process inspection. Host keys must be provisioned before SSH connections.
 
 7. **Built-In Model Context Protocol (MCP) Server (`egw mcp`)**
-   * Standards-compliant JSON-RPC 2.0 MCP server over `stdio` with zero external runtime dependencies.
+   * JSON-RPC 2.0 MCP server with newline stdio, optional Content-Length framing and stateless HTTP. Protocol versions 2024-11-05 and 2025-03-26 are negotiated; SSE/session resumption is not implemented. See the audit for validation boundaries.
    * Includes **Output Secret Scrubbing** (`[REDACTED]`) and **Destructive Command Guardrails** (`DROP`, `TRUNCATE`, `rm -rf /`, `shutdown` require explicit `confirm_destructive=True`).
 
 ---
 
-## Real-World Pitfalls Solved Out of the Box
+## Operational Considerations
 
 | Problem | Root Cause | How `enclave-gateway` Solves It |
 |---|---|---|
 | **RDP drops every ~60 seconds over ViPNet** (`Event 1026, Reason=267`) | Virtual `Infotecs` (`WinTun`) adapter defaults to `NlMtu = 65535`, while the tunnel silently drops `DF=1` packets >1420 bytes without ICMP fragmentation notices (PMTUD blackhole), and RDP-over-UDP sends unnegotiated 1500-byte datagrams. | `appliance_init.ps1` sets persistent `mtu=1350` on `Infotecs` and `Ethernet` interfaces and sets `fClientDisableUDP = 1` in registry policy. |
 | **Post-snapshot clock drift (>5 min) breaks Kerberos / NLA (`CredSSP`) & TLS** | Restoring a `qcow2` snapshot (`egw reset`) or resuming after host sleep leaves the guest Windows clock hours or days behind; `w32tm` refuses large phase jumps and NTP (`UDP 123`) is blocked inside the enclave. | `QgaClient.sync_guest_clock()` (`guest-set-time`) and `appliance_init.ps1` (`-HostEpochUtc` + `MaxPosPhaseCorrection=0xFFFFFFFF`) deterministically align guest UTC time to the Host before RDP login. |
-| **Corporate GPO idle timeout locks RDP session & unmounts `\\tsclient\C`** | Terminal Services idle lock or screensaver activation disconnects the `rdpdr` virtual channel, and corrupted `mstsc` persistent bitmap cache freezes sessions. | `bastion_worker.ps1` calls `kernel32.dll::SetThreadExecutionState(0x80000003)` on every heartbeat, disables `MaxIdleTime`, and sets `bitmapcachepersistenable:i:0`. |
+| **RDP idle timeout unmounts redirected drives** | Domain policy or session disconnection can remove the VFS channel. | Configure an approved RDP session policy and monitor reconnects. The worker does not call SetThreadExecutionState; that API does not override domain RDP idle policy. |
 | **`cmdkey` updates via QGA fail NLA login (`LogonUI.exe`)** | QEMU Guest Agent runs as `NT AUTHORITY\SYSTEM` (Session 0), whereas `mstsc.exe` runs in the interactive desktop user session. Windows Credential Manager vaults are strictly isolated per session. | `session_supervisor.ps1` injects `cmdkey` credentials directly into the interactive user session via an ephemeral `/it` scheduled task (`UpdateEnclaveRDPCred`). |
 | **Windows OpenSSH fails non-interactive password auth or root `scp` (`Permission denied`)** | Built-in Windows OpenSSH 7.7/8.1 rejects stdin passwords, and direct `scp` cannot write to root-owned `/etc` or `/opt` paths on Linux `TargetNodes`. | `SshHopExecutor` provides an ephemeral `SSH_ASKPASS` wrapper, `egw ssh-copy-id <node>` key bootstrapping, and `egw cp --sudo` staging via `/tmp` + `sudo mv`. |
 | **Spurious `invalid_grant` / auth failures in bash scripts called from PowerShell** | Windows PowerShell 5.1 pipelines append `\r\n` to every piped line; Linux `read -r` retains the trailing `\r` as part of the password string. | `SecretVault` and `SshHopExecutor` strip `\r` on both ingress and egress (`tr -d '\r'`). |
@@ -231,7 +233,7 @@ For browser-based local LLM frontends (**Open WebUI**, **AnythingLLM**, **LibreC
 egw -c /path/to/enclave.yaml mcp --listen 127.0.0.1:8765
 ```
 
-It simultaneously exposes three standards on the same port:
+It exposes the following interfaces on the same port:
 1. **OpenAPI 3.1 Tool Server for Open WebUI**: add `http://127.0.0.1:8765/openapi.json` under *Settings -> Tools -> Add Tool Server* in Open WebUI.
 2. **Streamable HTTP MCP (`POST /mcp`)**: connect any HTTP-capable MCP client to `http://127.0.0.1:8765/mcp`.
 3. **OpenAI / Ollama Function-Calling Schema (`GET /v1/tools` & `POST /v1/tools/call`)**:
@@ -245,3 +247,11 @@ It simultaneously exposes three standards on the same port:
 ## License
 
 MIT License. See [LICENSE](LICENSE) for details.
+
+## Security and compatibility defaults
+
+- `egw mcp --read-only` permits structured reads and diagnosis without repair. It blocks arbitrary shell, SQL/HTTP calls, transfers, directory sync, tunnel changes and elevation. Regex command checks are guardrails rather than a sandbox.
+- HTTP validates Origin and Host, limits connections and body size, and does not grant wildcard CORS. Use `ENCLAVE_MCP_TOKEN` or `--token-env` to avoid putting a bearer token in argv; `--allowed-origin` grants explicit browser access. Non-loopback binding requires a token; remote deployments also need TLS and an explicit origin policy.
+- QGA IPC publishes requests through temp plus rename. QGA has no native file-rename command, so publication requires a guest command; polling uses direct file reads.
+- Directory sync excludes `.env*`, `.ssh` and `.aws` by default and refuses unsafe tar members. Transfer an explicitly selected file separately when needed.
+- Generated unattended media contains credentials and must remain private. CoW profiles copy topology and use separate NVRAM and planned ports; ports are not reserved until VM start.

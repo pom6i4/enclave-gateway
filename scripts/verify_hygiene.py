@@ -43,10 +43,6 @@ IPV4_PATTERN = re.compile(r"\b(?:10|172|192)\.\d{1,3}\.\d{1,3}\.\d{1,3}\b")
 ALLOWED_IPV4_PREFIXES = (
     "10.0.",
     "192.0.2.",
-    "192.168.0.",
-    "192.168.1.",
-    "192.168.100.",
-    "172.16.0.",
 )
 
 
@@ -75,7 +71,7 @@ def check_text_content(path_label: str, content: str) -> list[str]:
 
 def get_tracked_files(repo_root: Path) -> list[Path]:
     res = subprocess.run(
-        ["git", "ls-files"],
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
         cwd=repo_root,
         capture_output=True,
         text=True,
@@ -84,8 +80,7 @@ def get_tracked_files(repo_root: Path) -> list[Path]:
     if res.returncode != 0:
         return [p for p in repo_root.rglob("*") if p.is_file() and ".git" not in p.parts]
     paths: list[Path] = []
-    for line in res.stdout.splitlines():
-        line = line.strip()
+    for line in res.stdout.split("\0"):
         if line:
             p = repo_root / line
             if p.is_file():
@@ -104,6 +99,9 @@ def main() -> int:
             continue
         if file_path.suffix.lower() in FORBIDDEN_EXTENSION_SUFFIXES:
             errors.append(f"{rel}: forbidden binary/key file extension '{file_path.suffix}'")
+            continue
+        if file_path.name == ".env" or (file_path.name.startswith(".env.") and file_path.name != ".env.example"):
+            errors.append(f"{rel}: environment secrets must never be tracked")
             continue
         try:
             text = file_path.read_text(encoding="utf-8")

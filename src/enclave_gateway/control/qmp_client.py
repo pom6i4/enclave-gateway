@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import socket
+import time
 from pathlib import Path
 from typing import Any
+
+from enclave_gateway.control.wire import SocketLineReader
 
 
 class QmpClient:
@@ -15,41 +18,37 @@ class QmpClient:
         self.socket_path = Path(socket_path)
 
     def execute(self, command: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(5.0)
-        try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(5.0)
             sock.connect(str(self.socket_path))
-            reader = sock.makefile("r", encoding="utf-8", errors="replace")
-            reader.readline()  # QMP greeting banner
-            sock.sendall(b'{"execute":"qmp_capabilities"}\n')
-            reader.readline()  # capabilities ack
+            reader = SocketLineReader(sock, time.monotonic() + 5.0)
+            greeting = json.loads(reader.readline())
+            if not isinstance(greeting, dict) or "QMP" not in greeting:
+                raise ConnectionError("Invalid QMP greeting")
 
-            payload: dict[str, Any] = {"execute": command}
-            if arguments:
-                payload["arguments"] = arguments
-            sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
-            while True:
-                line = reader.readline()
-                if not line:
-                    return {}
-                parsed = json.loads(line)
-                if "return" in parsed or "error" in parsed:
-                    return dict(parsed)
-        finally:
-            try:
-                sock.close()
-            except OSError:
-                pass
+            def exchange(name, args, req_id):
+                payload = {"execute": name, "id": req_id}
+                if args is not None:
+                    payload["arguments"] = args
+                sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
+                while True:
+                    response = json.loads(reader.readline())
+                    if response.get("id") == req_id and ("return" in response or "error" in response):
+                        return response
+
+            capabilities = exchange("qmp_capabilities", None, "capabilities")
+            if "error" in capabilities:
+                raise RuntimeError(f"QMP capability negotiation failed: {capabilities['error']}")
+            return exchange(command, arguments, "command")
 
     def system_powerdown(self) -> bool:
         try:
-            self.execute("system_powerdown")
-            return True
-        except OSError:
+            return "return" in self.execute("system_powerdown")
+        except (OSError, ValueError, RuntimeError):
             return False
 
     def query_status(self) -> dict[str, Any]:
         try:
             return self.execute("query-status")
-        except OSError as exc:
+        except (OSError, ValueError, RuntimeError) as exc:
             return {"error": str(exc)}

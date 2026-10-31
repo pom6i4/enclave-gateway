@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import base64
+import os
+import collections
+import urllib.parse
 import fnmatch
 import json
 import re
@@ -10,7 +13,7 @@ import secrets
 import shlex
 import tarfile
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from tempfile import TemporaryDirectory
 from typing import Any
 
@@ -21,6 +24,10 @@ DEFAULT_SYNC_EXCLUDES = (
     ".venv",
     "node_modules",
     "*.pyc",
+    ".env",
+    ".env.*",
+    ".ssh",
+    ".aws",
 )
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -34,8 +41,40 @@ from enclave_gateway.control.qga_client import (
 )
 from enclave_gateway.hypervisor.driver import ApplianceHypervisor
 from enclave_gateway.security.secrets import SecretVault, verify_command_safety
+from enclave_gateway.security.quoting import ps_quote, ssh_config_quote
+from enclave_gateway.transports.ssh_hop import _node_uri, _build_b64_decode_expr
 from enclave_gateway.transports.rdp_vfs import RdpVfsTransport, generate_tx_id
 from enclave_gateway.transports.ssh_hop import SshHopExecutor
+
+
+def safe_extract_tar(archive: tarfile.TarFile, destination: Path, excluded=None) -> int:
+    root = destination.resolve()
+    members = archive.getmembers()
+    if len(members) > 100000 or sum(item.size for item in members) > 16 * 1024**3:
+        raise ValueError("Archive exceeds extraction limits")
+    for item in members:
+        path = PurePosixPath(item.name)
+        target = (root / item.name).resolve()
+        if (path.is_absolute() or PureWindowsPath(item.name).drive or "\\" in item.name
+                or ".." in path.parts or not target.is_relative_to(root)
+                or not (item.isfile() or item.isdir())):
+            raise ValueError(f"Refusing unsafe tar member: {item.name}")
+    root.mkdir(parents=True, exist_ok=True)
+    count = 0
+    for item in members:
+        if excluded is not None and excluded(item.name, PurePosixPath(item.name).name):
+            continue
+        target = root / item.name
+        if item.isdir():
+            target.mkdir(parents=True, exist_ok=True)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with archive.extractfile(item) as source, target.open("wb") as output:
+                import shutil
+                shutil.copyfileobj(source, output, 1024 * 1024)
+            target.chmod(item.mode & 0o777)
+            count += 1
+    return count
 
 
 class EnclaveEngine:
@@ -51,6 +90,7 @@ class EnclaveEngine:
         self.config = config or EnclaveConfig.load()
         self.vault = vault or SecretVault()
         self.recorder = recorder or FlightRecorder()
+        self.recorder.scrubber = self.vault.scrubber
         self.hypervisor = ApplianceHypervisor(self.config.appliance)
 
         if control_override is not None:
@@ -83,7 +123,7 @@ class EnclaveEngine:
         if hop_stage.startswith(vfs_root):
             filename = hop_stage.replace("/", "\\").rsplit("\\", 1)[-1]
             app_spool_file = (
-                f"{self.config.bastion.appliance_spool_dir.rstrip('\\/')}\\{filename}"
+                f"{self.config.bastion.appliance_spool_dir.rstrip(chr(92) + '/')}\\{filename}"
             )
             return self._push_to_appliance_with_sha(local_path, app_spool_file, timeout)
         return self.rdp_vfs.push_file(
@@ -97,7 +137,7 @@ class EnclaveEngine:
         if hop_stage.startswith(vfs_root):
             filename = hop_stage.replace("/", "\\").rsplit("\\", 1)[-1]
             app_spool_file = (
-                f"{self.config.bastion.appliance_spool_dir.rstrip('\\/')}\\{filename}"
+                f"{self.config.bastion.appliance_spool_dir.rstrip(chr(92) + '/')}\\{filename}"
             )
             return self._pull_from_appliance_with_sha(
                 app_spool_file, local_path, timeout
@@ -159,40 +199,43 @@ class EnclaveEngine:
         if not vm_running and self.config.appliance.hypervisor != "direct":
             return report
 
+        provider = self.config.provider
+        service = provider.service_name or {"wireguard": "WireGuardTunnel$*", "anyconnect": "vpnagent", "openvpn": "OpenVPNService*"}.get(provider.type, "")
         probe_ps = f"""
 $info = ""
-$ptype = '{self.config.provider.type}'.ToLower()
-if ($ptype -eq 'vipnet' -and (Test-Path '{self.config.provider.binary_path}')) {{
-    $info = (& '{self.config.provider.binary_path}' info | Out-String).Trim()
-}} elseif ($ptype -eq 'wireguard') {{
-    if (Get-Command wg.exe -ErrorAction SilentlyContinue) {{
-        $info = (& wg.exe show | Out-String).Trim()
-    }} else {{
-        $info = (Get-Service 'WireGuardTunnel*' -ErrorAction SilentlyContinue | Select-Object Name, Status | Out-String).Trim()
+$ptype = {ps_quote(provider.type)}
+$binary = {ps_quote(provider.binary_path)}
+$adapterName = {ps_quote(provider.adapter_name)}
+$adapter = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {{ $_.Name -eq $adapterName -or $_.InterfaceDescription -like "*$adapterName*" }})
+$serviceName = {ps_quote(service)}
+if ($serviceName) {{ $info = (Get-Service -Name $serviceName -ErrorAction SilentlyContinue | Select-Object Name, Status | Out-String).Trim() }}
+if ($ptype -eq 'wireguard') {{
+    if (-not $binary) {{ $binary = Join-Path $env:ProgramFiles 'WireGuard\\wg.exe' }}
+    if (Test-Path -LiteralPath $binary) {{ $info = (& $binary show | Out-String).Trim() }}
+}} elseif ($ptype -eq 'anyconnect') {{
+    if (-not $binary) {{
+        foreach ($candidate in @("${{env:ProgramFiles(x86)}}\\Cisco\\Cisco Secure Client\\vpncli.exe", "${{env:ProgramFiles(x86)}}\\Cisco\\Cisco AnyConnect Secure Mobility Client\\vpncli.exe")) {{
+            if (Test-Path -LiteralPath $candidate) {{ $binary = $candidate; break }}
+        }}
     }}
-}} elseif ($ptype -eq 'anyconnect' -and (Test-Path '{self.config.provider.binary_path}')) {{
-    $info = (& '{self.config.provider.binary_path}' state | Out-String).Trim()
-}} elseif ($ptype -in @('openvpn', 'kontinent', 'custom')) {{
-    $adapter = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {{ $_.InterfaceDescription -like '*{self.config.provider.adapter_name}*' -or $_.Name -like '*{self.config.provider.adapter_name}*' }}
-    if ($adapter) {{
-        $info = ($adapter | Select-Object Name, InterfaceDescription, Status, LinkSpeed | Out-String).Trim()
-    }}
+    if ($binary -and (Test-Path -LiteralPath $binary)) {{ $info = (& $binary state | Out-String).Trim() }}
 }}
-$tcp = Test-NetConnection -ComputerName '{self.config.provider.probe_host}' -Port {self.config.provider.probe_port} -WarningAction SilentlyContinue
-$spool = '{self.config.bastion.appliance_spool_dir}'
+$tcp = Test-NetConnection -ComputerName {ps_quote(provider.probe_host)} -Port {provider.probe_port} -WarningAction SilentlyContinue
+$spool = {ps_quote(self.config.bastion.appliance_spool_dir)}
 $stateJson = ""
 $statePath = Join-Path $spool 'worker_state.json'
-if (Test-Path $statePath) {{
-    $age = ((Get-Date) - (Get-Item $statePath).LastWriteTime).TotalSeconds
-    if ($age -lt 10) {{
-        $stateJson = (Get-Content $statePath -Raw -Encoding UTF8).Trim()
-    }}
+if (Test-Path -LiteralPath $statePath) {{
+    $age = ((Get-Date) - (Get-Item -LiteralPath $statePath).LastWriteTime).TotalSeconds
+    if ($age -ge 0 -and $age -lt 10) {{ $stateJson = (Get-Content -LiteralPath $statePath -Raw -Encoding UTF8).Trim() }}
 }}
+$vpnRoute = @($adapter | Where-Object {{ $_.Status -eq 'Up' -and $_.Name -eq $tcp.InterfaceAlias }}).Count -gt 0
 $out = @{{
-    tunnel_up = [bool]$tcp.TcpTestSucceeded
+    tunnel_up = [bool]($tcp.TcpTestSucceeded -and $vpnRoute)
+    probe_reachable = [bool]$tcp.TcpTestSucceeded
     source_ip = [string]$tcp.SourceAddress
-    vpn_info  = $info
-    worker    = $stateJson
+    source_interface = [string]$tcp.InterfaceAlias
+    vpn_info = $info
+    worker = $stateJson
 }}
 ConvertTo-Json $out -Compress
 """
@@ -202,6 +245,8 @@ ConvertTo-Json $out -Compress
                 data = json.loads(res.stdout.splitlines()[-1])
                 report["provider"]["tunnel_up"] = bool(data.get("tunnel_up"))
                 report["provider"]["source_ip"] = data.get("source_ip", "")
+                report["provider"]["probe_reachable"] = data.get("probe_reachable", False)
+                report["provider"]["source_interface"] = data.get("source_interface", "")
                 report["provider"]["details"] = self.vault.scrubber.scrub(
                     str(data.get("vpn_info", ""))
                 )
@@ -236,7 +281,7 @@ ConvertTo-Json $out -Compress
         cred_args = ""
         if update_credentials and domain_user and password:
             pw_b64 = base64.b64encode(password.encode("utf-8")).decode("ascii")
-            cred_args = f"-RdpDomainUser '{domain_user}' -RdpPasswordB64 '{pw_b64}'"
+            cred_args = f"-RdpDomainUser {ps_quote(domain_user)} -RdpPasswordB64 '{pw_b64}'"
 
         host_epoch = int(time.time())
         routes_csv = ",".join(self.config.provider.routes)
@@ -245,11 +290,11 @@ ConvertTo-Json $out -Compress
         combined_ps = f"""
 & {{
 {init_script}
-}} -Mtu {self.config.appliance.mtu} -AdapterName '{self.config.provider.adapter_name}' -BastionHost '{self.config.bastion.host}' -BastionPort {self.config.bastion.port} -HostEpochUtc {host_epoch} -RoutesCsv '{routes_csv}' -DnsServersCsv '{dns_csv}'
+}} -Mtu {self.config.appliance.mtu} -AdapterName {ps_quote(self.config.provider.adapter_name)} -BastionHost {ps_quote(self.config.bastion.host)} -BastionPort {self.config.bastion.port} -HostEpochUtc {host_epoch} -RoutesCsv {ps_quote(routes_csv)} -DnsServersCsv {ps_quote(dns_csv)}
 
 & {{
 {sup_script}
-}} -BastionHost '{self.config.bastion.host}' -BastionPort {self.config.bastion.port} -SpoolDir '{self.config.bastion.appliance_spool_dir}' -ScheduledTaskName '{self.config.bastion.scheduled_task_name}' {cred_args} -ForceReconnect
+}} -BastionHost {ps_quote(self.config.bastion.host)} -BastionPort {self.config.bastion.port} -SpoolDir {ps_quote(self.config.bastion.appliance_spool_dir)} -ScheduledTaskName {ps_quote(self.config.bastion.scheduled_task_name)} {cred_args} -ForceReconnect
 """
         res = self._scrub_result(self.control.exec_powershell(combined_ps, timeout_sec=60.0))
         self.recorder.record(
@@ -299,7 +344,7 @@ ConvertTo-Json $out -Compress
                     f"$env:{k} = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{val_b64}'))"
                 )
             else:
-                prefix_lines.append(f"export {k}=\"$(echo '{val_b64}' | base64 -d)\"")
+                prefix_lines.append(f"export {k}=\"$( {_build_b64_decode_expr(val_b64)} )\"")
         return "\n".join(prefix_lines) + "\n" + script
 
     def _is_powershell_node(self, node: str) -> bool:
@@ -497,8 +542,10 @@ ConvertTo-Json $out -Compress
             s_idx = max(1, int(start_line))
             e_idx = int(end_line) if int(end_line) > 0 else total_lines
             e_idx = min(max(s_idx, e_idx), max(1, total_lines))
-            sliced = "".join(lines[s_idx - 1 : e_idx]) if lines else ""
-            scrubbed = self.vault.scrubber.scrub(sliced)
+            # Redact before slicing, otherwise a line range can reveal the body
+            # of a private key whose delimiters fall outside the selected lines.
+            scrubbed_lines = self.vault.scrubber.scrub(raw_text).splitlines(keepends=True)
+            scrubbed = "".join(scrubbed_lines[s_idx - 1:e_idx])
             return {
                 "node": node,
                 "remote_path": remote_path,
@@ -560,16 +607,51 @@ ConvertTo-Json $out -Compress
                 updated_text = updated_text.replace("\n", "\r\n")
             tmp_file.write_bytes(updated_text.encode("utf-8"))
 
-            push_meta = self.transfer_file(
-                "push",
-                tmp_file,
-                node,
-                remote_path,
-                as_root=as_root,
-                use_delta=True,
-                timeout_sec=timeout_sec,
-                actor=actor,
-            )
+            stage = remote_path + ".egw_patch_" + secrets.token_hex(12)
+            try:
+                push_meta = self.transfer_file(
+                    "push", tmp_file, node, stage, as_root=as_root,
+                    use_delta=False, timeout_sec=timeout_sec, actor=actor,
+                )
+                direct_commit = getattr(self.control, "compare_replace_file", None)
+                if node in ("@appliance", "appliance") and callable(direct_commit):
+                    direct_commit(stage, remote_path, old_sha)
+                else:
+                    if self._is_powershell_node(node):
+                        commit = f"""
+$ErrorActionPreference='Stop'
+$dst={ps_quote(remote_path)}
+$stage={ps_quote(stage)}
+$mutexName='Local\\EnclavePatch_' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($dst)).Replace('/','_')
+$mutex = New-Object Threading.Mutex($false, $mutexName)
+$locked = $false
+try {{
+    $locked=$mutex.WaitOne(30000)
+    if (-not $locked) {{ throw 'Patch lock timeout' }}
+    $actual=(Get-FileHash -LiteralPath $dst -Algorithm SHA256).Hash.ToLower()
+    if ($actual -ne '{old_sha}') {{ throw 'Patch conflict: destination changed' }}
+    [IO.File]::Replace($stage, $dst, $null)
+    Write-Output 'EGW_PATCH_COMMIT_OK'
+}} finally {{ if ($locked) {{ $mutex.ReleaseMutex() }}; $mutex.Dispose() }}
+"""
+                    else:
+                        from enclave_gateway.transports.ssh_hop import _hash_sh
+                        lock = remote_path + ".egw-lock"
+                        commit = f"""set -e
+mkdir -- {shlex.quote(lock)} || exit 1
+trap {shlex.quote('rmdir -- ' + shlex.quote(lock))} EXIT
+{_hash_sh(remote_path)}
+if [ "$sha" != '{old_sha}' ]; then echo 'Patch conflict: destination changed' >&2; exit 1; fi
+mv -f -- {shlex.quote(stage)} {shlex.quote(remote_path)}
+echo EGW_PATCH_COMMIT_OK
+"""
+                    committed = self.exec_node(node, commit, as_root=as_root, timeout_sec=timeout_sec, actor=actor)
+                    if committed.exit_code or "EGW_PATCH_COMMIT_OK" not in committed.stdout:
+                        raise RuntimeError("Patch conflict or commit failure: " + (committed.stderr or committed.stdout))
+            finally:
+                cleanup = (f"Remove-Item -LiteralPath {ps_quote(stage)} -Force -ErrorAction SilentlyContinue" if self._is_powershell_node(node)
+                           else f"rm -f -- {shlex.quote(stage)}")
+                self.exec_node(node, cleanup, as_root=as_root, confirm_destructive=True, timeout_sec=30.0, actor=actor)
             return {
                 "node": node,
                 "remote_path": remote_path,
@@ -597,7 +679,7 @@ ConvertTo-Json $out -Compress
         ldir = Path(local_dir).expanduser().resolve()
         patterns = list(DEFAULT_SYNC_EXCLUDES) + list(exclude or [])
         sync_id = secrets.token_hex(6)
-        is_windows_node = node in ("@appliance", "appliance", "@bastion", "bastion")
+        is_windows_node = self._is_powershell_node(node)
 
         def _is_excluded(rel_posix: str, name: str) -> bool:
             for pat in patterns:
@@ -621,6 +703,8 @@ ConvertTo-Json $out -Compress
                         rel = item.relative_to(ldir).as_posix()
                         if _is_excluded(rel, item.name):
                             continue
+                        if item.is_symlink():
+                            raise ValueError(f"Directory sync does not accept symbolic links: {rel}")
                         tf.add(item, arcname=rel, recursive=False)
                         if item.is_file():
                             files_synced += 1
@@ -647,7 +731,7 @@ ConvertTo-Json $out -Compress
                 if is_windows_node:
                     extract_ps = f"""
 $stage = [Environment]::ExpandEnvironmentVariables('{remote_stage}')
-$dst = [Environment]::ExpandEnvironmentVariables('{remote_dir}')
+$dst = [Environment]::ExpandEnvironmentVariables({ps_quote(remote_dir)})
 try {{
     if (-not (Test-Path $dst)) {{ New-Item -ItemType Directory -Force -Path $dst | Out-Null }}
     tar.exe -xzf $stage -C $dst
@@ -663,9 +747,9 @@ try {{
                 else:
                     extract_sh = f"""
 set -e
-trap "rm -f '{remote_stage}'" EXIT
-mkdir -p '{remote_dir}'
-tar -xzf '{remote_stage}' -C '{remote_dir}'
+trap {shlex.quote("rm -f -- " + shlex.quote(remote_stage))} EXIT
+mkdir -p {shlex.quote(remote_dir)}
+tar -xzf '{remote_stage}' -C {shlex.quote(remote_dir)}
 echo "SYNC_EXTRACT_OK"
 """.strip()
                     ext_res = self.exec_node(
@@ -689,12 +773,13 @@ echo "SYNC_EXTRACT_OK"
                 else:
                     remote_stage = f"/tmp/.egw_sync_pull_{sync_id}.tar.gz"
                 if is_windows_node:
+                    windows_excludes = " ".join(ps_quote("--exclude=" + pattern) for pattern in patterns)
                     pack_ps = f"""
-$src = [Environment]::ExpandEnvironmentVariables('{remote_dir}')
+$src = [Environment]::ExpandEnvironmentVariables({ps_quote(remote_dir)})
 $stage = [Environment]::ExpandEnvironmentVariables('{remote_stage}')
 $parent = Split-Path -Parent $stage
 if ($parent -and -not (Test-Path $parent)) {{ New-Item -ItemType Directory -Force -Path $parent | Out-Null }}
-tar.exe -czf $stage -C $src .
+tar.exe -czf $stage {windows_excludes} -C $src .
 if ($LASTEXITCODE -ne 0) {{ Write-Error 'tar.exe archive creation failed'; exit 1 }}
 Write-Output 'SYNC_PACK_OK'
 """
@@ -707,13 +792,13 @@ Write-Output 'SYNC_PACK_OK'
                     )
                     target_user = self._resolve_target(node).user
                     chown_line = (
-                        f"chown '{target_user}' '{remote_stage}' && chmod 600 '{remote_stage}'"
+                        f"chown -- {shlex.quote(target_user)} '{remote_stage}' && chmod 600 '{remote_stage}'"
                         if as_root
                         else f"chmod 600 '{remote_stage}'"
                     )
                     pack_sh = f"""
 set -e
-tar -czf '{remote_stage}' {excl_flags} -C '{remote_dir}' .
+tar -czf '{remote_stage}' {excl_flags} -C {shlex.quote(remote_dir)} .
 {chown_line}
 echo "SYNC_PACK_OK"
 """.strip()
@@ -758,15 +843,7 @@ echo "SYNC_PACK_OK"
 
                 ldir.mkdir(parents=True, exist_ok=True)
                 with tarfile.open(archive_path, "r:gz") as tf:
-                    for member in tf.getmembers():
-                        member_dest = (ldir / member.name).resolve()
-                        if not str(member_dest).startswith(str(ldir)):
-                            raise ValueError(
-                                f"Refusing to extract unsafe tar member path: {member.name}"
-                            )
-                        tf.extract(member, path=ldir)
-                        if member.isfile():
-                            files_synced += 1
+                    files_synced = safe_extract_tar(tf, ldir, _is_excluded)
             else:
                 raise ValueError(
                     f"Unsupported sync direction '{direction}' (use 'push' or 'pull')"
@@ -839,8 +916,8 @@ echo "SYNC_PACK_OK"
         )
 
         # Check clock skew and UDP policy on Appliance if reachable
-        clock_skew_sec = 0
-        udp_disabled = True
+        clock_skew_sec = None
+        udp_disabled = False
         if vm_ok:
             diag_ps = """
 $epoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
@@ -859,7 +936,7 @@ Write-Output ("DIAG_CLOCK:" + $epoch + ":UDP:" + [int]$udpPol)
                 clock_skew_sec = abs(int(time.time()) - guest_epoch)
                 udp_disabled = int(parts[3]) == 1
 
-        clock_ok = clock_skew_sec < 120
+        clock_ok = clock_skew_sec is not None and clock_skew_sec < 120
         if not clock_ok:
             needs_heal = True
         checks.append(
@@ -923,8 +1000,12 @@ Write-Output ("DIAG_CLOCK:" + $epoch + ":UDP:" + [int]$udpPol)
 
         healed = False
         if fix and needs_heal and vm_ok:
-            self.heal(actor=actor)
-            healed = True
+            heal_result = self.heal(actor=actor)
+            healed = heal_result.exit_code == 0
+            if healed:
+                refreshed = self.doctor(fix=False, probe_targets=probe_targets, actor=actor)
+                refreshed["auto_healed"] = True
+                return refreshed
 
         all_ok = all(bool(c["ok"]) for c in checks)
         return {
@@ -992,14 +1073,16 @@ Write-Output 'APPLIANCE_CLEAN_OK'
         lines = [
             f"# Enclave Gateway OpenSSH ProxyCommand Configuration (profile: {self.config.profile})"
         ]
+        if not re.fullmatch(r"[A-Za-z0-9_-]*", prefix):
+            raise ValueError("Invalid SSH alias prefix")
         for name, spec in sorted(self.config.targets.items()):
             host_alias = f"{prefix}{name}" if prefix else name
             lines.extend(
                 [
                     f"Host {host_alias}",
-                    f"    HostName {spec.host}",
+                    f"    HostName {ssh_config_quote(spec.host)}",
                     f"    Port {spec.port}",
-                    f"    User {spec.user}",
+                    f"    User {ssh_config_quote(spec.user)}",
                 ]
             )
             if spec.via in self.config.targets and spec.via != name:
@@ -1009,12 +1092,11 @@ Write-Output 'APPLIANCE_CLEAN_OK'
                 lines.append(f"    ProxyCommand egw{cfg_flag} stdio-proxy %h %p")
             lines.extend(
                 [
-                    "    StrictHostKeyChecking no",
-                    "    UserKnownHostsFile /dev/null",
+                    "    StrictHostKeyChecking yes",
                 ]
             )
             if spec.ssh_key_path:
-                lines.append(f"    IdentityFile {spec.ssh_key_path}")
+                lines.append(f"    IdentityFile {ssh_config_quote(spec.ssh_key_path)}")
             lines.append("")
         return "\n".join(lines).rstrip() + "\n"
 
@@ -1027,31 +1109,30 @@ Write-Output 'APPLIANCE_CLEAN_OK'
     ) -> list[str]:
         """Build a host OpenSSH client command line that tunnels directly via `egw stdio-proxy`."""
         target = self._resolve_target(node)
-        cfg_flag = f" -c {shlex.quote(config_path)}" if config_path else ""
-        cmd = [
-            "ssh",
-            "-o",
-            f"ProxyCommand=egw{cfg_flag} stdio-proxy %h %p",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            "-p",
-            str(target.port),
-        ]
-        _, jump_chain = self._resolve_hop_and_jump(target)
-        if jump_chain:
-            jump_list = (
-                jump_chain if isinstance(jump_chain, list) else [jump_chain]
-            )
-            cmd.extend(
-                ["-J", ",".join(f"{j.user}@{j.host}:{j.port}" for j in jump_list)]
-            )
+        import subprocess
+        join = subprocess.list2cmdline if os.name == "nt" else shlex.join
+        base = ["egw"] + (["-c", config_path] if config_path else [])
+        _, chain = self._resolve_hop_and_jump(target)
+        hops = list(chain or [])
+        # Explicit nested ProxyCommand keeps every jump behind the VFS channel.
+        # ProxyJump and ProxyCommand on the same destination are mutually exclusive.
+        def channel(host, port, index):
+            if index < 0:
+                return join(base + ["stdio-proxy", host, str(port)])
+            jump = hops[index]
+            args = ["ssh", "-o", "StrictHostKeyChecking=yes", "-o", "BatchMode=yes",
+                    "-o", "ProxyCommand=" + channel(jump.host, jump.port, index - 1),
+                    "-p", str(jump.port)]
+            if jump.ssh_key_path:
+                args += ["-i", jump.ssh_key_path]
+            args += ["-W", f"[{host}]:{port}", _node_uri(jump)]
+            return join(args)
+        proxy = channel(target.host, target.port, len(hops) - 1) if hops else join(base + ["stdio-proxy", "%h", "%p"])
+        cmd = ["ssh", "-o", "ProxyCommand=" + proxy, "-o", "StrictHostKeyChecking=yes", "-p", str(target.port)]
         if target.ssh_key_path:
-            cmd.extend(["-i", target.ssh_key_path])
-        cmd.append(f"{target.user}@{target.host}")
-        if extra_args:
-            cmd.extend(extra_args)
+            cmd += ["-i", target.ssh_key_path]
+        cmd += list(extra_args or [])
+        cmd.append(_node_uri(target))
         return cmd
 
     def watch(
@@ -1062,7 +1143,7 @@ Write-Output 'APPLIANCE_CLEAN_OK'
         probe_targets: bool = False,
     ) -> list[dict[str, Any]]:
         """Autonomous self-healing watchdog loop that monitors health and heals drift."""
-        history: list[dict[str, Any]] = []
+        history = collections.deque(maxlen=None if max_iterations is not None else 128)
         iteration = 0
         while max_iterations is None or iteration < max_iterations:
             diag = self.doctor(
@@ -1073,7 +1154,7 @@ Write-Output 'APPLIANCE_CLEAN_OK'
             if max_iterations is not None and iteration >= max_iterations:
                 break
             time.sleep(max(0.1, interval_sec))
-        return history
+        return list(history)
 
     def query_database(
         self,
@@ -1085,7 +1166,7 @@ Write-Output 'APPLIANCE_CLEAN_OK'
         database: str = "",
         db_user: str = "root",
         db_password_env: str = "",
-        as_root: bool = True,
+        as_root: bool = False,
         confirm_destructive: bool = False,
         actor: str = "cli",
     ) -> ExecResult:
@@ -1097,34 +1178,32 @@ Write-Output 'APPLIANCE_CLEAN_OK'
 
         eng = engine.lower()
         if eng in ("mysql", "mariadb"):
-            db_part = shlex.quote(database) if database else ""
+            db_part = shlex.quote("--database=" + database) if database else ""
             if container:
                 env_flag = '-e MYSQL_PWD="$EGW_DB_PWD"' if db_password_env else ""
-                fallback_pw = "" if db_password_env else '-p"$MYSQL_ROOT_PASSWORD"'
-                script = (
-                    f"{ctr_resolver}echo '{sql_b64}' | base64 -d | "
-                    f'"$CTR_BIN" exec -i {env_flag} {shlex.quote(container)} sh -c '
-                    f"'mysql -u{shlex.quote(db_user)} {fallback_pw} {db_part}'"
-                )
+                mysql_args = ["mysql", "--user=" + db_user] + (["--database=" + database] if database else [])
+                inner = ("MYSQL_PWD=\"$MYSQL_ROOT_PASSWORD\" " if not db_password_env else "") + shlex.join(mysql_args)
+                script = (f"{ctr_resolver}echo '{sql_b64}' | base64 -d | "
+                          f'"$CTR_BIN" exec -i {env_flag} {shlex.quote(container)} sh -c {shlex.quote(inner)}')
             else:
                 env_prefix = 'MYSQL_PWD="$EGW_DB_PWD" ' if db_password_env else ""
                 script = (
                     f"echo '{sql_b64}' | base64 -d | "
-                    f"{env_prefix}mysql -u{shlex.quote(db_user)} {db_part}"
+                    f"{env_prefix}mysql {shlex.quote('--user=' + db_user)} {db_part}"
                 )
         elif eng in ("postgres", "postgresql", "psql"):
-            db_part = f"-d {shlex.quote(database)}" if database else ""
+            db_part = shlex.quote("--dbname=" + database) if database else ""
             if container:
                 env_flag = '-e PGPASSWORD="$EGW_DB_PWD"' if db_password_env else ""
                 script = (
                     f"{ctr_resolver}echo '{sql_b64}' | base64 -d | "
-                    f'"$CTR_BIN" exec -i {env_flag} {shlex.quote(container)} psql -U {shlex.quote(db_user)} {db_part}'
+                    f'"$CTR_BIN" exec -i {env_flag} {shlex.quote(container)} psql -X -v ON_ERROR_STOP=1 {shlex.quote("--username=" + db_user)} {db_part}'
                 )
             else:
                 env_prefix = 'PGPASSWORD="$EGW_DB_PWD" ' if db_password_env else ""
                 script = (
                     f"echo '{sql_b64}' | base64 -d | "
-                    f"{env_prefix}psql -U {shlex.quote(db_user)} {db_part}"
+                    f"{env_prefix}psql -X -v ON_ERROR_STOP=1 {shlex.quote('--username=' + db_user)} {db_part}"
                 )
         else:
             raise ValueError(f"Unsupported database engine: {engine}")
@@ -1150,42 +1229,42 @@ Write-Output 'APPLIANCE_CLEAN_OK'
         actor: str = "cli",
     ) -> ExecResult:
         """Execute an HTTP request from inside a node with adaptive curl / python3 / wget / Invoke-WebRequest fallback."""
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise ValueError("HTTP requests require an absolute http/https URL")
+        method = method.upper()
+        if not re.fullmatch(r"[A-Z]+", method):
+            raise ValueError("Invalid HTTP method")
+        for key, value in (headers or {}).items():
+            if not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", key) or any(c in value for c in "\r\n\0"):
+                raise ValueError("Invalid HTTP header")
         if self._is_powershell_node(node):
-            hdr_entries = ", ".join(
-                f"'{k}'='{v}'" for k, v in (headers or {}).items()
-            )
+            if insecure_tls:
+                raise ValueError("insecure_tls requires a configured PowerShell 7 HTTP adapter")
+            entries = "; ".join(f"{ps_quote(k)}={ps_quote(v)}" for k, v in (headers or {}).items())
             body_arg = ""
             if body:
-                b64_b = base64.b64encode(body.encode("utf-8")).decode("ascii")
-                body_arg = f"-Body ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{b64_b}')))"
-            ps_http = f"""
-$resp = Invoke-WebRequest -Uri '{url}' -Method '{method.upper()}' -Headers @{{{hdr_entries}}} {body_arg} -UseBasicParsing
-Write-Output $resp.Content
-Write-Output "---HTTP_STATUS:$($resp.StatusCode)---"
-""".strip()
-            return self.exec_node(node, ps_http, as_root=False, actor=actor)
-
-        hdr_flags: list[str] = []
-        for k, v in (headers or {}).items():
-            hdr_flags.append(f"-H {shlex.quote(f'{k}: {v}')}")
-        k_flag = "-k" if insecure_tls else ""
-        body_part = ""
+                encoded = base64.b64encode(body.encode()).decode("ascii")
+                body_arg = f"-Body ([Convert]::FromBase64String('{encoded}'))"
+            script = f"$ErrorActionPreference='Stop'; $resp=Invoke-WebRequest -Uri {ps_quote(url)} -Method {ps_quote(method)} -Headers @{{{entries}}} {body_arg} -UseBasicParsing; Write-Output $resp.Content; Write-Output \"---HTTP_STATUS:$($resp.StatusCode)---\""
+            return self.exec_node(node, script, actor=actor)
+        data = {"url": url, "method": method, "headers": headers or {}, "body": body, "insecure": insecure_tls}
+        encoded = base64.b64encode(json.dumps(data).encode()).decode("ascii")
+        python = ("import base64,json,urllib.request,urllib.error,ssl; "
+                  f"d=json.loads(base64.b64decode('{encoded}')); "
+                  "r=urllib.request.Request(d['url'],data=d['body'].encode() if d['body'] else None,headers=d['headers'],method=d['method']); "
+                  "ctx=ssl._create_unverified_context() if d['insecure'] else None; "
+                  "\ntry: p=urllib.request.urlopen(r,context=ctx,timeout=30)\nexcept urllib.error.HTTPError as e: p=e\n"
+                  "print(p.read().decode('utf-8','replace')); print('---HTTP_STATUS:'+str(p.status)+'---')")
+        header_args = " ".join("-H " + shlex.quote(f"{k}: {v}") for k, v in (headers or {}).items())
+        body64 = base64.b64encode(body.encode()).decode("ascii")
+        curl = f"curl -sS --max-time 30 --proto '=http,https' {'-k' if insecure_tls else ''} -X {shlex.quote(method)} {header_args} {'--data-binary @-' if body else ''} -w '\\n---HTTP_STATUS:%{{http_code}}---\\n' -- {shlex.quote(url)}"
         if body:
-            b64_body = base64.b64encode(body.encode("utf-8")).decode("ascii")
-            body_part = f"--data-binary \"$(echo '{b64_body}' | base64 -d)\""
-
-        curl_cmd = (
-            f"if command -v curl >/dev/null 2>&1; then "
-            f"curl -sS {k_flag} -X {shlex.quote(method.upper())} "
-            f"{' '.join(hdr_flags)} {body_part} "
-            f"-w '\\n---HTTP_STATUS:%{{http_code}}---\\n' {shlex.quote(url)}; "
-            f"elif command -v wget >/dev/null 2>&1; then "
-            f"wget -qO- {'--no-check-certificate' if insecure_tls else ''} {shlex.quote(url)} && printf '\\n---HTTP_STATUS:200---\\n'; "
-            f"else "
-            f"python3 -c \"import urllib.request,ssl; ctx=ssl._create_unverified_context() if {bool(insecure_tls)} else None; r=urllib.request.urlopen({url!r},context=ctx); print(r.read().decode('utf-8','replace')); print('---HTTP_STATUS:'+str(r.status)+'---')\"; "
-            f"fi"
-        )
-        return self.exec_node(node, curl_cmd, as_root=False, actor=actor)
+            curl = _build_b64_decode_expr(body64) + " | " + curl
+        wget = (f"wget --timeout=30 -S -O- {'--no-check-certificate' if insecure_tls else ''} -- {shlex.quote(url)}" if method == "GET" and not headers and not body
+                else "echo 'No HTTP client supports the requested method/headers/body' >&2; exit 1")
+        script = f"if command -v curl >/dev/null 2>&1; then {curl}; elif command -v python3 >/dev/null 2>&1; then python3 -c {shlex.quote(python)}; else {wget}; fi"
+        return self.exec_node(node, script, actor=actor)
 
     def _resolve_target(self, name: str) -> TargetNodeSpec:
         if name not in self.config.targets:
@@ -1212,7 +1291,7 @@ Write-Output "---HTTP_STATUS:$($resp.StatusCode)---"
                     f"Circular TargetNode 'via' routing cycle detected involving '{via}'"
                 )
             if via not in self.config.targets:
-                return self.bastion_ssh, ( list(reversed(chain)) if chain else None )
+                raise ValueError(f"Unknown hop in TargetNode routing: {via}")
             visited.add(via)
             jump_spec = self.config.targets[via]
             chain.append(jump_spec)
