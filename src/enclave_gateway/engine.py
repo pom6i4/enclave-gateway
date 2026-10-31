@@ -288,6 +288,17 @@ ConvertTo-Json $out -Compress
                 prefix_lines.append(f"export {k}=\"$(echo '{val_b64}' | base64 -d)\"")
         return "\n".join(prefix_lines) + "\n" + script
 
+    def _is_powershell_node(self, node: str) -> bool:
+        if node in ("@appliance", "appliance", "@bastion", "bastion"):
+            return True
+        if node in self.config.targets:
+            return self.config.targets[node].os.lower() in (
+                "windows",
+                "win",
+                "powershell",
+            )
+        return False
+
     def exec_node(
         self,
         node: str,
@@ -303,7 +314,7 @@ ConvertTo-Json $out -Compress
         """Execute a script on @appliance, @bastion, or a named TargetNode."""
         verify_command_safety(script, confirm_destructive=confirm_destructive)
         tx_id = generate_tx_id()
-        is_ps = node in ("@appliance", "appliance", "@bastion", "bastion")
+        is_ps = self._is_powershell_node(node)
         full_script = self._inject_env_into_script(
             script, is_powershell=is_ps, env=env, secret_env=secret_env
         )
@@ -903,9 +914,14 @@ Write-Output 'APPLIANCE_CLEAN_OK'
             "-p",
             str(target.port),
         ]
-        _, jump_node = self._resolve_hop_and_jump(target)
-        if jump_node is not None:
-            cmd.extend(["-J", f"{jump_node.user}@{jump_node.host}:{jump_node.port}"])
+        _, jump_chain = self._resolve_hop_and_jump(target)
+        if jump_chain:
+            jump_list = (
+                jump_chain if isinstance(jump_chain, list) else [jump_chain]
+            )
+            cmd.extend(
+                ["-J", ",".join(f"{j.user}@{j.host}:{j.port}" for j in jump_list)]
+            )
         if target.ssh_key_path:
             cmd.extend(["-i", target.ssh_key_path])
         cmd.append(f"{target.user}@{target.host}")
@@ -948,10 +964,11 @@ Write-Output 'APPLIANCE_CLEAN_OK'
         confirm_destructive: bool = False,
         actor: str = "cli",
     ) -> ExecResult:
-        """Execute a SQL query on a TargetNode (either directly or inside a container) without CLI password exposure."""
+        """Execute a SQL query on a TargetNode (directly or in Docker/Podman/nerdctl) without CLI password exposure."""
         verify_command_safety(query, confirm_destructive=confirm_destructive)
         sql_b64 = base64.b64encode(query.encode("utf-8")).decode("ascii")
         sec_env = {"EGW_DB_PWD": db_password_env} if db_password_env else None
+        ctr_resolver = 'CTR_BIN=$(command -v docker 2>/dev/null || command -v podman 2>/dev/null || command -v nerdctl 2>/dev/null || echo docker); '
 
         eng = engine.lower()
         if eng in ("mysql", "mariadb"):
@@ -960,8 +977,8 @@ Write-Output 'APPLIANCE_CLEAN_OK'
                 env_flag = '-e MYSQL_PWD="$EGW_DB_PWD"' if db_password_env else ""
                 fallback_pw = "" if db_password_env else '-p"$MYSQL_ROOT_PASSWORD"'
                 script = (
-                    f"echo '{sql_b64}' | base64 -d | "
-                    f"docker exec -i {env_flag} {shlex.quote(container)} sh -c "
+                    f"{ctr_resolver}echo '{sql_b64}' | base64 -d | "
+                    f'"$CTR_BIN" exec -i {env_flag} {shlex.quote(container)} sh -c '
                     f"'mysql -u{shlex.quote(db_user)} {fallback_pw} {db_part}'"
                 )
             else:
@@ -975,8 +992,8 @@ Write-Output 'APPLIANCE_CLEAN_OK'
             if container:
                 env_flag = '-e PGPASSWORD="$EGW_DB_PWD"' if db_password_env else ""
                 script = (
-                    f"echo '{sql_b64}' | base64 -d | "
-                    f"docker exec -i {env_flag} {shlex.quote(container)} psql -U {shlex.quote(db_user)} {db_part}"
+                    f"{ctr_resolver}echo '{sql_b64}' | base64 -d | "
+                    f'"$CTR_BIN" exec -i {env_flag} {shlex.quote(container)} psql -U {shlex.quote(db_user)} {db_part}'
                 )
             else:
                 env_prefix = 'PGPASSWORD="$EGW_DB_PWD" ' if db_password_env else ""
@@ -1007,7 +1024,22 @@ Write-Output 'APPLIANCE_CLEAN_OK'
         insecure_tls: bool = False,
         actor: str = "cli",
     ) -> ExecResult:
-        """Execute an HTTP request from inside a TargetNode and return status + body."""
+        """Execute an HTTP request from inside a node with adaptive curl / python3 / wget / Invoke-WebRequest fallback."""
+        if self._is_powershell_node(node):
+            hdr_entries = ", ".join(
+                f"'{k}'='{v}'" for k, v in (headers or {}).items()
+            )
+            body_arg = ""
+            if body:
+                b64_b = base64.b64encode(body.encode("utf-8")).decode("ascii")
+                body_arg = f"-Body ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{b64_b}')))"
+            ps_http = f"""
+$resp = Invoke-WebRequest -Uri '{url}' -Method '{method.upper()}' -Headers @{{{hdr_entries}}} {body_arg} -UseBasicParsing
+Write-Output $resp.Content
+Write-Output "---HTTP_STATUS:$($resp.StatusCode)---"
+""".strip()
+            return self.exec_node(node, ps_http, as_root=False, actor=actor)
+
         hdr_flags: list[str] = []
         for k, v in (headers or {}).items():
             hdr_flags.append(f"-H {shlex.quote(f'{k}: {v}')}")
@@ -1018,9 +1050,15 @@ Write-Output 'APPLIANCE_CLEAN_OK'
             body_part = f"--data-binary \"$(echo '{b64_body}' | base64 -d)\""
 
         curl_cmd = (
+            f"if command -v curl >/dev/null 2>&1; then "
             f"curl -sS {k_flag} -X {shlex.quote(method.upper())} "
             f"{' '.join(hdr_flags)} {body_part} "
-            f"-w '\\n---HTTP_STATUS:%{{http_code}}---\\n' {shlex.quote(url)}"
+            f"-w '\\n---HTTP_STATUS:%{{http_code}}---\\n' {shlex.quote(url)}; "
+            f"elif command -v wget >/dev/null 2>&1; then "
+            f"wget -qO- {'--no-check-certificate' if insecure_tls else ''} {shlex.quote(url)} && printf '\\n---HTTP_STATUS:200---\\n'; "
+            f"else "
+            f"python3 -c \"import urllib.request,ssl; ctx=ssl._create_unverified_context() if {bool(insecure_tls)} else None; r=urllib.request.urlopen({url!r},context=ctx); print(r.read().decode('utf-8','replace')); print('---HTTP_STATUS:'+str(r.status)+'---')\"; "
+            f"fi"
         )
         return self.exec_node(node, curl_cmd, as_root=False, actor=actor)
 
@@ -1034,18 +1072,23 @@ Write-Output 'APPLIANCE_CLEAN_OK'
 
     def _resolve_hop_and_jump(
         self, target: TargetNodeSpec
-    ) -> tuple[SshHopExecutor, TargetNodeSpec | None]:
-        via = target.via.lstrip("@")
-        if via == "appliance":
-            return self.appliance_ssh, None
-        if via in ("bastion", ""):
-            return self.bastion_ssh, None
-        if via in self.config.targets and via != target.name:
-            jump_node = self.config.targets[via]
-            hop = (
-                self.appliance_ssh
-                if jump_node.via.lstrip("@") == "appliance"
-                else self.bastion_ssh
-            )
-            return hop, jump_node
-        return self.bastion_ssh, None
+    ) -> tuple[SshHopExecutor, list[TargetNodeSpec] | None]:
+        chain: list[TargetNodeSpec] = []
+        visited: set[str] = {target.name}
+        curr = target
+        while True:
+            via = curr.via.lstrip("@")
+            if via == "appliance":
+                return self.appliance_ssh, ( list(reversed(chain)) if chain else None )
+            if via in ("bastion", ""):
+                return self.bastion_ssh, ( list(reversed(chain)) if chain else None )
+            if via in visited:
+                raise ValueError(
+                    f"Circular TargetNode 'via' routing cycle detected involving '{via}'"
+                )
+            if via not in self.config.targets:
+                return self.bastion_ssh, ( list(reversed(chain)) if chain else None )
+            visited.add(via)
+            jump_spec = self.config.targets[via]
+            chain.append(jump_spec)
+            curr = jump_spec

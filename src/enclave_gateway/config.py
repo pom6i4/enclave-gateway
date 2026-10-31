@@ -90,6 +90,7 @@ class TargetNodeSpec:
     port: int = 22
     user: str = "root"
     via: str = "bastion"
+    os: str = "linux"
     password_env: str = ""
     sudo_password_env: str = ""
     ssh_key_path: str = ""
@@ -121,6 +122,16 @@ class EnclaveConfig:
         targets_raw = dict(raw.get("targets") or {})
         forwards_raw = dict(raw.get("forwards") or {})
 
+        for list_field in ("routes", "dns_servers"):
+            if list_field in prov_raw:
+                val = prov_raw[list_field]
+                if isinstance(val, dict):
+                    prov_raw[list_field] = list(val.values())
+                elif isinstance(val, str):
+                    prov_raw[list_field] = [
+                        x.strip() for x in val.split(",") if x.strip()
+                    ]
+
         targets: dict[str, TargetNodeSpec] = {}
         for t_name, t_cfg in targets_raw.items():
             if isinstance(t_cfg, dict):
@@ -130,6 +141,7 @@ class EnclaveConfig:
                     port=int(t_cfg.get("port", 22)),
                     user=str(t_cfg.get("user", "root")),
                     via=str(t_cfg.get("via", "bastion")),
+                    os=str(t_cfg.get("os", "linux")).lower(),
                     password_env=str(t_cfg.get("password_env", "")),
                     sudo_password_env=str(t_cfg.get("sudo_password_env", "")),
                     ssh_key_path=str(t_cfg.get("ssh_key_path", "")),
@@ -199,6 +211,11 @@ def _parse_scalar(val: str) -> Any:
         val.startswith('"') and val.endswith('"')
     ):
         return val[1:-1]
+    if val.startswith("[") and val.endswith("]"):
+        inner = val[1:-1].strip()
+        if not inner:
+            return []
+        return [_parse_scalar(x) for x in inner.split(",") if x.strip()]
     low = val.lower()
     if low == "true":
         return True
@@ -208,6 +225,11 @@ def _parse_scalar(val: str) -> Any:
         return None
     if val.isdigit() or (val.startswith("-") and val[1:].isdigit()):
         return int(val)
+    try:
+        if "." in val and all(p.isdigit() for p in val.lstrip("-").split(".", 1)):
+            return float(val)
+    except ValueError:
+        pass
     return val
 
 
@@ -242,14 +264,28 @@ def parse_yaml_or_json(text: str) -> dict[str, Any]:
         pass
 
     root: dict[str, Any] = {}
-    stack: list[tuple[int, dict[str, Any]]] = [(-1, root)]
+    stack: list[tuple[int, dict[str, Any], str]] = [(-1, root, "")]
 
     for raw_line in stripped.splitlines():
         clean = _strip_inline_comment(raw_line)
         if not clean.strip():
             continue
         indent = len(clean) - len(clean.lstrip(" "))
-        key_part, sep, val_part = clean.strip().partition(":")
+        trimmed = clean.strip()
+
+        if trimmed.startswith("- "):
+            item_val = _parse_scalar(trimmed[2:].strip())
+            while len(stack) > 1 and stack[-1][0] >= indent:
+                stack.pop()
+            parent_dict = stack[-1][1]
+            last_key = stack[-1][2]
+            if last_key and isinstance(parent_dict.get(last_key), dict) and not parent_dict[last_key]:
+                parent_dict[last_key] = [item_val]
+            elif last_key and isinstance(parent_dict.get(last_key), list):
+                parent_dict[last_key].append(item_val)
+            continue
+
+        key_part, sep, val_part = trimmed.partition(":")
         if not sep:
             continue
         key = key_part.strip()
@@ -259,10 +295,11 @@ def parse_yaml_or_json(text: str) -> dict[str, Any]:
             stack.pop()
 
         current_dict = stack[-1][1]
+        stack[-1] = (stack[-1][0], current_dict, key)
         if not val_str:
             child: dict[str, Any] = {}
             current_dict[key] = child
-            stack.append((indent, child))
+            stack.append((indent, child, ""))
         else:
             current_dict[key] = _parse_scalar(val_str)
 

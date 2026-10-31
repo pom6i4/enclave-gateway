@@ -290,29 +290,36 @@ class RdpVfsTransport:
         ):
             req_guest = f"{spool}\\req_{tx_id}.json"
             res_guest = f"{spool}\\res_{tx_id}.json"
-            self.control.write_bytes(raw_envelope, req_guest)
-            deadline = time.monotonic() + timeout_sec
-            delay = 0.005
-            raw_res_text = ""
-            while time.monotonic() < deadline:
-                res_bytes = try_read_fn(res_guest, truncate_after_read=True)
-                if res_bytes:
-                    raw_res_text = res_bytes.decode("utf-8", errors="replace").strip()
-                    if raw_res_text:
-                        break
-                time.sleep(delay)
-                delay = min(0.035, delay * 1.4)
+            direct_write_ok = False
+            try:
+                self.control.write_bytes(raw_envelope, req_guest)
+                direct_write_ok = True
+            except Exception:
+                direct_write_ok = False
 
-            if not raw_res_text:
-                return ExecResult(
-                    exit_code=124,
-                    stdout="",
-                    stderr=f"Timed out waiting for BastionWorker response for {tx_id}",
-                    duration_ms=int((time.monotonic() - started) * 1000),
+            if direct_write_ok:
+                deadline = time.monotonic() + timeout_sec
+                delay = 0.005
+                raw_res_text = ""
+                while time.monotonic() < deadline:
+                    res_bytes = try_read_fn(res_guest, truncate_after_read=True)
+                    if res_bytes:
+                        raw_res_text = res_bytes.decode("utf-8", errors="replace").strip()
+                        if raw_res_text:
+                            break
+                    time.sleep(delay)
+                    delay = min(0.035, delay * 1.4)
+
+                if not raw_res_text:
+                    return ExecResult(
+                        exit_code=124,
+                        stdout="",
+                        stderr=f"Timed out waiting for BastionWorker response for {tx_id}",
+                        duration_ms=int((time.monotonic() - started) * 1000),
+                    )
+                return self._parse_envelope_response(
+                    raw_res_text, int((time.monotonic() - started) * 1000)
                 )
-            return self._parse_envelope_response(
-                raw_res_text, int((time.monotonic() - started) * 1000)
-            )
 
         envelope_b64 = base64.b64encode(raw_envelope).decode("ascii")
         iters = max(10, int(timeout_sec / 0.15))

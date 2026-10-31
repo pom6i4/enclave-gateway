@@ -21,9 +21,22 @@ def _build_b64_decode_expr(b64_str: str) -> str:
 
 
 def build_remote_bash_invocation(
-    script: str, *, as_root: bool = False, sudo_password: str = ""
+    script: str,
+    *,
+    as_root: bool = False,
+    sudo_password: str = "",
+    target_os: str = "linux",
 ) -> str:
-    """Encode a POSIX/bash script in Base64, disable shell history, strip CR, and execute portably."""
+    """Encode a POSIX/bash or Windows PowerShell script in Base64, disable shell history, and execute portably."""
+    if target_os.lower() in ("windows", "win", "powershell"):
+        win_script = (
+            "Set-PSReadLineOption -HistorySaveStyle SaveNothing -ErrorAction SilentlyContinue\n"
+            "[Console]::OutputEncoding = [Text.Encoding]::UTF8\n"
+            + script
+        )
+        utf16_b64 = base64.b64encode(win_script.encode("utf-16le")).decode("ascii")
+        return f"powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {utf16_b64}"
+
     clean_script = "unset HISTFILE; export HISTFILE=/dev/null;\n" + script.replace("\r\n", "\n")
     b64_script = base64.b64encode(clean_script.encode("utf-8")).decode("ascii")
     polyglot_pipe = (
@@ -49,7 +62,7 @@ def _build_ssh_common_opts(
     port_flag: str = "-p",
     has_ssh_password: bool = False,
     connect_timeout_sec: int = 15,
-    jump_node: TargetNodeSpec | None = None,
+    jump_node: TargetNodeSpec | list[TargetNodeSpec] | None = None,
 ) -> str:
     batch_val = "no" if has_ssh_password else "yes"
     opts = [
@@ -62,11 +75,13 @@ def _build_ssh_common_opts(
         f"{port_flag} {node.port}",
     ]
     if jump_node is not None:
-        jump_spec = f"{jump_node.user}@{jump_node.host}:{jump_node.port}"
-        if port_flag == "-P":
-            opts.append(f"-o ProxyJump={jump_spec}")
-        else:
-            opts.append(f"-J {jump_spec}")
+        jumps = jump_node if isinstance(jump_node, list) else [jump_node]
+        if jumps:
+            jump_spec = ",".join(f"{j.user}@{j.host}:{j.port}" for j in jumps)
+            if port_flag == "-P":
+                opts.append(f"-o ProxyJump={jump_spec}")
+            else:
+                opts.append(f"-J {jump_spec}")
     if node.ssh_key_path:
         opts.append(f"-i {node.ssh_key_path}")
     return " ".join(opts)
@@ -136,11 +151,14 @@ def build_powershell_ssh_hop_script(
     sudo_password: str = "",
     connect_timeout_sec: int = 15,
     stage_dir: str = r"%LOCALAPPDATA%\EnclaveGateway\stage",
-    jump_node: TargetNodeSpec | None = None,
+    jump_node: TargetNodeSpec | list[TargetNodeSpec] | None = None,
 ) -> str:
     """Build a PowerShell script that invokes ssh.exe on the hop host safely without cmd.exe or temp sudo files."""
     remote_cmd = build_remote_bash_invocation(
-        bash_script, as_root=as_root, sudo_password=sudo_password
+        bash_script,
+        as_root=as_root,
+        sudo_password=sudo_password,
+        target_os=getattr(node, "os", "linux"),
     )
     opts_str = _build_ssh_common_opts(
         node,

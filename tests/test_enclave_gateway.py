@@ -924,13 +924,15 @@ targets:
             self.assertNotIn("s_", sudo_hop_ps)
             self.assertIn("openssl enc -base64 -d -A", sudo_hop_ps)
 
-            # 8. Verify cascading Multi-Hop SSH (via: app01 -> ProxyJump -J)
+            # 8. Verify N-hop cascading Multi-Hop SSH (dmz01 -> app01 -> db01) & Windows TargetNode (os: windows)
             multi_cfg = EnclaveConfig.from_dict(
                 {
                     "appliance": {"hypervisor": "direct"},
                     "targets": {
-                        "app01": {"host": "10.0.20.11", "port": 22, "user": "deploy", "via": "bastion"},
+                        "dmz01": {"host": "10.0.10.5", "port": 22, "user": "jump", "via": "bastion"},
+                        "app01": {"host": "10.0.20.11", "port": 22, "user": "deploy", "via": "dmz01"},
                         "db01": {"host": "10.0.30.50", "port": 2222, "user": "postgres", "via": "app01"},
+                        "ad01": {"host": "10.0.40.10", "port": 22, "user": "Admin", "via": "bastion", "os": "windows"},
                     },
                 }
             )
@@ -941,9 +943,26 @@ targets:
             self.assertIn("ProxyJump enclave-app01", ssh_cfg_text)
             db_ssh_cmd = multi_engine.build_ssh_command("db01")
             self.assertIn("-J", db_ssh_cmd)
-            self.assertIn("deploy@10.0.20.11:22", db_ssh_cmd)
+            self.assertIn("jump@10.0.10.5:22,deploy@10.0.20.11:22", db_ssh_cmd)
 
-            # 9. Verify FlightRecorder cryptographic SHA-256 hash chain integrity
+            win_hop_ps = build_powershell_ssh_hop_script(
+                multi_cfg.targets["ad01"],
+                "Get-Service NTDS",
+            )
+            self.assertIn("-EncodedCommand", win_hop_ps)
+
+            # 9. Verify Podman/nerdctl/Docker container runtime resolver & curl/wget/python3 HTTP polyglot
+            ctr_res = multi_engine.query_database(
+                "app01",
+                "pg-ctr",
+                "postgres",
+                "SELECT 1;",
+            )
+            self.assertIn("command -v podman", ctr_res.stdout)
+            http_res = multi_engine.http_request("app01", "http://127.0.0.1:8080/healthz")
+            self.assertIn("urllib.request", http_res.stdout)
+
+            # 10. Verify FlightRecorder cryptographic SHA-256 hash chain integrity
             chain_ok, verified_count = recorder.verify_integrity()
             self.assertTrue(chain_ok)
             self.assertGreaterEqual(verified_count, 3)
