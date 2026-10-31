@@ -43,6 +43,25 @@ def verify_command_safety(command: str, confirm_destructive: bool = False) -> No
 class SecretScrubber:
     """Redacts sensitive credentials from stdout, stderr, logs, and RPC responses."""
 
+    _HEURISTIC_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+        (
+            re.compile(
+                r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----"
+            ),
+            "[REDACTED_PRIVATE_KEY]",
+        ),
+        (
+            re.compile(
+                r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"
+            ),
+            "[REDACTED_JWT]",
+        ),
+        (
+            re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://[^:/@\s]+:)([^@\s]+)(@)"),
+            r"\1[REDACTED]\3",
+        ),
+    ]
+
     def __init__(self, secrets: list[str] | None = None) -> None:
         self._tokens: set[str] = set()
         if secrets:
@@ -60,12 +79,14 @@ class SecretScrubber:
         self._tokens.add(base64.b64encode(clean.encode("utf-8")).decode("ascii"))
 
     def scrub(self, text: str) -> str:
-        if not text or not self._tokens:
+        if not text:
             return text
         result = text
         for token in sorted(self._tokens, key=len, reverse=True):
             if token in result:
                 result = result.replace(token, "[REDACTED]")
+        for pattern, replacement in self._HEURISTIC_PATTERNS:
+            result = pattern.sub(replacement, result)
         return result
 
 
@@ -151,6 +172,22 @@ class SecretVault:
                 check=False,
             )
             return res.returncode == 0
+        if sys_name == "Windows":
+            dpapi_file = Path.home() / ".enclave_gateway" / f"{key}.dpapi"
+            dpapi_file.parent.mkdir(parents=True, exist_ok=True)
+            b64_val = base64.b64encode(clean.encode("utf-8")).decode("ascii")
+            ps_cmd = (
+                f"$s = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{b64_val}')); "
+                f"$sec = ConvertTo-SecureString $s -AsPlainText -Force; "
+                f"ConvertFrom-SecureString $sec | Set-Content -Path '{dpapi_file}' -NoNewline"
+            )
+            res = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return res.returncode == 0
         return False
 
     def _get_from_keychain(self, key: str) -> str | None:
@@ -181,4 +218,19 @@ class SecretVault:
             )
             if res.returncode == 0:
                 return res.stdout.rstrip("\r\n")
+        elif sys_name == "Windows":
+            dpapi_file = Path.home() / ".enclave_gateway" / f"{key}.dpapi"
+            if dpapi_file.is_file():
+                ps_cmd = (
+                    f"$sec = Get-Content -Path '{dpapi_file}' -Raw | ConvertTo-SecureString; "
+                    f"[System.Net.NetworkCredential]::new('', $sec).Password"
+                )
+                res = subprocess.run(
+                    ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if res.returncode == 0:
+                    return res.stdout.rstrip("\r\n")
         return None

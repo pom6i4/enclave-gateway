@@ -273,10 +273,41 @@ class RdpVfsTransport:
         self, envelope: dict[str, Any], timeout_sec: float = 120.0
     ) -> ExecResult:
         tx_id = str(envelope["tx_id"])
-        envelope_b64 = base64.b64encode(
-            json.dumps(envelope, ensure_ascii=False).encode("utf-8")
-        ).decode("ascii")
-        spool = self.spec.appliance_spool_dir
+        raw_envelope = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
+        spool = self.spec.appliance_spool_dir.rstrip("\\/")
+        started = time.monotonic()
+
+        try_read_fn = getattr(self.control, "try_read_bytes", None)
+        if getattr(self.control, "supports_direct_spool_ipc", False) and callable(
+            try_read_fn
+        ):
+            req_guest = f"{spool}\\req_{tx_id}.json"
+            res_guest = f"{spool}\\res_{tx_id}.json"
+            self.control.write_bytes(raw_envelope, req_guest)
+            deadline = time.monotonic() + timeout_sec
+            delay = 0.005
+            raw_res_text = ""
+            while time.monotonic() < deadline:
+                res_bytes = try_read_fn(res_guest, truncate_after_read=True)
+                if res_bytes:
+                    raw_res_text = res_bytes.decode("utf-8", errors="replace").strip()
+                    if raw_res_text:
+                        break
+                time.sleep(delay)
+                delay = min(0.035, delay * 1.4)
+
+            if not raw_res_text:
+                return ExecResult(
+                    exit_code=124,
+                    stdout="",
+                    stderr=f"Timed out waiting for BastionWorker response for {tx_id}",
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                )
+            return self._parse_envelope_response(
+                raw_res_text, int((time.monotonic() - started) * 1000)
+            )
+
+        envelope_b64 = base64.b64encode(raw_envelope).decode("ascii")
         iters = max(10, int(timeout_sec / 0.15))
 
         appliance_ps = f"""
@@ -312,7 +343,6 @@ Remove-Item $reqFile -Force -ErrorAction SilentlyContinue
 Write-Error 'Timed out waiting for BastionWorker response for {tx_id}'
 exit 124
 """
-        started = time.monotonic()
         res = self.control.exec_powershell(appliance_ps, timeout_sec=timeout_sec + 15.0)
         if res.exit_code != 0:
             return ExecResult(
@@ -321,9 +351,12 @@ exit 124
                 stderr=res.stderr or f"Bastion IPC failed (code {res.exit_code})",
                 duration_ms=int((time.monotonic() - started) * 1000),
             )
+        return self._parse_envelope_response(res.stdout, res.duration_ms)
 
+    @staticmethod
+    def _parse_envelope_response(raw_stdout: str, fallback_duration_ms: int) -> ExecResult:
         try:
-            parsed = json.loads(res.stdout)
+            parsed = json.loads(raw_stdout)
             stdout_str = (
                 base64.b64decode(parsed.get("stdout_b64", ""))
                 .decode("utf-8", errors="replace")
@@ -340,14 +373,14 @@ exit 124
                 exit_code=int(parsed.get("exit_code", 0)),
                 stdout=stdout_str,
                 stderr=stderr_str,
-                duration_ms=int(parsed.get("duration_ms", res.duration_ms)),
+                duration_ms=int(parsed.get("duration_ms", fallback_duration_ms)),
             )
         except (json.JSONDecodeError, KeyError, ValueError) as exc:
             return ExecResult(
                 exit_code=1,
-                stdout=res.stdout,
+                stdout=raw_stdout,
                 stderr=f"Malformed BastionWorker response: {exc}",
-                duration_ms=res.duration_ms,
+                duration_ms=fallback_duration_ms,
             )
 
     def push_file(

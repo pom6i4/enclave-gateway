@@ -64,11 +64,18 @@ class QgaClient:
 
     CHUNK_SIZE = 65536
 
-    def __init__(self, socket_path: str | Path, lock_path: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        socket_path: str | Path,
+        lock_path: str | Path | None = None,
+        *,
+        direct_spool_ipc: bool = True,
+    ) -> None:
         self.socket_path = Path(socket_path)
         self.lock_path = (
             Path(lock_path) if lock_path else Path(f"{self.socket_path}.lock")
         )
+        self.supports_direct_spool_ipc = direct_spool_ipc
 
     @contextmanager
     def _connect_synced(self, timeout_sec: float = 30.0) -> Iterator[tuple[socket.socket, object]]:
@@ -221,6 +228,56 @@ class QgaClient:
         local_path.parent.mkdir(parents=True, exist_ok=True)
         local_path.write_bytes(self.read_bytes(guest_path))
 
+    def try_read_bytes(
+        self, guest_path: str, *, truncate_after_read: bool = False
+    ) -> bytes | None:
+        """Attempt to read a guest file via QGA without spawning PowerShell; returns None if missing."""
+        chunks: list[bytes] = []
+        with self._connect_synced(timeout_sec=10.0) as (sock, reader):
+            open_req = json.dumps(
+                {"execute": "guest-file-open", "arguments": {"path": guest_path, "mode": "rb"}}
+            )
+            sock.sendall((open_req + "\n").encode("utf-8"))
+            open_resp = json.loads(reader.readline().lstrip("\xff"))  # type: ignore[attr-defined]
+            if "return" not in open_resp:
+                return None
+            handle = open_resp["return"]
+            try:
+                while True:
+                    read_req = json.dumps(
+                        {
+                            "execute": "guest-file-read",
+                            "arguments": {"handle": handle, "count": self.CHUNK_SIZE},
+                        }
+                    )
+                    sock.sendall((read_req + "\n").encode("utf-8"))
+                    resp = json.loads(reader.readline().lstrip("\xff"))["return"]  # type: ignore[attr-defined]
+                    if resp.get("buf-b64"):
+                        chunks.append(base64.b64decode(resp["buf-b64"]))
+                    if resp.get("eof"):
+                        break
+            finally:
+                close_req = json.dumps(
+                    {"execute": "guest-file-close", "arguments": {"handle": handle}}
+                )
+                sock.sendall((close_req + "\n").encode("utf-8"))
+                reader.readline()  # type: ignore[attr-defined]
+
+            data = b"".join(chunks)
+            if truncate_after_read and data:
+                trunc_open = json.dumps(
+                    {"execute": "guest-file-open", "arguments": {"path": guest_path, "mode": "wb"}}
+                )
+                sock.sendall((trunc_open + "\n").encode("utf-8"))
+                trunc_resp = json.loads(reader.readline().lstrip("\xff"))  # type: ignore[attr-defined]
+                if "return" in trunc_resp:
+                    trunc_close = json.dumps(
+                        {"execute": "guest-file-close", "arguments": {"handle": trunc_resp["return"]}}
+                    )
+                    sock.sendall((trunc_close + "\n").encode("utf-8"))
+                    reader.readline()  # type: ignore[attr-defined]
+            return data if data else None
+
     def sync_guest_clock(self, epoch_ns: int | None = None) -> bool:
         """Synchronize the guest OS clock to the Host clock via QGA guest-set-time."""
         ns = epoch_ns if epoch_ns is not None else time.time_ns()
@@ -285,6 +342,17 @@ class DirectHostControlChannel:
     def read_file(self, guest_path: str, local_path: Path) -> None:
         local_path.parent.mkdir(parents=True, exist_ok=True)
         local_path.write_bytes(self.read_bytes(guest_path))
+
+    def try_read_bytes(
+        self, guest_path: str, *, truncate_after_read: bool = False
+    ) -> bytes | None:
+        target = self._map_path(guest_path)
+        if not target.is_file():
+            return None
+        data = target.read_bytes()
+        if truncate_after_read and data:
+            target.unlink(missing_ok=True)
+        return data if data else None
 
     def sync_guest_clock(self, epoch_ns: int | None = None) -> bool:
         _ = epoch_ns

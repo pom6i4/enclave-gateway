@@ -221,7 +221,8 @@ ConvertTo-Json $out -Compress
 
         cred_args = ""
         if update_credentials and domain_user and password:
-            cred_args = f"-RdpDomainUser '{domain_user}' -RdpPassword '{password}'"
+            pw_b64 = base64.b64encode(password.encode("utf-8")).decode("ascii")
+            cred_args = f"-RdpDomainUser '{domain_user}' -RdpPasswordB64 '{pw_b64}'"
 
         host_epoch = int(time.time())
         routes_csv = ",".join(self.config.provider.routes)

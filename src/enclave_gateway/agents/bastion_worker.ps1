@@ -6,6 +6,7 @@ param(
 
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $ErrorActionPreference = "Continue"
+Set-PSReadLineOption -HistorySaveStyle SaveNothing -ErrorAction SilentlyContinue
 $startedAt = Get-Date
 $lastHeartbeat = [DateTime]::MinValue
 
@@ -21,7 +22,7 @@ if (-not $Global:EnclaveRunspacePool -or $Global:EnclaveRunspacePool.RunspacePoo
 
 # Clean up any orphaned temporary files from a previous interrupted session
 if (Test-Path $SpoolDir) {
-    Get-ChildItem -Path $SpoolDir -Include "*.tmp", "chunk_*.bin", "pull_*.bin" -File -ErrorAction SilentlyContinue |
+    Get-ChildItem -Path $SpoolDir -Include "*.tmp", "chunk_*.bin", "pull_*.bin", "ask_*.cmd", "s_*.bin", "egw_stage_*", "egw_pull_*" -File -ErrorAction SilentlyContinue |
         Where-Object { ((Get-Date) - $_.LastWriteTime).TotalMinutes -gt 10 } |
         Remove-Item -Force -ErrorAction SilentlyContinue
 }
@@ -123,6 +124,11 @@ try {
                         try { $Global:EnclaveMuxSockets[$sid].Client.Close() } catch {}
                         $Global:EnclaveMuxSockets.Remove($sid)
                     }
+
+                    # Reap consumed (0-byte truncated) or stale res_*.json envelopes
+                    Get-ChildItem -Path $SpoolDir -Filter "res_*.json" -File -ErrorAction SilentlyContinue |
+                        Where-Object { $_.Length -eq 0 -or (($now - $_.LastWriteTime).TotalSeconds -gt 60) } |
+                        Remove-Item -Force -ErrorAction SilentlyContinue
 
                     $uptimeSec = [int]($now - $startedAt).TotalSeconds
                     $stateObj = @{

@@ -14,15 +14,17 @@ from enclave_gateway.control.qga_client import ExecResult
 def build_remote_bash_invocation(
     script: str, *, as_root: bool = False
 ) -> str:
-    """Encode a bash script in Base64 and strip CR characters before execution."""
-    clean_script = script.replace("\r\n", "\n")
+    """Encode a POSIX/bash script in Base64, disable shell history, strip CR, and execute portably."""
+    clean_script = "unset HISTFILE; export HISTFILE=/dev/null;\n" + script.replace("\r\n", "\n")
     b64_script = base64.b64encode(clean_script.encode("utf-8")).decode("ascii")
+    polyglot_pipe = (
+        f"echo '{b64_script}' | base64 -d 2>/dev/null | tr -d '\\r' | "
+        "(command -v bash >/dev/null 2>&1 && exec bash || exec sh)"
+    )
     if as_root:
         # First line of stdin is consumed by sudo -S, remaining script comes from base64
-        return (
-            f"sudo -S -p '' bash -c \"echo '{b64_script}' | base64 -d | tr -d '\\r' | bash\""
-        )
-    return f"echo '{b64_script}' | base64 -d | tr -d '\\r' | bash"
+        return f"sudo -S -p '' sh -c \"{polyglot_pipe}\""
+    return polyglot_pipe
 
 
 def _build_ssh_common_opts(
@@ -36,6 +38,7 @@ def _build_ssh_common_opts(
     opts = [
         f"-o BatchMode={batch_val}",
         "-o StrictHostKeyChecking=no",
+        "-o UserKnownHostsFile=NUL",
         f"-o ConnectTimeout={connect_timeout_sec}",
         f"{port_flag} {node.port}",
     ]
@@ -44,7 +47,13 @@ def _build_ssh_common_opts(
     return " ".join(opts)
 
 
-def _wrap_with_askpass_ps(inner_ps: str, ssh_password: str, token_id: str) -> str:
+def _wrap_with_askpass_ps(
+    inner_ps: str,
+    ssh_password: str,
+    token_id: str,
+    *,
+    stage_dir: str = r"%LOCALAPPDATA%\EnclaveGateway\stage",
+) -> str:
     """Wrap a PowerShell SSH/SCP block with an ephemeral SSH_ASKPASS helper if ssh_password is set."""
     if not ssh_password:
         return inner_ps.strip()
@@ -63,7 +72,7 @@ def _wrap_with_askpass_ps(inner_ps: str, ssh_password: str, token_id: str) -> st
     bat_b64 = base64.b64encode(bat_content.encode("utf-8")).decode("ascii")
 
     return f"""
-$askDir = Join-Path $env:LOCALAPPDATA 'EnclaveGateway\\stage'
+$askDir = [Environment]::ExpandEnvironmentVariables('{stage_dir}')
 if (-not (Test-Path $askDir)) {{ New-Item -ItemType Directory -Force -Path $askDir | Out-Null }}
 $askCmd = Join-Path $askDir 'ask_{token_id}.cmd'
 try {{
@@ -91,6 +100,7 @@ def build_powershell_ssh_hop_script(
     ssh_password: str = "",
     sudo_password: str = "",
     connect_timeout_sec: int = 15,
+    stage_dir: str = r"%LOCALAPPDATA%\EnclaveGateway\stage",
 ) -> str:
     """Build a PowerShell script that invokes ssh.exe on the hop host safely."""
     remote_cmd = build_remote_bash_invocation(bash_script, as_root=as_root)
@@ -107,7 +117,7 @@ def build_powershell_ssh_hop_script(
         clean_pw = sudo_password.rstrip("\r\n")
         pw_b64 = base64.b64encode((clean_pw + "\n").encode("utf-8")).decode("ascii")
         core_ps = f"""
-$secDir = Join-Path $env:LOCALAPPDATA 'EnclaveGateway\\stage'
+$secDir = [Environment]::ExpandEnvironmentVariables('{stage_dir}')
 if (-not (Test-Path $secDir)) {{ New-Item -ItemType Directory -Force -Path $secDir | Out-Null }}
 $secFile = Join-Path $secDir 's_{token_id}.bin'
 try {{
@@ -121,13 +131,17 @@ try {{
     }}
 }}
 """
-        return _wrap_with_askpass_ps(core_ps, ssh_password, token_id)
+        return _wrap_with_askpass_ps(
+            core_ps, ssh_password, token_id, stage_dir=stage_dir
+        )
 
     core_ps = f"""
 ssh.exe -n -T {opts_str} {target_uri} '{remote_cmd}'
 exit $LASTEXITCODE
 """
-    return _wrap_with_askpass_ps(core_ps, ssh_password, token_id)
+    return _wrap_with_askpass_ps(
+        core_ps, ssh_password, token_id, stage_dir=stage_dir
+    )
 
 
 class SshHopExecutor:
@@ -162,6 +176,7 @@ class SshHopExecutor:
             as_root=as_root,
             ssh_password=ssh_password,
             sudo_password=sudo_password,
+            stage_dir=self.stage_dir,
         )
         return self._exec_hop(hop_ps, timeout_sec)
 
@@ -205,7 +220,9 @@ try {{
     Remove-Item $stage -Force -ErrorAction SilentlyContinue
 }}
 """
-        scp_ps = _wrap_with_askpass_ps(scp_core_ps, ssh_password, stage_id)
+        scp_ps = _wrap_with_askpass_ps(
+            scp_core_ps, ssh_password, stage_id, stage_dir=self.stage_dir
+        )
         scp_res = self._exec_hop(scp_ps, timeout_sec)
         if scp_res.exit_code != 0:
             raise RuntimeError(
@@ -214,7 +231,15 @@ try {{
 
         verify_and_move_sh = f"""
 set -e
-sha=$(sha256sum '{remote_tmp}' | awk '{{print tolower($1)}}')
+if command -v sha256sum >/dev/null 2>&1; then
+    sha=$(sha256sum '{remote_tmp}' | awk '{{print tolower($1)}}')
+elif command -v shasum >/dev/null 2>&1; then
+    sha=$(shasum -a 256 '{remote_tmp}' | awk '{{print tolower($1)}}')
+elif command -v sha256 >/dev/null 2>&1; then
+    sha=$(sha256 -q '{remote_tmp}' | tr 'A-F' 'a-f')
+else
+    sha=$(openssl dgst -sha256 '{remote_tmp}' | awk '{{print tolower($NF)}}')
+fi
 if [ "$sha" != '{expected_sha}' ]; then
     rm -f '{remote_tmp}'
     echo "MISMATCH:$sha" >&2
@@ -292,7 +317,9 @@ if ($LASTEXITCODE -ne 0) {{
     [IO.File]::WriteAllBytes($stage, [Convert]::FromBase64String(($b64 | Out-String).Trim()))
 }}
 """
-        scp_ps = _wrap_with_askpass_ps(scp_core_ps, ssh_password, stage_id)
+        scp_ps = _wrap_with_askpass_ps(
+            scp_core_ps, ssh_password, stage_id, stage_dir=self.stage_dir
+        )
         try:
             res = self._exec_hop(scp_ps, timeout_sec)
             if res.exit_code != 0:

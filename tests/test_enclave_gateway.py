@@ -59,15 +59,18 @@ from enclave_gateway.tui.dashboard import render_dashboard_text
 class LoopbackControlChannel:
     """In-memory loopback simulator for Appliance + BastionWorker IPC, Striped I/O, and TCP Mux."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, direct_spool_ipc: bool = False) -> None:
+        self.supports_direct_spool_ipc = direct_spool_ipc
         self.files: dict[str, bytes] = {}
         self.bastion_files: dict[str, bytes] = {}
         self.mux_sessions: dict[str, dict[str, object]] = {}
         self.last_script: str = ""
+        self.powershell_calls: int = 0
         self._lock = threading.Lock()
 
     def exec_powershell(self, script: str, timeout_sec: float = 120.0) -> ExecResult:
         with self._lock:
+            self.powershell_calls += 1
             self.last_script = script
             if "[Convert]::FromBase64String('" in script and "req_" in script:
                 b64_part = script.split("[Convert]::FromBase64String('", 1)[1].split("')", 1)[0]
@@ -240,10 +243,36 @@ class LoopbackControlChannel:
     def write_bytes(self, data: bytes, guest_path: str) -> None:
         with self._lock:
             self.files[guest_path] = data
+            if self.supports_direct_spool_ipc and "\\req_" in guest_path and guest_path.endswith(".json"):
+                env_json = json.loads(data.decode("utf-8"))
+                tx_id = env_json["tx_id"]
+                inner_cmd = base64.b64decode(env_json["payload_b64"]).decode("utf-8")
+                out_str = self._simulate_bastion_worker(inner_cmd)
+                res_payload = {
+                    "tx_id": tx_id,
+                    "exit_code": 0,
+                    "stdout_b64": base64.b64encode(out_str.encode("utf-8")).decode("ascii"),
+                    "stderr_b64": "",
+                    "duration_ms": 4,
+                }
+                res_guest = guest_path.replace(f"\\req_{tx_id}.json", f"\\res_{tx_id}.json")
+                self.files.pop(guest_path, None)
+                self.files[res_guest] = json.dumps(res_payload).encode("utf-8")
 
     def read_bytes(self, guest_path: str) -> bytes:
         with self._lock:
             return self.files[guest_path]
+
+    def try_read_bytes(
+        self, guest_path: str, *, truncate_after_read: bool = False
+    ) -> bytes | None:
+        with self._lock:
+            raw = self.files.get(guest_path)
+            if not raw:
+                return None
+            if truncate_after_read:
+                self.files.pop(guest_path, None)
+            return raw
 
     def write_file(self, local_path: Path, guest_path: str) -> None:
         with self._lock:
@@ -792,6 +821,76 @@ targets:
             self.assertIn("-p 2222", " ".join(ssh_cmd))
             self.assertIn("deploy@10.0.20.11", ssh_cmd)
             self.assertEqual(ssh_cmd[-2:], ["-L", "5432:127.0.0.1:5432"])
+
+    def test_zero_disk_stealth_direct_spool_ipc_polyglot_and_heuristic_scrubber(self) -> None:
+        with TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / ".env"
+            env_file.write_text(
+                "ENCLAVE_BASTION_USER=operator\nENCLAVE_BASTION_PASSWORD=BastionPass#2026\n",
+                encoding="utf-8",
+            )
+            vault = SecretVault(env_file=env_file)
+            scrubber = vault.scrubber
+
+            # 1. Verify heuristic SecretScrubber (PEM private keys, JWTs, URI passwords)
+            jwt_sample = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkRldk9wcyJ9.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+            pem_sample = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmU=\n-----END OPENSSH PRIVATE KEY-----"
+            uri_sample = "postgresql://admin:MyDbSecret!99@10.0.20.11:5432/enclave"
+            scrubbed_text = scrubber.scrub(f"Token={jwt_sample}\n{pem_sample}\nDSN={uri_sample}")
+            self.assertIn("[REDACTED_JWT]", scrubbed_text)
+            self.assertIn("[REDACTED_PRIVATE_KEY]", scrubbed_text)
+            self.assertIn("postgresql://admin:[REDACTED]@10.0.20.11:5432/enclave", scrubbed_text)
+            self.assertNotIn("MyDbSecret!99", scrubbed_text)
+
+            # 2. Verify POSIX shell polyglot + zero history + UserKnownHostsFile=NUL + VFS askpass staging
+            inv = build_remote_bash_invocation("id", as_root=False)
+            self.assertIn("command -v bash >/dev/null 2>&1 && exec bash || exec sh", inv)
+            m_b64 = re.search(r"echo '([A-Za-z0-9+/=]+)' \| base64 -d", inv)
+            self.assertIsNotNone(m_b64)
+            decoded_inv = base64.b64decode(m_b64.group(1)).decode("utf-8")  # type: ignore[union-attr]
+            self.assertIn("unset HISTFILE; export HISTFILE=/dev/null;", decoded_inv)
+
+            cfg = EnclaveConfig.from_dict(
+                {
+                    "appliance": {"hypervisor": "direct"},
+                    "bastion": {"user": "CORP\\operator"},
+                    "targets": {
+                        "app01": {
+                            "host": "10.0.20.11",
+                            "port": 22,
+                            "user": "deploy",
+                            "via": "bastion",
+                        }
+                    },
+                }
+            )
+            hop_ps = build_powershell_ssh_hop_script(
+                cfg.targets["app01"],
+                "id",
+                ssh_password="SshSecretPassword",
+                stage_dir=r"\\tsclient\C\EnclaveGateway\spool",
+            )
+            self.assertIn("UserKnownHostsFile=NUL", hop_ps)
+            self.assertIn(r"\\tsclient\C\EnclaveGateway\spool", hop_ps)
+
+            # 3. Verify Direct Spool File IPC (zero powershell.exe process creation on Appliance)
+            control = LoopbackControlChannel(direct_spool_ipc=True)
+            recorder = FlightRecorder(log_path=Path(tmp) / "audit.jsonl")
+            engine = EnclaveEngine(
+                config=cfg, vault=vault, recorder=recorder, control_override=control
+            )
+            res = engine.exec_node("@bastion", "Get-Date")
+            self.assertEqual(res.exit_code, 0)
+            self.assertEqual(
+                control.powershell_calls,
+                0,
+                "Expected Direct Spool File IPC to exchange envelopes without spawning powershell.exe on Appliance",
+            )
+
+            # 4. Verify Zero-CLI-Password (-RdpPasswordB64) in heal(update_credentials=True)
+            engine.heal(update_credentials=True)
+            self.assertIn("-RdpPasswordB64", control.last_script)
+            self.assertNotIn("BastionPass#2026", control.last_script)
 
 
 if __name__ == "__main__":
