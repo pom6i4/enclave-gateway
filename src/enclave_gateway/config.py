@@ -112,8 +112,10 @@ class BastionSpec:
     block_size_bytes: int = 4 * 1024 * 1024
 
     def __post_init__(self):
-        if type(self.block_size_bytes) is not int or not 1 <= self.block_size_bytes <= 48 * 1024 * 1024:
-            raise ValueError("block_size_bytes must be in 1..50331648")
+        # A binary block is embedded in a script, then in the 8 MiB envelope.
+        # Four MiB also fits the native worker's bounded stdin after encoding.
+        if type(self.block_size_bytes) is not int or not 1 <= self.block_size_bytes <= 4 * 1024 * 1024:
+            raise ValueError("block_size_bytes must be in 1..4194304")
         if type(self.parallel_streams) is not int or not 1 <= self.parallel_streams <= 64:
             raise ValueError("parallel_streams must be in 1..64")
 

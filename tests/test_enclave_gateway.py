@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import re
+import shutil
 import socket
 import struct
 import threading
@@ -1222,7 +1223,9 @@ class AuditRegressionTests(unittest.TestCase):
         thread = threading.Thread(target=run, daemon=True)
         thread.start()
         try:
-            yield Endpoint()
+            # Wire tests use socketpair; CPython on Windows omits AF_UNIX.
+            with patch.object(socket, "AF_UNIX", getattr(socket, "AF_UNIX", 1), create=True):
+                yield Endpoint()
         finally:
             left.close()
             thread.join(3.0)
@@ -1478,7 +1481,7 @@ class AuditRegressionTests(unittest.TestCase):
                 self.assertEqual(request("GET", "/mcp", headers=auth)[0], 405)
                 self.assertEqual(request("POST", "/mcp", b"{}", {**auth, "Content-Length": "-1"})[0], 413)
                 self.assertEqual(request("POST", "/mcp", b"{}", {**auth, "Content-Length": "x"})[0], 400)
-                self.assertEqual(request("POST", "/mcp", b"{}", {**auth, "Content-Type": "text/plain"})[0], 415)
+                self.assertEqual(request("POST", "/mcp", b"x" * 32768, {**auth, "Content-Type": "text/plain"})[0], 415)
                 payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"})
                 status, headers, body = request("POST", "/mcp", payload, auth)
                 self.assertEqual(status, 200)
@@ -1660,6 +1663,7 @@ class AuditRegressionTests(unittest.TestCase):
         supervisor = MultiPortForwardSupervisor(Mock(), {"x": spec})
         self.assertEqual(supervisor.tunnel_servers["x"].bind_host, "127.0.0.2")
 
+    @unittest.skipUnless(shutil.which("sh"), "POSIX shell runtime required")
     def test_ssh_posix_payload_executes_and_sudo_quoting_is_valid(self):
         marker = "literal ' quote $HOME ; Ж"
         invocation = build_remote_bash_invocation("printf '%s' " + __import__('shlex').quote(marker))
@@ -1695,7 +1699,7 @@ class AuditRegressionTests(unittest.TestCase):
         self.assertEqual(config.provider.dns_servers, ["10.0.1.53"])
         with TemporaryDirectory() as tmp:
             with self.assertRaises(FileNotFoundError): EnclaveConfig.load(Path(tmp) / "absent.yaml")
-        for value in (0, -1):
+        for value in (0, -1, 4*1024*1024+1, 48*1024*1024):
             with self.assertRaises(ValueError): EnclaveConfig.from_dict({"bastion": {"block_size_bytes": value}})
 
     def test_hypervisor_uefi_arch_options_and_stop_timeout_preserve_state(self):
@@ -1792,6 +1796,7 @@ class AuditRegressionTests(unittest.TestCase):
             with patch("enclave_gateway.control.qga_client.socket.socket", return_value=endpoint):
                 self.assertTrue(QgaClient(Path(tmp) / "socket").sync_guest_clock(1))
 
+    @unittest.skipUnless(shutil.which("sh"), "POSIX shell runtime required")
     def test_environment_decode_is_command_substitution_not_arithmetic(self):
         with TemporaryDirectory() as tmp:
             engine = self.make_engine(tmp)

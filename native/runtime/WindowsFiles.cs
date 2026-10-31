@@ -23,6 +23,8 @@ internal sealed class WindowsFiles : IDisposable
     [DllImport("ntdll.dll")] static extern int NtCreateFile(out SafeFileHandle handle,uint access,ref ObjectAttributes attributes,out IoStatus status,IntPtr allocation,uint fileAttributes,uint share,uint disposition,uint options,IntPtr ea,uint eaLength);
     [DllImport("ntdll.dll")] static extern int NtQueryDirectoryFile(SafeFileHandle handle,IntPtr evt,IntPtr apc,IntPtr context,out IoStatus status,IntPtr buffer,uint length,int infoClass,[MarshalAs(UnmanagedType.U1)]bool single,IntPtr name,[MarshalAs(UnmanagedType.U1)]bool restart);
     [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetFileInformationByHandle(SafeFileHandle handle,out FileInfo information);
+    [DllImport("ntdll.dll")] static extern int NtSetInformationFile(SafeFileHandle handle,out IoStatus status,IntPtr data,uint size,int infoClass);
+    [DllImport("ntdll.dll")] static extern uint RtlNtStatusToDosError(int status);
     [DllImport("kernel32.dll",SetLastError=true)] static extern bool SetFileInformationByHandle(SafeFileHandle handle,int type,IntPtr data,uint size);
 
     static string[] Parts(string path)
@@ -53,7 +55,8 @@ internal sealed class WindowsFiles : IDisposable
             var value=new UnicodeString { Length=(ushort)length,MaximumLength=(ushort)(length+2),Buffer=text };
             unicode=Marshal.AllocHGlobal(Marshal.SizeOf<UnicodeString>()); Marshal.StructureToPtr(value,unicode,false);
             var attributes=new ObjectAttributes { Length=Marshal.SizeOf<ObjectAttributes>(),RootDirectory=parent.DangerousGetHandle(),ObjectName=unicode,Attributes=0x40 };
-            int status=NtCreateFile(out result,access|Sync,ref attributes,out _,IntPtr.Zero,0,1,disposition,0x200000|0x20|(directory?1u:0x40u),IntPtr.Zero,0);
+            // Allow writes within an opened directory while denying its rename/delete.
+            int status=NtCreateFile(out result,access|Sync,ref attributes,out _,IntPtr.Zero,0,directory?3u:1u,disposition,0x200000|0x20|(directory?1u:0x40u),IntPtr.Zero,0);
             if (status<0) throw new IOException("Handle-relative open failed: "+status.ToString("x"));
             Inspect(result,directory); return result;
         }
@@ -189,12 +192,16 @@ internal sealed class WindowsFiles : IDisposable
                     using(targetParent)
                     {
                         byte[] bytes=Encoding.Unicode.GetBytes(targetName); int head=IntPtr.Size==8?20:12;
-                        IntPtr data=Marshal.AllocHGlobal(head+bytes.Length);
+                        int size=(IntPtr.Size==8?24:16)+bytes.Length;
+                        IntPtr data=Marshal.AllocHGlobal(size);
                         try
                         {
-                            for(int i=0;i<head;i++) Marshal.WriteByte(data,i,0);
+                            for(int i=0;i<size;i++) Marshal.WriteByte(data,i,0);
                             Marshal.WriteInt32(data,1); Marshal.WriteIntPtr(data,IntPtr.Size==8?8:4,targetParent.DangerousGetHandle()); Marshal.WriteInt32(data,head-4,bytes.Length); Marshal.Copy(bytes,0,data+head,bytes.Length);
-                            if(!SetFileInformationByHandle(handle,3,data,(uint)(head+bytes.Length))) throw new Win32Exception();
+                            // The Win32 rename wrapper rejects non-null RootDirectory; the NT
+                            // operation keeps the destination anchored to the retained handle.
+                            int status=NtSetInformationFile(handle,out _,data,(uint)size,10);
+                            if(status<0) throw new Win32Exception((int)RtlNtStatusToDosError(status));
                         }
                         finally { Marshal.FreeHGlobal(data); }
                     }
@@ -203,7 +210,7 @@ internal sealed class WindowsFiles : IDisposable
             else if(action=="remove")
             {
                 SafeFileHandle handle;
-                try { handle=Open(parent,name,false,Delete); }
+                try { handle=Open(parent,name,false,Delete|0x80); }
                 catch(IOException) { return new {ok=true}; }
                 using(handle)
                 {

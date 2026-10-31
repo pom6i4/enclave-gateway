@@ -22,8 +22,9 @@ try
     Console.WriteLine(JsonSerializer.Serialize(WindowsFiles.Request(document.RootElement)));
     return 0;
 }
-catch
+catch (Exception error)
 {
-    Console.WriteLine("{\"error\":\"native_operation_failed\"}");
+    int code = error is System.ComponentModel.Win32Exception native ? native.NativeErrorCode : error.HResult;
+    Console.WriteLine(JsonSerializer.Serialize(new { error = "native_operation_failed", native_code = code }));
     return 1;
 }

@@ -11,6 +11,7 @@ import hmac
 import math
 import urllib.parse
 import secrets
+import socket
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -50,6 +51,26 @@ class BoundedHttpServer(ThreadingHTTPServer):
         except BaseException:
             self._slots.release()
             raise
+
+    def shutdown_request(self, request):
+        # A rejected POST can leave bytes in the TCP receive queue. Send FIN
+        # before a bounded drain so Windows does not reset the error response
+        # while closing a socket with an unread body. Never wait for a full
+        # declared body or allow an untrusted sender to prolong shutdown.
+        try:
+            request.shutdown(socket.SHUT_WR)
+            deadline = time.monotonic() + 0.1
+            remaining = 65536
+            while remaining and (wait := deadline - time.monotonic()) > 0:
+                request.settimeout(wait)
+                data = request.recv(min(8192, remaining))
+                if not data:
+                    break
+                remaining -= len(data)
+        except OSError:
+            pass
+        finally:
+            super().shutdown_request(request)
 
     def process_request_thread(self, request, address):
         try:
@@ -246,7 +267,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     },
     {
         "name": "node_sync",
-        "description": "Batch-synchronize an entire directory between the Host and '@appliance', '@bastion', or a TargetNode via streaming tar.gz.",
+        "description": "Synchronize a directory between the Host and a node; scoped grants commit each file atomically and retain extra destination files.",
         "inputSchema": {
             "type": "object",
             "properties": {

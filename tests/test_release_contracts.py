@@ -86,7 +86,9 @@ class ReleaseContracts(unittest.TestCase):
             files=list((ROOT/"src/enclave_gateway/agents").glob("*.ps1"))+list((ROOT/"scripts").rglob("*.ps1"))+list(root.glob("*.ps1"))
             listing=root/"files.json"; listing.write_text(json.dumps([str(path) for path in files]))
             script="$bad=0; foreach($p in (Get-Content -LiteralPath '"+str(listing).replace("'","''")+"' -Raw | ConvertFrom-Json)) {$errors=$null; [void][Management.Automation.Language.Parser]::ParseFile($p,[ref]$null,[ref]$errors); if($errors.Count) {$errors | Out-String | Write-Output; $bad++}}; exit $bad"
-            result=subprocess.run([power,"-NoProfile","-Command",script],capture_output=True,text=True,timeout=30)
+            timeout=float(os.environ.get("EGW_TEST_POWERSHELL_TIMEOUT_SEC", "30"))
+            self.assertTrue(30 <= timeout <= 240, "Parser fixture timeout must be within 30..240 seconds")
+            result=subprocess.run([power,"-NoProfile","-Command",script],capture_output=True,text=True,timeout=timeout)
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
 
 
@@ -124,7 +126,7 @@ class NativeHelperTests(unittest.TestCase):
 
     @unittest.skipUnless(os.environ.get("EGW_TEST_POWERSHELL"),"PowerShell wrapper runtime is opt-in")
     def test_real_wrapper_restores_process_environment(self):
-        helper=str(Path(os.environ["EGW_TEST_HELPER"]).with_suffix(""))
+        helper=str(Path(os.environ["EGW_TEST_HELPER"]).with_suffix(".exe" if os.name=="nt" else ""))
         # Explicit unsigned mode is confined to this synthetic local fixture.
         wrapped=_wrap_with_askpass_ps("& $env:SSH_ASKPASS 'ignored prompt'", "fixture-value", "fixture",helper_path=helper,require_signed=False)
         script="$env:EGW_ASKPASS_B64='prior';\n"+wrapped+"\nif ($env:EGW_ASKPASS_B64 -ne 'prior') {throw 'Environment was not restored'}"

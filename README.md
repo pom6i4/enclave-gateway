@@ -7,7 +7,7 @@
 Local security audit and compatibility limits: [31 October 2026 audit](docs/SECURITY_AUDIT_2026-10-31.md).
 Functional follow-up: [scoped sync, provider lifecycle, OS isolation and running-worker verification](docs/FUNCTIONAL_HARDENING_2026-10-31.md).
 
-Operation journals, principal grants, isolated qualification and Windows release procedure: [hardening guide](docs/HARDENING_AND_QUALIFICATION.md). Windows, RDPdr, vendor-driver and Authenticode acceptance remain separate from local runtime tests.
+Operation journals, principal grants, isolated qualification and Windows release procedure: [hardening guide](docs/HARDENING_AND_QUALIFICATION.md). [Disposable Windows qualification](docs/WINDOWS_LAB_QUALIFICATION_2026-11-01.md) records actual Windows, RDPdr, account isolation and lab-signing checks with their deployment boundaries.
 
 ## Overview
 

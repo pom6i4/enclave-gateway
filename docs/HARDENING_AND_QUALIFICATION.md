@@ -9,10 +9,10 @@ The [functional follow-up](FUNCTIONAL_HARDENING_2026-10-31.md) extends scoped sy
 | Qualification | Explicit interpreter matrix, real PowerShell worker on disposable files and loopback, Windows entry point, isolated VM seed generator | Preparing a seed or cross-compiling does not establish Windows/QGA/RDPdr acceptance |
 | Transactions | Private SQLite journal, stable operation IDs, owner-scoped results, restart lookup, cancellation and expired-operation reconciliation | Ambiguous work is never automatically replayed; remote effects are not rolled back |
 | Authorization | Authenticated principal → tools, nodes, file roots and destination CIDRs; tunnel ownership; filtered discovery | This is a service authorization boundary. Shell/SQL and shared worker accounts require separate trust decisions |
-| Multiplexing | Asynchronous connect, bounded nonblocking socket turns, partial writes, separate EOF/half-close, bounded sessions | Real redirected-drive latency and Windows socket/resource behavior need an isolated Windows stand |
+| Multiplexing | Asynchronous connect, bounded nonblocking socket turns, partial writes, separate EOF/half-close, bounded sessions | Disposable Windows and redirected-drive results are recorded below; deployment latency needs its own measurement |
 | Deadlines | One monotonic budget across tracked nested operations, QGA polling, stripes and SSH stages; cancellation notifications can be read while stdio work runs | OS calls and bounded best-effort cleanup can outlive the foreground budget; guest/SSH descendant termination is not confirmed |
 | Providers | Revisioned adapters, artifact/version/architecture/signature evidence, read-only public CLI only for explicit matches | No guessed proprietary import commands, automatic key import or driver qualification |
-| Windows release | Native askpass, default signature/publisher enforcement, allow-listed package, signing/verification/install scripts | Artifacts built locally are unsigned. No certificate or Windows signing policy has been exercised |
+| Windows release | Native askpass, default signature/publisher enforcement, allow-listed package, signing/verification/install scripts | Build outputs remain unsigned; disposable lab trust/AllSigned checks are recorded separately from production signing |
 
 ## Durable operation identity
 
@@ -80,7 +80,7 @@ provider:
   expected_publisher: ''
 ```
 
-Populate those fields from separately approved installed artifacts, not from a guessed version or merely a familiar filename. Architecture matching uses the PE machine field; version matching is exact; publisher matching requires both an exact certificate subject and a valid Authenticode signature. A matching configuration remains distinct from functional driver/VPN qualification. Service/network observations are diagnostic evidence, not key import or tunnel acceptance. No real provider or key was used for local validation.
+Populate those fields from separately approved installed artifacts, not from a guessed version or merely a familiar filename. Architecture matching uses the PE machine field; version matching is exact; publisher matching requires both an exact certificate subject and a valid Authenticode signature. A matching configuration remains distinct from functional driver/VPN qualification. Service/network observations are diagnostic evidence, not key import or tunnel acceptance. The earlier local checks used no provider or key. The separate Windows record covers a real WireGuard driver with newly generated disposable keys.
 
 ## Native credential helper and Windows release
 
@@ -118,7 +118,7 @@ Only on a separate signing workstation, with its own code-signing certificate al
 
 The operator must authenticate the installer/verifier entry point through the approved signing policy before running it. A thumbprint is a certificate identifier, not a request to export its private key. The signing script uses the store, SHA-256, timestamping and post-sign verification. The manifest is an inventory of individually signed files, not an independently signed release metadata or anti-rollback system. Installation restricts user/SYSTEM ACLs and copies managed files; it does not launch agents, reconnect RDP or change VPN state.
 
-The bootstrap accepts `-TrustedSignerThumbprints` (or `-TrustedSignerThumbprintsCsv` for a native startup command), keeps the redirected `SourceSpool` separate from the installed `WorkerPath`, and rechecks copied scripts before startup registration. `-AllowUnsignedLab` is only for disposable fixtures and is refused for persistent startup. No production startup registration or Windows signing was performed. Existing session credential-refresh behavior and broader endpoint execution-policy acceptance are outside this helper change.
+The bootstrap forwards an explicitly selected `-RuntimeHelper` to immediate and registered startup and uses the absolute system PowerShell path. Relative runtime paths are resolved against the PowerShell working directory before persistence. UTF-8 persistent parameters live in `bastion_startup.json` beside the signed installed scripts; protect that directory with the account's private ACL. A SID-specific task with logon and remote-reconnect triggers uses `-UseStartupConfiguration`, the current user's interactive token, limited privileges, no stored password and an unlimited resident execution time. Duplicate task instances are ignored; registration restarts only that SID's managed task and returns `worker_health: requires_fresh_attestation`, without launching a second foreground worker. A successful registration removes the legacy Run value. Persistent startup waits up to 30 seconds for the redirected share. It accepts `-TrustedSignerThumbprints` (or `-TrustedSignerThumbprintsCsv` for a native startup command), keeps the redirected `SourceSpool` separate from the installed `WorkerPath`, and rechecks copied scripts before startup registration. `-AllowUnsignedLab` is only for disposable fixtures and is refused for persistent startup. Production signing and startup require their own acceptance; disposable Windows signing and startup checks are recorded separately below. Existing session credential-refresh behavior and broader endpoint execution-policy acceptance are outside this helper change.
 
 ## Reproducible isolated checks
 
@@ -158,7 +158,7 @@ The Windows runner records only the Windows-local test scope. QGA/RDPdr/driver q
 
 ## Validation recorded locally
 
-The committed procedure is independent of machine-specific executable paths and runtime reports, which stay under ignored `build/qualification`. See the [local qualification record](LOCAL_QUALIFICATION_2026-10-31.md) for exact versions and metrics. No Windows guest, real RDP redirector, vendor driver, customer key, signing certificate or customer system was used. Linux execution and Windows x64/ARM64 execution remain unverified in this session.
+The committed procedure is independent of machine-specific executable paths and runtime reports, which stay under ignored `build/qualification`. See the [local qualification record](LOCAL_QUALIFICATION_2026-10-31.md) for exact versions and metrics. That earlier session used disposable local files and loopback. Its Windows status is historical; subsequent isolated Windows evidence is recorded separately below. Linux execution remains outside these records.
 
 ## Primary references
 
@@ -166,3 +166,29 @@ The committed procedure is independent of machine-specific executable paths and 
 - [Python sqlite3](https://docs.python.org/3/library/sqlite3.html) documents the SQLite interface and transaction controls used by the Host journal.
 - [Socket.Poll](https://learn.microsoft.com/en-us/dotnet/api/system.net.sockets.socket.poll) documents readiness checks used by bounded worker turns.
 - [Set-AuthenticodeSignature](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.security/set-authenticodesignature) documents Windows signing with a certificate and timestamp server; its availability does not establish a signed release.
+
+## Signed disposable Windows checks
+
+The [Windows lab record](WINDOWS_LAB_QUALIFICATION_2026-11-01.md) supersedes the earlier session's Windows status. It records each actual OS, architecture and acceptance boundary separately.
+
+Use an isolated guest with synthetic accounts and a newly created lab code-signing certificate. Keep its private key inside that guest. Install the public certificate in that guest's trusted stores and sign the runtime and worker copies. Supply their exact hashes and signer to qualification; production signing and enterprise execution policy require their own evidence.
+
+```powershell
+./scripts/qualification/windows.ps1 -PythonExecutables @('C:\lab\python\python.exe') `
+  -RuntimeHelper C:\lab\package\egw-runtime.exe -TrustedSigner '<lab-thumbprint>' `
+  -Transactions 10000 -ExecEvery 10 -OutputDir C:\lab\results
+python scripts/qualification/native_windows.py --runtime C:\lab\package\egw-runtime.exe `
+  --trusted-signer '<lab-thumbprint>' --output C:\lab\results\native.json
+```
+
+`native_windows.py --time-scale 8` is available for explicitly labeled slow emulation (valid range 1..8, default 1). It scales only the fixture waits and its signature-stage cap; verification still cannot extend an active operation deadline. It does not establish normal timing acceptance. The optional parser fixture accepts `EGW_TEST_POWERSHELL_TIMEOUT_SEC` in 30..240 seconds, default 30.
+
+`ExecEvery 10` reports 1,000 command executions and 9,000 mux I/O iterations for 10,000 iterations. The default remains command execution on every iteration. Functional cases also exercise a full uncompressed 4 MiB block, concurrent native launches and mux fairness. Reports retain the maximum command duration and resource samples. Failed runs retain worker logs, packet metadata and relevant durable transaction records alongside the report.
+
+The transport accepts blocks from 1 byte through 4 MiB. Larger configured values are rejected because the nested Base64 request and native stdin envelope must remain within their limits.
+
+For two pre-provisioned standard accounts, `scripts/qualification/windows_accounts.py --configuration C:\lab\accounts-fixture.json --output C:\lab\results\accounts.json` checks real SID launch, private file/environment denial, wrong-SID rejection, a 100 KiB SSH script and controller-tool denial. The protected fixture configuration references the broker policy, private environment, isolation map and each account's canary. Optional `sync` fixtures supply source/remote/received directories and expected file hashes within the granted private data roots; they test scoped push/pull, exclusions and preservation of extra destination files. The checker never creates accounts or changes their passwords.
+
+`rdpdr.py` uses an already established redirected drive and a signed worker running in that Windows RDP session. Its protected configuration contains the host `spool`, guest `remote_spool`, dedicated guest `remote_dir`, unique `tx_id`, approved `worker_sha256`, `runtime_sha256`, `sid` and `signer`. The signed evidence must identify a redirected spool and a nonzero Windows session. Run the first phase with `--phase before --output build/qualification/rdp/before.json`; reconnect the disposable RDP session and restart its owned worker; then run `--phase after --output build/qualification/rdp/after.json` with the same configuration. It verifies a 4 MiB + 1 byte round trip, a changed worker instance and rejection of replay without repeating the marker side effect. The checker opens no login and consumes no credentials.
+
+For bootstrap from a custom managed installation, pass `-RuntimeHelper` explicitly or place the runtime under the selected `InstallDir\bin`. Persistent startup records that exact runtime path and verifies its publisher before registration. Qualification tasks and startup entries belong only to the disposable lab account.

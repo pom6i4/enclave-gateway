@@ -62,7 +62,7 @@ class Backend:
         command=[spec.get('python',sys.executable),'-m','enclave_gateway.cli','--config',str(configuration),'mcp',
                  '--policy',str(policy),'--principal',principal,'--worker-identity-handshake',
                  '--worker-state-dir',str(Path(spec.get('state_dir',configuration.parent/'state')).resolve())]
-        environment={key:value for key,value in os.environ.items() if key in ('PATH','SystemRoot','WINDIR','PROGRAMFILES','PROGRAMFILES(X86)')}
+        environment={key:value for key,value in os.environ.items() if key.upper() in ('PATH','SYSTEMROOT','SYSTEMDRIVE','WINDIR','COMSPEC','PATHEXT','PROGRAMFILES','PROGRAMFILES(X86)')}
         environment.update(spec.get('environment',{}))
         options={}
         request=None

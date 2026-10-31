@@ -56,6 +56,7 @@ internal static class OwnedJob
     static string Quote(string value)
     {
         if(value.Contains('\0')) throw new IOException("Invalid argument");
+        if(value.Length>0 && !value.Any(c=>char.IsWhiteSpace(c) || c=='\"')) return value;
         var output=new StringBuilder("\""); int slashes=0;
         foreach(char c in value) { if(c=='\\') {slashes++; continue;} if(c=='"') {output.Append('\\',slashes*2+1);output.Append(c);} else {output.Append('\\',slashes);output.Append(c);} slashes=0; }
         output.Append('\\',slashes*2);output.Append('"');return output.ToString();

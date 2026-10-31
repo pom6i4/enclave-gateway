@@ -233,8 +233,14 @@ class QgaClient:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            with self._connect_synced(min(remaining, 10.0)) as (sock, reader):
-                status = self._request(sock, reader, "guest-exec-status", {"pid": pid})
+            try:
+                with self._connect_synced(min(remaining, 10.0)) as (sock, reader):
+                    status = self._request(sock, reader, "guest-exec-status", {"pid": pid})
+            except (TimeoutError, ConnectionError):
+                # Reconnecting may temporarily fail while the guest is busy.
+                # Retry only this read-only lookup of an acknowledged process;
+                # never resubmit guest-exec after a lost dispatch acknowledgement.
+                continue
             if status.get("exited"):
                 def decode(key):
                     return base64.b64decode(status.get(key, ""), validate=True).decode("utf-8", errors="replace").replace("\r\n", "\n")
@@ -400,7 +406,8 @@ class DirectHostControlChannel:
             tmp.unlink(missing_ok=True)
 
     def read_bytes(self, guest_path: str) -> bytes:
-        return self._map_path(guest_path).read_bytes()
+        from enclave_gateway.control.published import read_shared
+        return read_shared(self._map_path(guest_path))
 
     def write_file(self, local_path: Path, guest_path: str) -> None:
         self.write_bytes(local_path.read_bytes(), guest_path)
@@ -425,9 +432,8 @@ class DirectHostControlChannel:
         self, guest_path: str, *, truncate_after_read: bool = False
     ) -> bytes | None:
         target = self._map_path(guest_path)
-        if not target.is_file():
-            return None
-        data = target.read_bytes()
+        from enclave_gateway.control.published import try_read_published
+        data = try_read_published(target)
         if truncate_after_read and data:
             target.unlink(missing_ok=True)
         return data if data else None

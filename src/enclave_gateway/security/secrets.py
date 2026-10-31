@@ -53,24 +53,34 @@ def verify_command_safety(command: str, confirm_destructive: bool = False) -> No
 class SecretScrubber:
     """Redacts sensitive credentials from stdout, stderr, logs, and RPC responses."""
 
-    _HEURISTIC_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-        (
-            re.compile(
-                r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----"
-            ),
-            "[REDACTED_PRIVATE_KEY]",
-        ),
-        (
-            re.compile(
-                r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"
-            ),
-            "[REDACTED_JWT]",
-        ),
-        (
-            re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://[^:/@\s]+:)([^@\s]+)(@)"),
-            r"\1[REDACTED]\3",
-        ),
-    ]
+    _PEM_BEGIN = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
+    _PEM_END = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY-----")
+    _JWT_CANDIDATE = re.compile(r"[A-Za-z0-9_.-]+")
+    _URI_PASSWORD = re.compile(r"(://[^:/@\s]+:)([^@\s]+)\Z")
+
+    @classmethod
+    def _mask_private_keys(cls, text):
+        parts=[]
+        cursor=0
+        while begin:=cls._PEM_BEGIN.search(text,cursor):
+            end=cls._PEM_END.search(text,begin.end())
+            stop=end.end() if end else len(text)
+            parts.extend((text[cursor:begin.start()],
+                          '[REDACTED_PRIVATE_KEY]'+'\n'*text.count('\n',begin.start(),stop)))
+            cursor=stop
+            if not end:break
+        parts.append(text[cursor:])
+        return ''.join(parts)
+
+    @staticmethod
+    def _mask_jwt(match):
+        candidate = match.group(0)
+        parts = candidate.split('.')
+        for header, payload, signature in zip(parts, parts[1:], parts[2:]):
+            start = header.find('eyJ')
+            if start >= 0 and len(header)-start >= 11 and payload.startswith('eyJ') and len(payload) >= 11 and len(signature) >= 8:
+                return '[REDACTED_JWT]'
+        return candidate
 
     def __init__(self, secrets: list[str] | None = None) -> None:
         self._tokens: set[str] = set()
@@ -102,13 +112,25 @@ class SecretScrubber:
         result = text
         with self._lock:
             tokens = sorted(self._tokens, key=len, reverse=True)
+        # Detect structured secrets before registered fragments can replace
+        # their delimiters (for example a credential literally equal to PRIVATE).
+        result = self._mask_private_keys(result)
+        # Tokenize before matching credentials. Retrying an unbounded scheme or
+        # JWT prefix at every character makes long scripts quadratic to scrub.
+        if '.eyJ' in result:
+            result = self._JWT_CANDIDATE.sub(self._mask_jwt, result)
+        if '://' in result and '@' in result:
+            pieces = result.split('@')
+            for index in range(len(pieces)-1):
+                piece=pieces[index]
+                start=len(piece)
+                while start and not piece[start-1].isspace():
+                    start-=1
+                pieces[index]=piece[:start]+self._URI_PASSWORD.sub(r"\1[REDACTED]",piece[start:])
+            result = '@'.join(pieces)
         for token in tokens:
             if token in result:
                 result = result.replace(token, "[REDACTED]" + "\n" * token.count("\n"))
-        for pattern, replacement in self._HEURISTIC_PATTERNS:
-            result = pattern.sub(lambda match: match.expand(replacement) + "\n" * match.group(0).count("\n"), result)
-        result = re.sub(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*",
-                        lambda match: "[REDACTED_PRIVATE_KEY]" + "\n" * match.group(0).count("\n"), result)
         # Captured output can end midway through a registered credential. Redact
         # boundary fragments conservatively; never attempt to reconstruct secrets.
         for token in tokens:

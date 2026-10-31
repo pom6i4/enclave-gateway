@@ -20,6 +20,22 @@ ROOT=Path(__file__).resolve().parents[1]
 
 
 class AttestationTests(unittest.TestCase):
+    def test_signature_stage_cap_cannot_extend_operation_deadline(self):
+        from enclave_gateway.security.native import verified_runtime
+        from enclave_gateway.operations.context import OperationContext,activate
+        from unittest.mock import Mock
+        with TemporaryDirectory() as temporary:
+            helper=Path(temporary)/'runtime.exe';helper.write_bytes(b'fixture')
+            with patch.dict(os.environ,{'SystemRoot':r'C:\Windows'}),patch('enclave_gateway.security.native.subprocess.run',return_value=Mock(returncode=0)) as execute:
+                verified_runtime(str(helper),['A'*40])
+                self.assertEqual(execute.call_args.kwargs['timeout'],15)
+                context=OperationContext('fixture','@appliance','fixture',time.monotonic()+0.5)
+                with activate(context):verified_runtime(str(helper),['A'*40],verification_timeout_sec=120)
+                self.assertGreater(execute.call_args.kwargs['timeout'],0)
+                self.assertLessEqual(execute.call_args.kwargs['timeout'],0.5)
+                for value in (0,121,float('inf'),float('nan')):
+                    with self.assertRaises(ValueError):verified_runtime(str(helper),verification_timeout_sec=value)
+
     def test_fresh_release_account_and_execution_identity(self):
         nonce='a'*64
         evidence={'protocol_revision':1,'version':'0.3.0','loaded_signature_status':'Valid','loaded_signer':'D'*40,'runtime_signature_status':'Valid','runtime_signer':'D'*40,'nonce':nonce,'instance_id':'b'*32,'loaded_sha256':'c'*64,'current_sha256':'c'*64,

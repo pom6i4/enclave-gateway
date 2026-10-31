@@ -1,5 +1,7 @@
 # Functional hardening: remaining implementation work
 
+This record describes the initial implementation. Subsequent actual Windows checks and fixes are recorded in the [Windows lab qualification](WINDOWS_LAB_QUALIFICATION_2026-11-01.md).
+
 This change implements six additional mechanisms. Local checks and prepared Windows checks are listed separately below. It does not use a customer enclave, client key container, certificate private key, or a live client RDP/VPN session.
 
 | Mechanism | Implemented interface | Configuration/deployment boundary |
