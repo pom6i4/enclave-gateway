@@ -168,6 +168,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Confirm execution of destructive commands.",
     )
+    p_exec.add_argument(
+        "--env",
+        action="append",
+        default=[],
+        help="Inject environment variable KEY=VALUE in-memory before running the script.",
+    )
+    p_exec.add_argument(
+        "--secret-env",
+        action="append",
+        default=[],
+        help="Inject secret from OS Keychain/.env as KEY or KEY=VAULT_KEY and scrub from output.",
+    )
     p_exec.add_argument("--timeout", type=float, default=120.0)
 
     p_cp = sub.add_parser(
@@ -185,6 +197,42 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-delta",
         action="store_true",
         help="Disable 4 MB block-level SHA-256 delta synchronization.",
+    )
+
+    p_sync = sub.add_parser(
+        "sync",
+        help="Batch-synchronize a directory via streaming tar.gz (<local_dir> <node>:<remote_dir> or <node>:<remote_dir> <local_dir>).",
+    )
+    p_sync.add_argument("source", help="Source directory or <node>:<remote_dir>.")
+    p_sync.add_argument(
+        "destination", help="Destination directory or <node>:<remote_dir>."
+    )
+    p_sync.add_argument(
+        "--sudo",
+        action="store_true",
+        help="Extract or pack with sudo privileges on a Linux TargetNode.",
+    )
+    p_sync.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        help="Additional glob pattern to exclude (can be passed multiple times).",
+    )
+
+    p_ssh = sub.add_parser(
+        "ssh",
+        help="Launch an interactive OpenSSH session to a TargetNode over `egw stdio-proxy`.",
+    )
+    p_ssh.add_argument("node", help="TargetNode name from enclave.yaml.")
+    p_ssh.add_argument(
+        "--print-cmd",
+        action="store_true",
+        help="Print the constructed ssh command line instead of executing it.",
+    )
+    p_ssh.add_argument(
+        "ssh_args",
+        nargs=argparse.REMAINDER,
+        help="Optional extra arguments passed to the host ssh client.",
     )
 
     p_key = sub.add_parser(
@@ -413,11 +461,33 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "exec":
+        env_map: dict[str, str] = {}
+        for item in args.env or []:
+            k, sep, v = str(item).partition("=")
+            if not sep or not k:
+                print(
+                    f"Error: invalid --env '{item}' (expected KEY=VALUE).",
+                    file=sys.stderr,
+                )
+                return 1
+            env_map[k] = v
+
+        secret_env_map: dict[str, str] = {}
+        for item in args.secret_env or []:
+            raw_item = str(item)
+            if "=" in raw_item:
+                ek, _, vk = raw_item.partition("=")
+                secret_env_map[ek] = vk
+            else:
+                secret_env_map[raw_item] = raw_item
+
         res = engine.exec_node(
             args.node,
             args.script,
             as_root=args.sudo,
             confirm_destructive=args.confirm_destructive,
+            env=env_map,
+            secret_env=secret_env_map,
             timeout_sec=args.timeout,
             actor="cli",
         )
@@ -458,6 +528,51 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(json.dumps(meta, indent=2, ensure_ascii=False))
         return 0
+
+    if args.command == "sync":
+        src_node, src_path = _parse_copy_spec(args.source)
+        dst_node, dst_path = _parse_copy_spec(args.destination)
+        if src_node is None and dst_node is not None:
+            meta = engine.sync_directory(
+                "push",
+                src_path,
+                dst_node,
+                dst_path,
+                as_root=args.sudo,
+                exclude=args.exclude,
+                actor="cli",
+            )
+        elif src_node is not None and dst_node is None:
+            meta = engine.sync_directory(
+                "pull",
+                dst_path,
+                src_node,
+                src_path,
+                as_root=args.sudo,
+                exclude=args.exclude,
+                actor="cli",
+            )
+        else:
+            print(
+                "Error: specify exactly one remote endpoint (<local_dir> <node>:<remote_dir> or <node>:<remote_dir> <local_dir>).",
+                file=sys.stderr,
+            )
+            return 1
+        print(json.dumps(meta, indent=2, ensure_ascii=False))
+        return 0
+
+    if args.command == "ssh":
+        extra = list(args.ssh_args or [])
+        if extra and extra[0] == "--":
+            extra = extra[1:]
+        ssh_cmd = engine.build_ssh_command(
+            args.node, extra_args=extra, config_path=args.config
+        )
+        if args.print_cmd:
+            print(" ".join(ssh_cmd))
+            return 0
+        proc = subprocess.run(ssh_cmd, check=False)
+        return proc.returncode
 
     if args.command == "ssh-copy-id":
         res = engine.bootstrap_ssh_key(args.node, actor="cli")

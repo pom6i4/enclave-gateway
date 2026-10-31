@@ -3,11 +3,26 @@
 from __future__ import annotations
 
 import base64
+import fnmatch
 import json
+import re
+import secrets
 import shlex
+import tarfile
 import time
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
+
+DEFAULT_SYNC_EXCLUDES = (
+    ".git",
+    "__pycache__",
+    ".DS_Store",
+    ".venv",
+    "node_modules",
+    "*.pyc",
+)
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 from enclave_gateway.audit.flight_recorder import FlightRecorder
 from enclave_gateway.config import EnclaveConfig, TargetNodeSpec
@@ -233,6 +248,45 @@ ConvertTo-Json $out -Compress
         )
         return res
 
+    def _inject_env_into_script(
+        self,
+        script: str,
+        *,
+        is_powershell: bool,
+        env: dict[str, str] | None = None,
+        secret_env: dict[str, str] | None = None,
+    ) -> str:
+        merged: dict[str, str] = {}
+        for k, v in (env or {}).items():
+            if not _ENV_KEY_RE.match(k):
+                raise ValueError(f"Invalid environment variable name: {k}")
+            merged[k] = str(v)
+
+        for env_key, vault_key in (secret_env or {}).items():
+            if not _ENV_KEY_RE.match(env_key):
+                raise ValueError(f"Invalid environment variable name: {env_key}")
+            val = self.vault.get(vault_key)
+            if not val:
+                raise KeyError(
+                    f"Secret '{vault_key}' for environment variable '{env_key}' is not set in SecretVault"
+                )
+            self.vault.scrubber.register(val)
+            merged[env_key] = val
+
+        if not merged:
+            return script
+
+        prefix_lines: list[str] = []
+        for k, val_str in merged.items():
+            val_b64 = base64.b64encode(val_str.encode("utf-8")).decode("ascii")
+            if is_powershell:
+                prefix_lines.append(
+                    f"$env:{k} = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{val_b64}'))"
+                )
+            else:
+                prefix_lines.append(f"export {k}=\"$(echo '{val_b64}' | base64 -d)\"")
+        return "\n".join(prefix_lines) + "\n" + script
+
     def exec_node(
         self,
         node: str,
@@ -240,17 +294,23 @@ ConvertTo-Json $out -Compress
         *,
         as_root: bool = False,
         confirm_destructive: bool = False,
+        env: dict[str, str] | None = None,
+        secret_env: dict[str, str] | None = None,
         timeout_sec: float = 120.0,
         actor: str = "cli",
     ) -> ExecResult:
         """Execute a script on @appliance, @bastion, or a named TargetNode."""
         verify_command_safety(script, confirm_destructive=confirm_destructive)
         tx_id = generate_tx_id()
+        is_ps = node in ("@appliance", "appliance", "@bastion", "bastion")
+        full_script = self._inject_env_into_script(
+            script, is_powershell=is_ps, env=env, secret_env=secret_env
+        )
 
         if node in ("@appliance", "appliance"):
-            raw_res = self.control.exec_powershell(script, timeout_sec=timeout_sec)
+            raw_res = self.control.exec_powershell(full_script, timeout_sec=timeout_sec)
         elif node in ("@bastion", "bastion"):
-            raw_res = self.rdp_vfs.exec_bastion(script, timeout_sec=timeout_sec)
+            raw_res = self.rdp_vfs.exec_bastion(full_script, timeout_sec=timeout_sec)
         else:
             target = self._resolve_target(node)
             ssh_pw = (
@@ -266,7 +326,7 @@ ConvertTo-Json $out -Compress
             )
             raw_res = hop.exec_node(
                 target,
-                script,
+                full_script,
                 as_root=as_root,
                 ssh_password=ssh_pw,
                 sudo_password=sudo_pw,
@@ -381,6 +441,221 @@ ConvertTo-Json $out -Compress
             "as_root": as_root,
             "local_path": str(lpath),
             "remote_path": remote_path,
+            "sha256": sha,
+            "duration_ms": duration_ms,
+        }
+
+    def sync_directory(
+        self,
+        direction: str,
+        local_dir: str | Path,
+        node: str,
+        remote_dir: str,
+        *,
+        as_root: bool = False,
+        exclude: list[str] | None = None,
+        timeout_sec: float = 900.0,
+        actor: str = "cli",
+    ) -> dict[str, Any]:
+        """Batch-synchronize a directory between Host and @appliance, @bastion, or a TargetNode via streaming tar.gz."""
+        tx_id = generate_tx_id()
+        started = time.monotonic()
+        ldir = Path(local_dir).expanduser().resolve()
+        patterns = list(DEFAULT_SYNC_EXCLUDES) + list(exclude or [])
+        sync_id = secrets.token_hex(6)
+        is_windows_node = node in ("@appliance", "appliance", "@bastion", "bastion")
+
+        def _is_excluded(rel_posix: str, name: str) -> bool:
+            for pat in patterns:
+                if fnmatch.fnmatch(name, pat) or fnmatch.fnmatch(rel_posix, pat):
+                    return True
+                for part in rel_posix.split("/"):
+                    if fnmatch.fnmatch(part, pat):
+                        return True
+            return False
+
+        with TemporaryDirectory() as tmp_dir:
+            archive_path = Path(tmp_dir) / f"egw_sync_{sync_id}.tar.gz"
+            files_synced = 0
+
+            if direction == "push":
+                if not ldir.is_dir():
+                    raise NotADirectoryError(f"Local directory not found: {ldir}")
+
+                with tarfile.open(archive_path, "w:gz") as tf:
+                    for item in sorted(ldir.rglob("*")):
+                        rel = item.relative_to(ldir).as_posix()
+                        if _is_excluded(rel, item.name):
+                            continue
+                        tf.add(item, arcname=rel, recursive=False)
+                        if item.is_file():
+                            files_synced += 1
+
+                archive_bytes = archive_path.stat().st_size
+                remote_stage = (
+                    f"%LOCALAPPDATA%\\EnclaveGateway\\stage\\egw_sync_{sync_id}.tar.gz"
+                    if is_windows_node
+                    else f"/tmp/.egw_sync_{sync_id}.tar.gz"
+                )
+                tx_meta = self.transfer_file(
+                    "push",
+                    archive_path,
+                    node,
+                    remote_stage,
+                    as_root=False,
+                    use_delta=True,
+                    timeout_sec=timeout_sec,
+                    actor=actor,
+                )
+                sha = tx_meta["sha256"]
+
+                if is_windows_node:
+                    extract_ps = f"""
+$stage = [Environment]::ExpandEnvironmentVariables('{remote_stage}')
+$dst = [Environment]::ExpandEnvironmentVariables('{remote_dir}')
+try {{
+    if (-not (Test-Path $dst)) {{ New-Item -ItemType Directory -Force -Path $dst | Out-Null }}
+    tar.exe -xzf $stage -C $dst
+    if ($LASTEXITCODE -ne 0) {{ Write-Error 'tar.exe extraction failed'; exit 1 }}
+    Write-Output 'SYNC_EXTRACT_OK'
+}} finally {{
+    Remove-Item $stage -Force -ErrorAction SilentlyContinue
+}}
+"""
+                    ext_res = self.exec_node(
+                        node, extract_ps, timeout_sec=timeout_sec, actor=actor
+                    )
+                else:
+                    extract_sh = f"""
+set -e
+trap "rm -f '{remote_stage}'" EXIT
+mkdir -p '{remote_dir}'
+tar -xzf '{remote_stage}' -C '{remote_dir}'
+echo "SYNC_EXTRACT_OK"
+""".strip()
+                    ext_res = self.exec_node(
+                        node,
+                        extract_sh,
+                        as_root=as_root,
+                        timeout_sec=timeout_sec,
+                        actor=actor,
+                    )
+
+                if ext_res.exit_code != 0 or "SYNC_EXTRACT_OK" not in ext_res.stdout:
+                    raise RuntimeError(
+                        f"Directory sync extraction failed on {node}:{remote_dir}: {ext_res.stderr or ext_res.stdout}"
+                    )
+
+            elif direction == "pull":
+                remote_stage = (
+                    f"%LOCALAPPDATA%\\EnclaveGateway\\stage\\egw_sync_pull_{sync_id}.tar.gz"
+                    if is_windows_node
+                    else f"/tmp/.egw_sync_pull_{sync_id}.tar.gz"
+                )
+                if is_windows_node:
+                    pack_ps = f"""
+$src = [Environment]::ExpandEnvironmentVariables('{remote_dir}')
+$stage = [Environment]::ExpandEnvironmentVariables('{remote_stage}')
+$parent = Split-Path -Parent $stage
+if ($parent -and -not (Test-Path $parent)) {{ New-Item -ItemType Directory -Force -Path $parent | Out-Null }}
+tar.exe -czf $stage -C $src .
+if ($LASTEXITCODE -ne 0) {{ Write-Error 'tar.exe archive creation failed'; exit 1 }}
+Write-Output 'SYNC_PACK_OK'
+"""
+                    pack_res = self.exec_node(
+                        node, pack_ps, timeout_sec=timeout_sec, actor=actor
+                    )
+                else:
+                    excl_flags = " ".join(
+                        f"--exclude={shlex.quote(p)}" for p in patterns
+                    )
+                    target_user = self._resolve_target(node).user
+                    chown_line = (
+                        f"chown '{target_user}' '{remote_stage}' && chmod 600 '{remote_stage}'"
+                        if as_root
+                        else f"chmod 600 '{remote_stage}'"
+                    )
+                    pack_sh = f"""
+set -e
+tar -czf '{remote_stage}' {excl_flags} -C '{remote_dir}' .
+{chown_line}
+echo "SYNC_PACK_OK"
+""".strip()
+                    pack_res = self.exec_node(
+                        node,
+                        pack_sh,
+                        as_root=as_root,
+                        timeout_sec=timeout_sec,
+                        actor=actor,
+                    )
+
+                if pack_res.exit_code != 0 or "SYNC_PACK_OK" not in pack_res.stdout:
+                    raise RuntimeError(
+                        f"Directory sync archive creation failed on {node}:{remote_dir}: {pack_res.stderr or pack_res.stdout}"
+                    )
+
+                try:
+                    tx_meta = self.transfer_file(
+                        "pull",
+                        archive_path,
+                        node,
+                        remote_stage,
+                        as_root=False,
+                        timeout_sec=timeout_sec,
+                        actor=actor,
+                    )
+                    sha = tx_meta["sha256"]
+                    archive_bytes = archive_path.stat().st_size
+                finally:
+                    cleanup_cmd = (
+                        f"Remove-Item ([Environment]::ExpandEnvironmentVariables('{remote_stage}')) -Force -ErrorAction SilentlyContinue"
+                        if is_windows_node
+                        else f"rm -f '{remote_stage}'"
+                    )
+                    self.exec_node(
+                        node,
+                        cleanup_cmd,
+                        as_root=as_root and not is_windows_node,
+                        timeout_sec=30.0,
+                        actor=actor,
+                    )
+
+                ldir.mkdir(parents=True, exist_ok=True)
+                with tarfile.open(archive_path, "r:gz") as tf:
+                    for member in tf.getmembers():
+                        member_dest = (ldir / member.name).resolve()
+                        if not str(member_dest).startswith(str(ldir)):
+                            raise ValueError(
+                                f"Refusing to extract unsafe tar member path: {member.name}"
+                            )
+                        tf.extract(member, path=ldir)
+                        if member.isfile():
+                            files_synced += 1
+            else:
+                raise ValueError(
+                    f"Unsupported sync direction '{direction}' (use 'push' or 'pull')"
+                )
+
+        duration_ms = int((time.monotonic() - started) * 1000)
+        self.recorder.record(
+            tx_id=tx_id,
+            actor=actor,
+            operation=f"sync_{direction}{'_root' if as_root else ''}",
+            node=node,
+            summary=f"{ldir.name} <-> {node}:{remote_dir} ({files_synced} files)",
+            exit_code=0,
+            duration_ms=duration_ms,
+            sha256=sha,
+        )
+        return {
+            "tx_id": tx_id,
+            "direction": direction,
+            "node": node,
+            "as_root": as_root,
+            "local_dir": str(ldir),
+            "remote_dir": remote_dir,
+            "files_synced": files_synced,
+            "archive_bytes": archive_bytes,
             "sha256": sha,
             "duration_ms": duration_ms,
         }
@@ -596,6 +871,34 @@ Write-Output 'APPLIANCE_CLEAN_OK'
                 lines.append(f"    IdentityFile {spec.ssh_key_path}")
             lines.append("")
         return "\n".join(lines).rstrip() + "\n"
+
+    def build_ssh_command(
+        self,
+        node: str,
+        extra_args: list[str] | None = None,
+        *,
+        config_path: str | None = None,
+    ) -> list[str]:
+        """Build a host OpenSSH client command line that tunnels directly via `egw stdio-proxy`."""
+        target = self._resolve_target(node)
+        cfg_flag = f" -c {shlex.quote(config_path)}" if config_path else ""
+        cmd = [
+            "ssh",
+            "-o",
+            f"ProxyCommand=egw{cfg_flag} stdio-proxy %h %p",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-p",
+            str(target.port),
+        ]
+        if target.ssh_key_path:
+            cmd.extend(["-i", target.ssh_key_path])
+        cmd.append(f"{target.user}@{target.host}")
+        if extra_args:
+            cmd.extend(extra_args)
+        return cmd
 
     def watch(
         self,

@@ -256,12 +256,14 @@ class RdpVfsTransport:
         self.control = control
         self.spec = spec
 
-    def exec_bastion(self, ps_script: str, timeout_sec: float = 120.0) -> ExecResult:
+    def exec_bastion(
+        self, ps_script: str, timeout_sec: float = 120.0, *, op: str = "exec"
+    ) -> ExecResult:
         """Dispatch a PowerShell script to BastionWorker via transactional JSON envelope."""
         tx_id = generate_tx_id()
         envelope = {
             "tx_id": tx_id,
-            "op": "exec",
+            "op": op,
             "payload_b64": base64.b64encode(ps_script.encode("utf-8")).decode("ascii"),
             "timeout_ms": int(timeout_sec * 1000),
         }
@@ -284,19 +286,27 @@ $reqTmp = Join-Path $spool 'req_{tx_id}.tmp'
 $reqFile = Join-Path $spool 'req_{tx_id}.json'
 $resFile = Join-Path $spool 'res_{tx_id}.json'
 Remove-Item $reqTmp, $reqFile, $resFile -Force -ErrorAction SilentlyContinue
-[IO.File]::WriteAllBytes($reqTmp, [Convert]::FromBase64String('{envelope_b64}'))
-Move-Item $reqTmp $reqFile -Force
-
-for ($i = 0; $i -lt {iters}; $i++) {{
-    if (Test-Path $resFile) {{
-        Start-Sleep -Milliseconds 40
-        $raw = Get-Content $resFile -Raw -Encoding UTF8
-        Remove-Item $resFile, $reqFile -Force -ErrorAction SilentlyContinue
-        [Console]::OutputEncoding = [Text.Encoding]::UTF8
-        Write-Output $raw
-        exit 0
+$fsw = New-Object System.IO.FileSystemWatcher($spool, 'res_{tx_id}.json')
+try {{
+    [IO.File]::WriteAllBytes($reqTmp, [Convert]::FromBase64String('{envelope_b64}'))
+    Move-Item $reqTmp $reqFile -Force
+    for ($i = 0; $i -lt {iters}; $i++) {{
+        if (-not (Test-Path $resFile)) {{
+            [void]$fsw.WaitForChanged([System.IO.WatcherChangeTypes]::Created -bor [System.IO.WatcherChangeTypes]::Renamed, 150)
+        }}
+        if (Test-Path $resFile) {{
+            Start-Sleep -Milliseconds 15
+            $raw = Get-Content $resFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+            if ($raw) {{
+                Remove-Item $resFile, $reqFile -Force -ErrorAction SilentlyContinue
+                [Console]::OutputEncoding = [Text.Encoding]::UTF8
+                Write-Output $raw
+                exit 0
+            }}
+        }}
     }}
-    Start-Sleep -Milliseconds 150
+}} finally {{
+    $fsw.Dispose()
 }}
 Remove-Item $reqFile -Force -ErrorAction SilentlyContinue
 Write-Error 'Timed out waiting for BastionWorker response for {tx_id}'
@@ -532,7 +542,7 @@ $Global:EnclaveMuxSockets['{conn_id}'] = @{{
 }}
 Write-Output 'MUX_OPEN_OK:{conn_id}'
 """
-        res = self.exec_bastion(open_ps, timeout_sec=timeout_sec + 5.0)
+        res = self.exec_bastion(open_ps, timeout_sec=timeout_sec + 5.0, op="mux")
         if res.exit_code != 0 or f"MUX_OPEN_OK:{conn_id}" not in res.stdout:
             raise ConnectionError(
                 f"Failed to open multiplexed TCP stream to {target_host}:{target_port}: {res.stderr or res.stdout}"
@@ -603,7 +613,7 @@ if ($eof) {{
     Write-Output "MUX_DATA:$rxB64"
 }}
 """
-        res = self.exec_bastion(io_ps, timeout_sec=timeout_sec)
+        res = self.exec_bastion(io_ps, timeout_sec=timeout_sec, op="mux")
         if res.exit_code != 0:
             raise ConnectionError(
                 f"Multiplexed I/O error on {conn_id}: {res.stderr or res.stdout}"
@@ -626,7 +636,7 @@ if ($Global:EnclaveMuxSockets -and $Global:EnclaveMuxSockets.ContainsKey('{conn_
 }}
 Write-Output 'MUX_CLOSED'
 """
-        self.exec_bastion(close_ps, timeout_sec=timeout_sec)
+        self.exec_bastion(close_ps, timeout_sec=timeout_sec, op="mux")
 
     def relay_tcp_exchange(
         self, target_host: str, target_port: int, payload: bytes, timeout_sec: float = 30.0

@@ -89,6 +89,16 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "description": "Explicitly authorize destructive commands (DROP, TRUNCATE, rm -rf, reboot).",
                     "default": False,
                 },
+                "env": {
+                    "type": "object",
+                    "description": "Optional non-secret environment variables injected in-memory before running the script.",
+                    "default": {},
+                },
+                "secret_env": {
+                    "type": "object",
+                    "description": "Optional mapping of target env var name -> SecretVault key name injected from OS Keychain/.env and auto-scrubbed from output.",
+                    "default": {},
+                },
                 "timeout_sec": {
                     "type": "number",
                     "description": "Execution timeout in seconds.",
@@ -134,6 +144,60 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 },
             },
             "required": ["direction", "local_path", "node", "remote_path"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "node_sync",
+        "description": "Batch-synchronize an entire directory between the Host and '@appliance', '@bastion', or a TargetNode via streaming tar.gz.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "direction": {
+                    "type": "string",
+                    "enum": ["push", "pull"],
+                    "description": "Sync direction ('push' from Host to Node, 'pull' from Node to Host).",
+                },
+                "local_dir": {
+                    "type": "string",
+                    "description": "Path to the directory on the Host filesystem.",
+                },
+                "node": {
+                    "type": "string",
+                    "description": "Target node identifier ('@appliance', '@bastion', or TargetNode name).",
+                },
+                "remote_dir": {
+                    "type": "string",
+                    "description": "Destination or source directory path on the remote node.",
+                },
+                "as_root": {
+                    "type": "boolean",
+                    "description": "Extract or pack with sudo privileges on a Linux TargetNode.",
+                    "default": False,
+                },
+                "exclude": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Additional glob patterns to exclude from synchronization.",
+                    "default": [],
+                },
+            },
+            "required": ["direction", "local_dir", "node", "remote_dir"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "enclave_ssh_config",
+        "description": "Generate an OpenSSH ~/.ssh/config snippet using `egw stdio-proxy %h %p` for native ssh/rsync/IDE Remote-SSH.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prefix": {
+                    "type": "string",
+                    "description": "Host alias prefix (default: 'enclave-').",
+                    "default": "enclave-",
+                }
+            },
             "additionalProperties": False,
         },
     },
@@ -263,11 +327,15 @@ class McpJsonRpcServer:
             return self._tool_result(req_id, json.dumps(clean_data, indent=2))
 
         if tool_name == "node_exec":
+            raw_env = dict(args.get("env") or {})
+            raw_sec_env = dict(args.get("secret_env") or {})
             res = self.engine.exec_node(
                 str(args["node"]),
                 str(args["script"]),
                 as_root=bool(args.get("as_root", False)),
                 confirm_destructive=bool(args.get("confirm_destructive", False)),
+                env={str(k): str(v) for k, v in raw_env.items()},
+                secret_env={str(k): str(v) for k, v in raw_sec_env.items()},
                 timeout_sec=float(args.get("timeout_sec", 120.0)),
                 actor="mcp",
             )
@@ -284,6 +352,25 @@ class McpJsonRpcServer:
                 actor="mcp",
             )
             return self._tool_result(req_id, json.dumps(meta, indent=2))
+
+        if tool_name == "node_sync":
+            raw_excl = list(args.get("exclude") or [])
+            meta = self.engine.sync_directory(
+                str(args["direction"]),
+                str(args["local_dir"]),
+                str(args["node"]),
+                str(args["remote_dir"]),
+                as_root=bool(args.get("as_root", False)),
+                exclude=[str(x) for x in raw_excl],
+                actor="mcp",
+            )
+            return self._tool_result(req_id, json.dumps(meta, indent=2))
+
+        if tool_name == "enclave_ssh_config":
+            prefix = str(args.get("prefix", "enclave-"))
+            return self._tool_result(
+                req_id, self.engine.generate_ssh_config(prefix=prefix)
+            )
 
         if tool_name == "node_db_query":
             res = self.engine.query_database(

@@ -231,6 +231,9 @@ class LoopbackControlChannel:
             m_ver = re.search(r"if \[ \"\$sha\" != '([0-9a-f]{64})' \]", decoded_sh)
             if m_ver:
                 return f"VERIFIED:{m_ver.group(1)}"
+            if "SYNC_EXTRACT_OK" in decoded_sh:
+                return "SYNC_EXTRACT_OK"
+            return f"TARGET_DECODED:{decoded_sh}"
 
         return f"BASTION_EXEC_OK:{inner_cmd}"
 
@@ -725,6 +728,70 @@ targets:
             )
             self.assertEqual(prof_manifest["profile"], "enclave-b")
             self.assertTrue(Path(prof_manifest["profile_config"]).is_file())
+
+    def test_env_injection_directory_sync_and_ssh_launcher(self) -> None:
+        with TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / ".env"
+            env_file.write_text("ENCLAVE_REGISTRY_TOKEN=RegToken#Secret2026\n", encoding="utf-8")
+            vault = SecretVault(env_file=env_file)
+            cfg = EnclaveConfig.from_dict(
+                {
+                    "appliance": {"hypervisor": "direct"},
+                    "targets": {
+                        "app01": {
+                            "host": "10.0.20.11",
+                            "port": 2222,
+                            "user": "deploy",
+                            "via": "bastion",
+                            "ssh_key_path": "~/.ssh/id_ed25519",
+                        }
+                    },
+                }
+            )
+            control = LoopbackControlChannel()
+            recorder = FlightRecorder(log_path=Path(tmp) / "audit.jsonl")
+            engine = EnclaveEngine(
+                config=cfg, vault=vault, recorder=recorder, control_override=control
+            )
+
+            # 1. Verify in-memory env and secret_env injection + automatic secret scrubbing
+            res = engine.exec_node(
+                "app01",
+                "echo $DEPLOY_ENV $REG_TOKEN",
+                env={"DEPLOY_ENV": "production"},
+                secret_env={"REG_TOKEN": "ENCLAVE_REGISTRY_TOKEN"},
+            )
+            self.assertEqual(res.exit_code, 0)
+            self.assertIn("export DEPLOY_ENV=", res.stdout)
+            self.assertIn("export REG_TOKEN=", res.stdout)
+            self.assertNotIn("RegToken#Secret2026", res.stdout)
+
+            # 2. Verify batch directory sync (`egw sync`) with automatic exclude filtering
+            src_dir = Path(tmp) / "chart"
+            (src_dir / "templates").mkdir(parents=True)
+            (src_dir / ".git").mkdir(parents=True)
+            (src_dir / "Chart.yaml").write_text("name: enclave-app\n", encoding="utf-8")
+            (src_dir / "templates" / "deployment.yaml").write_text("kind: Deployment\n", encoding="utf-8")
+            (src_dir / ".git" / "config").write_text("ignored\n", encoding="utf-8")
+
+            sync_meta = engine.sync_directory(
+                "push",
+                src_dir,
+                "app01",
+                "/opt/charts/enclave-app",
+                as_root=True,
+            )
+            self.assertEqual(sync_meta["files_synced"], 2)
+            self.assertGreater(sync_meta["archive_bytes"], 0)
+
+            # 3. Verify one-liner interactive SSH launcher command builder (`egw ssh`)
+            ssh_cmd = engine.build_ssh_command(
+                "app01", extra_args=["-L", "5432:127.0.0.1:5432"]
+            )
+            self.assertIn("ProxyCommand=egw stdio-proxy %h %p", " ".join(ssh_cmd))
+            self.assertIn("-p 2222", " ".join(ssh_cmd))
+            self.assertIn("deploy@10.0.20.11", ssh_cmd)
+            self.assertEqual(ssh_cmd[-2:], ["-L", "5432:127.0.0.1:5432"])
 
 
 if __name__ == "__main__":

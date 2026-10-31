@@ -121,8 +121,10 @@ class QgaClient:
             pid = resp["return"]["pid"]
 
             deadline = time.monotonic() + timeout_sec
+            poll_delay = 0.015
             while time.monotonic() < deadline:
-                time.sleep(0.18)
+                time.sleep(poll_delay)
+                poll_delay = min(0.15, poll_delay * 1.6)
                 status_req = json.dumps(
                     {"execute": "guest-exec-status", "arguments": {"pid": pid}}
                 )

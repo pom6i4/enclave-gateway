@@ -113,16 +113,21 @@ egw heal --update-credentials
 # Bootstrap Bastion SSH key onto a TargetNode using password from OS Keychain
 egw ssh-copy-id app01
 
-# Execute commands across any tier of the topology
+# Execute commands across any tier of the topology (with optional in-memory --env / --secret-env)
 egw exec @appliance "vipnetclient.exe info"
 egw exec @bastion   "Get-NetTCPConnection -State Established"
 egw exec app01      "docker ps --format 'table {{.Names}}\t{{.Status}}'"
-egw exec app01 --sudo "systemctl status docker"
+egw exec app01 --sudo --env DEPLOY_ENV=prod --secret-env REG_TOKEN=ENCLAVE_REGISTRY_TOKEN "systemctl status docker"
 
-# Transfer files with 4 MB block-level SHA-256 delta sync, Parallel Striped I/O, and optional --sudo
+# Transfer files or batch-synchronize entire directories (`egw cp` / `egw sync`) with optional --sudo
 egw cp ./release.tar.gz app01:/tmp/release.tar.gz
 egw cp --sudo ./nginx.conf app01:/etc/nginx/nginx.conf
-egw cp app01:/var/log/syslog ./syslog.txt
+egw sync --sudo ./helm/enclave-app app01:/opt/charts/enclave-app
+egw sync app01:/var/log/nginx ./logs/nginx
+
+# Launch an interactive SSH shell directly over `egw stdio-proxy` (or generate ~/.ssh/config)
+egw ssh app01
+egw ssh-config >> ~/.ssh/config
 
 # Tunnel local port 8443 to internal service 10.0.20.12:443 over multiplexed RdpVfsTransport
 egw tunnel 8443:auth01:443
