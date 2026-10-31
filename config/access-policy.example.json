@@ -1,0 +1,15 @@
+{
+  "principals": {
+    "local": {
+      "tools": ["enclave_capabilities", "enclave_transaction"],
+      "nodes": ["@appliance", "@bastion", "app01"]
+    },
+    "viewer": {
+      "token_env": "ENCLAVE_MCP_VIEWER_TOKEN",
+      "tools": ["enclave_capabilities", "enclave_status", "enclave_doctor", "enclave_ssh_config", "node_read_file", "enclave_transaction"],
+      "nodes": ["@appliance", "@bastion", "app01"],
+      "read_roots": {"app01": ["/srv/app/logs"]},
+      "destinations": ["10.0.20.0/24"]
+    }
+  }
+}

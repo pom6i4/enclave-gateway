@@ -675,7 +675,8 @@ targets:
                     },
                 }
             )
-            self.assertTrue(drop_resp["result"]["isError"])  # type: ignore[index]
+            self.assertEqual(drop_resp["error"]["data"]["code"], "operation_failed")
+            self.assertFalse(drop_resp["error"]["data"]["indeterminate"])
 
             report_md = recorder.export_markdown_report()
             self.assertIn("Enclave Gateway Session Report", report_md)
@@ -896,7 +897,7 @@ targets:
             )
             self.assertIn("StrictHostKeyChecking=yes", hop_ps)
             self.assertNotIn("UserKnownHostsFile=NUL", hop_ps)
-            self.assertIn(r"\\tsclient\C\EnclaveGateway\spool", hop_ps)
+            self.assertIn("egw-askpass.exe", hop_ps)
 
             # 3. Verify Direct Spool File IPC (zero powershell.exe process creation on Appliance)
             control = LoopbackControlChannel(direct_spool_ipc=True)
@@ -1675,12 +1676,13 @@ class AuditRegressionTests(unittest.TestCase):
         from enclave_gateway.transports.ssh_hop import _wrap_with_askpass_ps
         secret = "p&%!!'quoted2026"
         script = _wrap_with_askpass_ps("Write-Output done", secret, "test", stage_dir=r"C:\папка ' с пробелом")
-        encoded = re.search(r"WriteAllBytes\(\$askCmd, \[Convert\]::FromBase64String\('([^']+)'\)", script).group(1)
-        helper = base64.b64decode(encoded).decode()
-        self.assertNotIn(secret, helper)
-        self.assertNotIn(base64.b64encode(secret.encode()).decode(), helper)
+        self.assertNotIn(secret, script)
+        self.assertNotIn("WriteAllBytes", script)
+        self.assertNotIn(".cmd", script)
         self.assertIn("EGW_ASKPASS_B64", script)
         self.assertIn("ReleaseMutex", script)
+        self.assertIn("Get-AuthenticodeSignature", script)
+        script = _wrap_with_askpass_ps("Write-Output done", secret, "test", helper_path=r"C:\папка ' с пробелом\helper.exe")
         self.assertIn("папка '' с пробелом", script)
         with self.assertRaises(ValueError):
             EnclaveConfig.from_dict({"targets": {"app01": {"host": "app01; exit 1"}}})

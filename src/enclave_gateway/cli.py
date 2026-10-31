@@ -11,6 +11,8 @@ from pathlib import Path
 from enclave_gateway import __version__
 from enclave_gateway.config import EnclaveConfig
 from enclave_gateway.engine import EnclaveEngine
+from enclave_gateway.security.policy import AccessPolicy
+from enclave_gateway.operations.context import OperationError
 from enclave_gateway.mcp_server.server import (
     McpHttpServer,
     McpJsonRpcServer,
@@ -377,6 +379,8 @@ def build_parser() -> argparse.ArgumentParser:
         "mcp",
         help="Run the MCP JSON-RPC 2.0 server over stdio or HTTP (/mcp, /v1/tools, /openapi.json).",
     )
+    p_mcp.add_argument("--policy", type=Path, help="JSON principal/tool/node/path/network policy.")
+    p_mcp.add_argument("--principal", default="local", help="Trusted launcher identity for stdio or the legacy HTTP bearer token.")
     p_mcp.add_argument(
         "--listen",
         default="",
@@ -439,10 +443,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Target IDE or local LLM client (default: all).",
     )
 
+    sub.add_parser("capabilities", help="Report local capabilities without contacting a live enclave.")
+    p_tx = sub.add_parser("transactions", help="Retrieve durable results and request cancellation without replaying work.")
+    p_tx.add_argument("action", choices=["get", "list", "cancel", "reconcile"])
+    p_tx.add_argument("tx_id", nargs="?")
+    p_tx.add_argument("--limit", type=int, default=25)
+    for transactional_parser in (p_exec, p_cp, p_sync):
+        transactional_parser.add_argument("--tx-id", default=None, help="Stable idempotency key; reuse retrieves the original operation.")
+
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -468,8 +480,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.export_openapi:
             print(json.dumps(export_openapi_spec(), indent=2, ensure_ascii=False))
             return 0
+        policy = AccessPolicy.load(args.policy) if args.policy else None
         server = McpJsonRpcServer(
             engine,
+            policy=policy, principal=args.principal,
             read_only=bool(args.read_only),
             max_output_chars=int(args.max_output_chars),
         )
@@ -478,12 +492,23 @@ def main(argv: list[str] | None = None) -> int:
                 host_part, _, port_part = args.listen.rpartition(":")
                 bind_host = host_part or "127.0.0.1"
                 bind_port = int(port_part or "8765")
+                principal_tokens = {}
+                if policy:
+                    for name, grant in policy.grants.items():
+                        if grant.token_env:
+                            token = engine.vault.get(grant.token_env)
+                            if len(token) < 16:
+                                raise ValueError("Each HTTP principal needs a credential of at least 16 characters")
+                            if token in principal_tokens:
+                                raise ValueError("A credential cannot be shared by different principals")
+                            principal_tokens[token] = name
                 http_srv = McpHttpServer(
                     server,
                     bind_host=bind_host,
                     bind_port=bind_port,
                     bearer_token=args.token or engine.vault.get(args.token_env),
                     allowed_origins=tuple(args.allowed_origin),
+                    principal_tokens=principal_tokens,
                 )
                 print(
                     f"Enclave Gateway HTTP MCP & Tool Server listening on http://{bind_host}:{bind_port} "
@@ -499,6 +524,23 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         finally:
             server.stop_all_tunnels()
+
+    if args.command == "capabilities":
+        print(json.dumps(engine.capabilities(), indent=2))
+        return 0
+
+    if args.command == "transactions":
+        if args.action in ("get", "cancel") and not args.tx_id:
+            parser.error("transactions get/cancel requires a tx_id")
+        if args.action == "cancel":
+            value = engine.cancel_transaction(args.tx_id)
+        elif args.action == "reconcile":
+            from enclave_gateway.operations.context import principal
+            value = {"indeterminate": engine.journal.reconcile_expired(principal())}
+        else:
+            value = engine.transaction_status(args.tx_id if args.action == "get" else None, limit=args.limit)
+        print(json.dumps(value, indent=2, ensure_ascii=False))
+        return 0
 
     if args.command == "init":
         admin_pw = (
@@ -603,8 +645,9 @@ def main(argv: list[str] | None = None) -> int:
             env=env_map,
             secret_env=secret_env_map,
             timeout_sec=args.timeout,
-            actor="cli",
+            actor="cli", tx_id=args.tx_id,
         )
+        print(json.dumps({"tx_id": res.tx_id, "timings_ms": res.timings_ms}), file=sys.stderr)
         if res.stdout:
             print(res.stdout)
         if res.stderr:
@@ -622,7 +665,7 @@ def main(argv: list[str] | None = None) -> int:
                 dst_path,
                 as_root=args.sudo,
                 use_delta=not args.no_delta,
-                actor="cli",
+                actor="cli", tx_id=args.tx_id,
             )
         elif src_node is not None and dst_node is None:
             meta = engine.transfer_file(
@@ -632,7 +675,7 @@ def main(argv: list[str] | None = None) -> int:
                 src_path,
                 as_root=args.sudo,
                 use_delta=not args.no_delta,
-                actor="cli",
+                actor="cli", tx_id=args.tx_id,
             )
         else:
             print(
@@ -654,7 +697,7 @@ def main(argv: list[str] | None = None) -> int:
                 dst_path,
                 as_root=args.sudo,
                 exclude=args.exclude,
-                actor="cli",
+                actor="cli", tx_id=args.tx_id,
             )
         elif src_node is not None and dst_node is None:
             meta = engine.sync_directory(
@@ -664,7 +707,7 @@ def main(argv: list[str] | None = None) -> int:
                 src_path,
                 as_root=args.sudo,
                 exclude=args.exclude,
-                actor="cli",
+                actor="cli", tx_id=args.tx_id,
             )
         else:
             print(
@@ -849,6 +892,17 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    except Exception as exc:
+        error = exc if isinstance(exc, OperationError) else getattr(exc, "operation_error", None)
+        if error is None:
+            raise
+        print(json.dumps({"error": error.as_dict()}, ensure_ascii=False), file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

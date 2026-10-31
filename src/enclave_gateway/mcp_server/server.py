@@ -10,12 +10,16 @@ import time
 import hmac
 import math
 import urllib.parse
+import secrets
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, TextIO
 
 from enclave_gateway import __version__
 from enclave_gateway.engine import EnclaveEngine
+from enclave_gateway.operations.context import OperationError, identity, principal as operation_principal
+from enclave_gateway.security.policy import AccessPolicy, ScopedMuxTransport, grant_scope, canonical_node
 from enclave_gateway.transports.rdp_vfs import RdpVfsTunnelServer
 from enclave_gateway.transports.socks5_mux import Socks5VfsServer
 
@@ -464,6 +468,22 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
 ]
 
 
+for definition in TOOL_DEFINITIONS:
+    if definition["name"] in {"node_exec", "node_transfer", "node_sync", "node_read_file", "node_patch_file", "enclave_heal", "enclave_clean"}:
+        definition["inputSchema"]["properties"]["tx_id"] = {"type": "string", "description": "Optional stable transaction id. Reuse retrieves the original operation and never replays ambiguous work."}
+
+TOOL_DEFINITIONS.append({
+    "name": "enclave_transaction", "description": "Get/list operation state and retained result, request cancellation, or mark expired execution indeterminate. Identity comes from the authenticated connection.",
+    "inputSchema": {"type": "object", "properties": {
+        "action": {"type": "string", "enum": ["get", "list", "cancel", "reconcile"], "default": "get"},
+        "tx_id": {"type": "string"}, "limit": {"type": "integer", "default": 25}}, "additionalProperties": False},
+})
+
+
+TOOL_DEFINITIONS.append({"name": "enclave_capabilities", "description": "Report local capabilities and explicit unverified qualification boundaries without probing a live enclave.",
+                         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}})
+
+
 class McpJsonRpcServer:
     """Handles MCP JSON-RPC 2.0 requests and dispatches tool calls to EnclaveEngine."""
 
@@ -473,18 +493,32 @@ class McpJsonRpcServer:
         *,
         read_only: bool = False,
         max_output_chars: int = DEFAULT_MAX_OUTPUT_CHARS,
+        policy: AccessPolicy | None = None,
+        principal: str = "local",
     ) -> None:
         self.engine = engine
+        self.policy, self.principal = policy, principal
+        if policy:
+            policy.grant(principal)
         self.read_only = read_only
         self.max_output_chars = max_output_chars
         self._tunnel_lock = threading.RLock()
+        self._request_lock = threading.Lock()
+        self._request_transactions = {}
+        self._queued_requests = set()
+        self._queued_cancels = set()
         self._active_tunnels: dict[int, tuple[Any, threading.Thread, dict[str, Any]]] = {}
 
-    def handle_message(self, msg: Any) -> Any:
+    def handle_message(self, msg: Any, *, principal: str | None = None) -> Any:
+        verified = principal or self.principal
+        with identity(verified), grant_scope(self.policy.grant(verified) if self.policy else None):
+            return self._handle_message_impl(msg)
+
+    def _handle_message_impl(self, msg: Any) -> Any:
         if isinstance(msg, list):
             if not msg or len(msg) > 128:
                 return self._error(None, -32600, "Invalid Request")
-            responses = [self._error(None, -32600, "Invalid Request") if isinstance(item, list) else self.handle_message(item) for item in msg]
+            responses = [self._error(None, -32600, "Invalid Request") if isinstance(item, list) else self._handle_message_impl(item) for item in msg]
             return [item for item in responses if item is not None] or None
         if not isinstance(msg, dict):
             return self._error(None, -32600, "Invalid Request")
@@ -500,6 +534,17 @@ class McpJsonRpcServer:
         if "id" not in msg:
             # Lifecycle notifications have no result. Other valid notifications
             # execute once, but their result must never be sent to the client.
+            if msg["method"] == "notifications/cancelled":
+                target = msg.get("params", {}).get("requestId")
+                if not isinstance(target, (dict, list)):
+                    with self._request_lock:
+                        key = (operation_principal(), target)
+                        tx_id = self._request_transactions.get(key)
+                        if not tx_id and key in self._queued_requests:
+                            self._queued_cancels.add(key)
+                    if tx_id:
+                        self.engine.request_cancel_pending(tx_id)
+                return None
             if msg["method"].startswith("notifications/"):
                 return None
             self._handle_request({**msg, "id": "notification"})
@@ -540,17 +585,16 @@ class McpJsonRpcServer:
             if method in ("ping", "logging/setLevel"):
                 return self._ok(req_id, {})
             if method == "tools/list":
-                return self._ok(req_id, {"tools": TOOL_DEFINITIONS})
+                return self._ok(req_id, {"tools": self.visible_tools()})
             if method == "tools/call":
                 tool_name = str(params.get("name", ""))
                 args = params.get("arguments", {})
                 error = validate_tool_arguments(tool_name, args)
                 if error:
                     return self._error(req_id, -32602, error)
-                if tool_name == "enclave_tunnel":
-                    with self._tunnel_lock:
-                        return self._dispatch_tool(req_id, tool_name, args)
-                return self._dispatch_tool(req_id, tool_name, args)
+                if self.policy:
+                    self.policy.authorize(operation_principal(), tool_name, args, self.engine.config)
+                return self._call_tool(req_id, tool_name, args)
             if method == "resources/list":
                 return self._ok(
                     req_id,
@@ -575,6 +619,9 @@ class McpJsonRpcServer:
                 return self._ok(req_id, {"resourceTemplates": []})
             if method == "resources/read":
                 uri = str(params.get("uri", ""))
+                if self.policy:
+                    required = "enclave_status" if uri == "enclave://status" else "enclave_ssh_config"
+                    self.policy.authorize(operation_principal(), required, {}, self.engine.config)
                 if uri == "enclave://topology":
                     topo = {
                         "profile": self.engine.config.profile,
@@ -586,7 +633,7 @@ class McpJsonRpcServer:
                                 "via": v.via,
                                 "os": v.os,
                             }
-                            for k, v in self.engine.config.targets.items()
+                            for k, v in self.engine.config.targets.items() if self.node_visible(k)
                         },
                         "forwards": {
                             k: {
@@ -594,12 +641,12 @@ class McpJsonRpcServer:
                                 "target_host": f.target_host,
                                 "target_port": f.target_port,
                             }
-                            for k, f in self.engine.config.forwards.items()
+                            for k, f in self.engine.config.forwards.items() if not self.policy
                         },
                     }
                     text = self._json_dump(topo, indent=2)
                 elif uri == "enclave://status":
-                    text = self._json_dump(self.engine.status(), indent=2)
+                    text = self._json_dump(self.public_status(), indent=2)
                 else:
                     return self._error(req_id, -32602, f"Unknown resource URI: {uri}")
                 return self._ok(
@@ -647,7 +694,14 @@ class McpJsonRpcServer:
                 )
 
             return self._error(req_id, -32601, f"Method not found: {method}")
+        except OperationError as exc:
+            return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32003 if exc.code == "access_denied" else -32001,
+                    "message": self.engine.vault.scrubber.scrub(str(exc)), "data": exc.as_dict()}}
         except Exception as exc:
+            metadata = getattr(exc, "operation_error", None)
+            if metadata is not None:
+                return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32001,
+                        "message": self.engine.vault.scrubber.scrub(str(metadata)), "data": metadata.as_dict()}}
             return self._ok(
                 req_id,
                 {
@@ -661,10 +715,35 @@ class McpJsonRpcServer:
                 },
             )
 
-    def stop_all_tunnels(self) -> list[int]:
+    def _call_tool(self, req_id, tool_name, args):
+        transactional = tool_name in {"node_exec", "node_transfer", "node_sync", "node_read_file", "node_patch_file", "enclave_heal", "enclave_clean"}
+        key = (operation_principal(), req_id)
+        if transactional:
+            args = dict(args)
+            args["tx_id"] = args.get("tx_id") or "tx_" + secrets.token_hex(16)
+            with self._request_lock:
+                if key in self._request_transactions:
+                    raise OperationError("duplicate_request_id", "dispatch")
+                self._request_transactions[key] = args["tx_id"]
+                cancel_queued = key in self._queued_cancels
+            if cancel_queued:
+                self.engine.request_cancel_pending(args["tx_id"])
+        try:
+            if tool_name == "enclave_tunnel":
+                with self._tunnel_lock:
+                    return self._dispatch_tool(req_id, tool_name, args)
+            return self._dispatch_tool(req_id, tool_name, args)
+        finally:
+            if transactional:
+                with self._request_lock:
+                    self._request_transactions.pop(key, None)
+
+    def stop_all_tunnels(self, owner: str | None = None) -> list[int]:
         """Stop all background tunnels managed by this MCP server."""
         stopped: list[int] = []
-        for port, (srv, th, _) in list(self._active_tunnels.items()):
+        for port, (srv, th, info) in list(self._active_tunnels.items()):
+            if owner is not None and info.get("principal", self.principal) != owner:
+                continue
             try:
                 srv.stop()
                 th.join(timeout=1.5)
@@ -679,9 +758,11 @@ class McpJsonRpcServer:
     ) -> str | None:
         if not self.read_only:
             return None
-        permitted = {"enclave_status", "enclave_audit", "enclave_ssh_config", "node_read_file", "enclave_doctor", "enclave_tunnel"}
+        permitted = {"enclave_status", "enclave_audit", "enclave_ssh_config", "node_read_file", "enclave_doctor", "enclave_tunnel", "enclave_transaction", "enclave_capabilities"}
         if tool_name not in permitted:
             return f"Tool '{tool_name}' is blocked in --read-only mode."
+        if tool_name == "enclave_transaction" and args.get("action", "get") not in ("get", "list"):
+            return "Transaction changes are blocked in --read-only mode."
         if tool_name == "enclave_tunnel" and args.get("action") != "list":
             return "Tunnel changes are blocked in --read-only mode."
         if tool_name == "enclave_doctor" and args.get("fix", False):
@@ -697,8 +778,34 @@ class McpJsonRpcServer:
         if ro_err is not None:
             return self._tool_result(req_id, ro_err, is_error=True)
 
+        if tool_name == "enclave_capabilities":
+            return self._tool_result(req_id, self._json_dump(self.engine.capabilities(), indent=2))
+
+        if tool_name == "enclave_transaction":
+            action = args.get("action", "get")
+            tx_id = args.get("tx_id")
+            if action in ("get", "cancel") and not tx_id:
+                raise OperationError("invalid_arguments", "journal", message="tx_id is required")
+            if self.policy and action in ("get", "cancel"):
+                record = self.engine.transaction_status(tx_id)
+                if not self.node_visible(record["node"]):
+                    raise OperationError("access_denied", "policy")
+            if action == "cancel":
+                value = self.engine.cancel_transaction(tx_id)
+            elif action == "reconcile":
+                grant = self.policy.grant(operation_principal()) if self.policy else None
+                nodes = ({canonical_node(node) for node in grant.nodes} if grant and "*" not in grant.nodes else None)
+                value = {"indeterminate": self.engine.journal.reconcile_expired(operation_principal(), nodes=nodes)}
+            else:
+                value = self.engine.transaction_status(tx_id if action == "get" else None, limit=args.get("limit", 25))
+            if self.policy and isinstance(value, list):
+                value = [item for item in value if self.node_visible(item["node"])]
+            if self.policy and isinstance(value, dict) and "node" in value and not self.node_visible(value["node"]):
+                raise OperationError("access_denied", "policy")
+            return self._tool_result(req_id, self._json_dump(value, indent=2))
+
         if tool_name == "enclave_status":
-            status_data = self.engine.status()
+            status_data = self.public_status()
             return self._tool_result(req_id, self._json_dump(status_data, indent=2))
 
         if tool_name == "enclave_doctor":
@@ -706,6 +813,7 @@ class McpJsonRpcServer:
                 fix=bool(args.get("fix", False)),
                 probe_targets=bool(args.get("probe_targets", False)),
                 actor="mcp",
+                nodes={name for name in self.engine.config.targets if self.node_visible(name)} if self.policy else None,
             )
             return self._tool_result(
                 req_id,
@@ -716,12 +824,12 @@ class McpJsonRpcServer:
         if tool_name == "enclave_heal":
             res = self.engine.heal(
                 update_credentials=bool(args.get("update_credentials", False)),
-                actor="mcp",
+                tx_id=args.get("tx_id"), actor="mcp",
             )
             return self._exec_to_tool_result(req_id, res)
 
         if tool_name == "enclave_clean":
-            clean_data = self.engine.clean_session(actor="mcp")
+            clean_data = self.engine.clean_session(tx_id=args.get("tx_id"), actor="mcp")
             return self._tool_result(req_id, self._json_dump(clean_data, indent=2))
 
         if tool_name == "node_exec":
@@ -735,7 +843,7 @@ class McpJsonRpcServer:
                 env={str(k): str(v) for k, v in raw_env.items()},
                 secret_env={str(k): str(v) for k, v in raw_sec_env.items()},
                 timeout_sec=float(args.get("timeout_sec", 120.0)),
-                actor="mcp",
+                tx_id=args.get("tx_id"), actor="mcp",
             )
             return self._exec_to_tool_result(req_id, res)
 
@@ -747,7 +855,7 @@ class McpJsonRpcServer:
                 str(args["remote_path"]),
                 as_root=bool(args.get("as_root", False)),
                 use_delta=bool(args.get("use_delta", True)),
-                actor="mcp",
+                tx_id=args.get("tx_id"), actor="mcp",
             )
             return self._tool_result(req_id, self._json_dump(meta, indent=2))
 
@@ -760,7 +868,7 @@ class McpJsonRpcServer:
                 str(args["remote_dir"]),
                 as_root=bool(args.get("as_root", False)),
                 exclude=[str(x) for x in raw_excl],
-                actor="mcp",
+                tx_id=args.get("tx_id"), actor="mcp",
             )
             return self._tool_result(req_id, self._json_dump(meta, indent=2))
 
@@ -771,7 +879,7 @@ class McpJsonRpcServer:
                 start_line=int(args.get("start_line", 1)),
                 end_line=int(args.get("end_line", 0)),
                 as_root=bool(args.get("as_root", False)),
-                actor="mcp",
+                tx_id=args.get("tx_id"), actor="mcp",
             )
             return self._tool_result(req_id, self._json_dump(meta, ensure_ascii=False, indent=2))
 
@@ -783,22 +891,24 @@ class McpJsonRpcServer:
                 str(args["replacement"]),
                 as_root=bool(args.get("as_root", False)),
                 expected_sha256=str(args.get("expected_sha256", "")),
-                actor="mcp",
+                tx_id=args.get("tx_id"), actor="mcp",
             )
             return self._tool_result(req_id, self._json_dump(meta, ensure_ascii=False, indent=2))
 
         if tool_name == "enclave_tunnel":
             action = str(args.get("action", "list")).lower()
             if action == "list":
-                active = [info for _, _, info in self._active_tunnels.values()]
+                active = [info for _, _, info in self._active_tunnels.values() if info.get("principal", self.principal) == operation_principal()]
                 return self._tool_result(
                     req_id, self._json_dump({"active_tunnels": active}, indent=2)
                 )
             if action == "stop":
                 port = int(args.get("local_port", 0))
                 if port == 0:
-                    stopped = self.stop_all_tunnels()
+                    stopped = self.stop_all_tunnels(owner=operation_principal())
                 elif port in self._active_tunnels:
+                    if self._active_tunnels[port][2].get("principal", self.principal) != operation_principal():
+                        raise OperationError("access_denied", "policy", message="Tunnel belongs to another principal")
                     srv, th, _ = self._active_tunnels.pop(port)
                     srv.stop()
                     th.join(timeout=1.5)
@@ -814,10 +924,11 @@ class McpJsonRpcServer:
                 if mode == "proxy":
                     aliases = {
                         name: spec.host
-                        for name, spec in self.engine.config.targets.items()
+                        for name, spec in self.engine.config.targets.items() if self.node_visible(name)
                     }
+                    transport = self.scoped_transport()
                     proxy_srv = Socks5VfsServer(
-                        self.engine.rdp_vfs,
+                        transport,
                         bind_host="127.0.0.1",
                         bind_port=req_port,
                         target_aliases=aliases,
@@ -832,6 +943,7 @@ class McpJsonRpcServer:
                         "endpoint": f"127.0.0.1:{bound}",
                         "protocols": ["SOCKS5", "SOCKS4a", "HTTP CONNECT", "HTTP Proxy"],
                     }
+                    info["principal"] = operation_principal()
                     self._active_tunnels[bound] = (proxy_srv, th, info)
                     return self._tool_result(req_id, self._json_dump(info, indent=2))
 
@@ -849,7 +961,7 @@ class McpJsonRpcServer:
                     else target_host_raw
                 )
                 tun_srv = RdpVfsTunnelServer(
-                    self.engine.rdp_vfs,
+                    self.scoped_transport(),
                     local_port=req_port,
                     target_host=resolved_host,
                     target_port=target_port,
@@ -867,6 +979,7 @@ class McpJsonRpcServer:
                     "resolved_host": resolved_host,
                     "target_port": target_port,
                 }
+                info["principal"] = operation_principal()
                 self._active_tunnels[bound] = (tun_srv, th, info)
                 return self._tool_result(req_id, self._json_dump(info, indent=2))
 
@@ -890,7 +1003,7 @@ class McpJsonRpcServer:
         if tool_name == "enclave_ssh_config":
             prefix = str(args.get("prefix", "enclave-"))
             return self._tool_result(
-                req_id, self.engine.generate_ssh_config(prefix=prefix)
+                req_id, self.engine.generate_ssh_config(prefix=prefix, nodes={name for name in self.engine.config.targets if self.node_visible(name)})
             )
 
         if tool_name == "node_db_query":
@@ -925,6 +1038,8 @@ class McpJsonRpcServer:
         payload = {
             "exit_code": res.exit_code,
             "duration_ms": res.duration_ms,
+            "tx_id": getattr(res, "tx_id", ""),
+            "timings_ms": getattr(res, "timings_ms", {}),
             "stdout": truncate_for_context(self.engine.vault.scrubber.scrub(res.stdout), self.max_output_chars),
             "stderr": truncate_for_context(self.engine.vault.scrubber.scrub(res.stderr), self.max_output_chars),
         }
@@ -944,6 +1059,23 @@ class McpJsonRpcServer:
                 "isError": is_error,
             },
         }
+
+    def public_status(self):
+        value = self.engine.status()
+        if self.policy:
+            value["targets"] = [name for name in value.get("targets", []) if self.node_visible(name)]
+        return value
+
+    def node_visible(self, node: str) -> bool:
+        return not self.policy or self.policy.grant(operation_principal()).permits_node(node)
+
+    def visible_tools(self):
+        return [tool for tool in TOOL_DEFINITIONS if not self.policy or self.policy.grant(operation_principal()).permits_tool(tool["name"])]
+
+    def scoped_transport(self):
+        if self.policy:
+            return ScopedMuxTransport(self.engine.rdp_vfs, self.policy, self.policy.grant(operation_principal()))
+        return self.engine.rdp_vfs
 
     def _json_dump(self, value, **kwargs):
         return json.dumps(self.engine.vault.scrubber.scrub(value), **kwargs)
@@ -976,6 +1108,36 @@ class McpJsonRpcServer:
             except TypeError:
                 sink.write(message.encode("utf-8"))
             sink.flush()
+        write_lock = threading.Lock()
+        original_emit = emit
+        def emit(response, framed):
+            with write_lock:
+                original_emit(response, framed)
+        slots = threading.BoundedSemaphore(16)
+        def process(message, framed):
+            try:
+                response = self.handle_message(message)
+                if response is not None:
+                    emit(response, framed)
+            finally:
+                if isinstance(message, dict) and isinstance(message.get("id"), (str, int, float, type(None))):
+                    key = (self.principal, message.get("id"))
+                    with self._request_lock:
+                        self._queued_requests.discard(key)
+                        self._queued_cancels.discard(key)
+                slots.release()
+        with ThreadPoolExecutor(max_workers=8, thread_name_prefix="egw-stdio") as executor:
+            try:
+                self._read_stdio(source, binary_input, emit, process, executor, slots)
+            except KeyboardInterrupt:
+                with self._request_lock:
+                    pending = list(self._request_transactions.values())
+                with identity(self.principal):
+                    for tx_id in pending:
+                        self.engine.request_cancel_pending(tx_id)
+                raise
+
+    def _read_stdio(self, source, binary_input, emit, process, executor, slots):
         while True:
             line = source.readline(MAX_RPC_BYTES + 1)
             if not line:
@@ -1017,9 +1179,22 @@ class McpJsonRpcServer:
                 if framed:
                     break
                 continue
-            response = self.handle_message(msg)
-            if response is not None:
-                emit(response, framed)
+            if isinstance(msg, dict) and "id" not in msg:
+                self.handle_message(msg)
+            elif slots.acquire(blocking=False):
+                if isinstance(msg, dict) and isinstance(msg.get("id"), (str, int, float, type(None))):
+                    key = (self.principal, msg.get("id"))
+                    with self._request_lock:
+                        duplicate = key in self._queued_requests
+                        if not duplicate:
+                            self._queued_requests.add(key)
+                    if duplicate:
+                        slots.release()
+                        emit(self._error(msg["id"], -32600, "Duplicate active request id"), framed)
+                        continue
+                executor.submit(process, msg, framed)
+            else:
+                emit(self._error(msg.get("id") if isinstance(msg, dict) else None, -32000, "Server request queue is full"), framed)
 
 
 def export_openai_tools() -> list[dict[str, Any]]:
@@ -1089,13 +1264,26 @@ class McpHttpServer:
         *,
         bearer_token: str = "",
         allowed_origins: tuple[str, ...] = (),
+        principal_tokens: dict[str, str] | None = None,
     ) -> None:
         self.rpc_server = rpc_server
         self.bind_host = bind_host
         self.bind_port = bind_port
         self.bearer_token = bearer_token
+        self.principal_tokens = dict(principal_tokens or {})
+        if bearer_token in self.principal_tokens and self.principal_tokens[bearer_token] != rpc_server.principal:
+            raise ValueError("One token cannot identify multiple principals")
+        if rpc_server.policy:
+            for token, owner in self.principal_tokens.items():
+                if len(token) < 16:
+                    raise ValueError("Principal token must contain at least 16 characters")
+                rpc_server.policy.grant(owner)
+            if not bearer_token and not self.principal_tokens:
+                raise ValueError("A scoped HTTP server requires authenticated principal tokens")
+            if bearer_token and len(bearer_token) < 16:
+                raise ValueError("Scoped bearer token must contain at least 16 characters")
         self.allowed_origins = frozenset(allowed_origins)
-        if bind_host not in ("127.0.0.1", "localhost", "::1") and not bearer_token:
+        if bind_host not in ("127.0.0.1", "localhost", "::1") and not bearer_token and not self.principal_tokens:
             raise ValueError("Non-loopback HTTP listeners require a bearer token")
         self._httpd: ThreadingHTTPServer | None = None
 
@@ -1123,10 +1311,23 @@ class McpHttpServer:
                 if origin is not None and origin not in permitted:
                     self._send_json(403, {"error": "Invalid Origin"})
                     return False
-                if not require_token or not parent.bearer_token:
+                self.principal = parent.rpc_server.principal
+                if not require_token:
                     return True
-                auth = self.headers.get("Authorization", "")
-                if hmac.compare_digest(auth.encode(), f"Bearer {parent.bearer_token}".encode()):
+                if not parent.bearer_token and not parent.principal_tokens:
+                    return True
+                if len(self.headers.get_all("Authorization", [])) != 1:
+                    self._send_json(401, {"error": "One authorization credential is required"})
+                    return False
+                auth = self.headers.get("Authorization", "").encode()
+                matched = None
+                for token, owner in parent.principal_tokens.items():
+                    if hmac.compare_digest(auth, ("Bearer " + token).encode()):
+                        matched = owner
+                if parent.bearer_token and hmac.compare_digest(auth, ("Bearer " + parent.bearer_token).encode()):
+                    matched = parent.rpc_server.principal
+                if matched is not None:
+                    self.principal = matched
                     return True
                 self._send_json(401, {"error": "Unauthorized"})
                 return False
@@ -1163,10 +1364,18 @@ class McpHttpServer:
                     return
                 if path == "/openapi.json":
                     url = f"http://{parent.bind_host}:{parent.bind_port}"
-                    self._send_json(200, export_openapi_spec(url))
+                    spec = export_openapi_spec(url)
+                    if parent.rpc_server.policy:
+                        grant = parent.rpc_server.policy.grant(self.principal)
+                        spec["paths"] = {path: item for path, item in spec["paths"].items() if grant.permits_tool(path.rsplit("/", 1)[-1])}
+                    self._send_json(200, spec)
                     return
                 if path == "/v1/tools":
-                    self._send_json(200, {"tools": export_openai_tools()})
+                    listing = export_openai_tools()
+                    if parent.rpc_server.policy:
+                        grant = parent.rpc_server.policy.grant(self.principal)
+                        listing = [tool for tool in listing if grant.permits_tool(tool["function"]["name"])]
+                    self._send_json(200, {"tools": listing})
                     return
                 if path == "/healthz":
                     self._send_json(200, {"status": "ok", "version": __version__})
@@ -1204,7 +1413,7 @@ class McpHttpServer:
                     if self.headers.get("MCP-Protocol-Version", MCP_PROTOCOL_VERSION) not in MCP_PROTOCOL_VERSIONS:
                         self._send_json(400, {"error": "Unsupported protocol version"})
                         return
-                    resp = parent.rpc_server.handle_message(body)
+                    resp = parent.rpc_server.handle_message(body, principal=self.principal)
                     if resp is None:
                         self.send_response(202)
                         self.end_headers()
@@ -1224,7 +1433,7 @@ class McpHttpServer:
                             "id": "http-tool-call",
                             "method": "tools/call",
                             "params": {"name": t_name, "arguments": t_args},
-                        }
+                        }, principal=self.principal
                     )
                     self._send_json(200, rpc_resp or {})
                     return
@@ -1237,10 +1446,11 @@ class McpHttpServer:
                             "id": f"openapi-{t_name}",
                             "method": "tools/call",
                             "params": {"name": t_name, "arguments": body},
-                        }
+                        }, principal=self.principal
                     )
                     if "error" in (rpc_resp or {}):
-                        self._send_json(400, rpc_resp["error"])
+                        code = rpc_resp["error"]["code"]
+                        self._send_json(403 if code == -32003 else 422 if code == -32001 else 400, rpc_resp["error"])
                         return
                     result = (rpc_resp or {}).get("result", {})
                     content = result.get("content") or []

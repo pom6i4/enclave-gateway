@@ -5,6 +5,8 @@ from __future__ import annotations
 import socket
 import time
 
+from enclave_gateway.operations.context import budget, checkpoint
+
 
 class SocketLineReader:
     def __init__(self, sock: socket.socket, deadline: float, max_bytes: int = 96 * 1024 * 1024):
@@ -14,16 +16,22 @@ class SocketLineReader:
         self.buffer = bytearray()
 
     def _receive(self) -> None:
-        remaining = self.deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError("Control channel deadline expired")
-        self.sock.settimeout(remaining)
-        chunk = self.sock.recv(65536)
-        if not chunk:
-            raise ConnectionError("EOF on control channel")
-        self.buffer.extend(chunk)
-        if len(self.buffer) > self.max_bytes:
-            raise ValueError("Control channel frame exceeds size limit")
+        while True:
+            checkpoint("control.receive")
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Control channel deadline expired")
+            self.sock.settimeout(min(0.2, budget(remaining, "control.receive")))
+            try:
+                chunk = self.sock.recv(65536)
+            except socket.timeout:
+                continue
+            if not chunk:
+                raise ConnectionError("EOF on control channel")
+            self.buffer.extend(chunk)
+            if len(self.buffer) > self.max_bytes:
+                raise ValueError("Control channel frame exceeds size limit")
+            return
 
     def sync_marker(self) -> None:
         while 255 not in self.buffer:

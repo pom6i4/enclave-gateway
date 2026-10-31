@@ -73,10 +73,21 @@ class ProviderSpec:
     dst_password_env: str = "ENCLAVE_VPN_KEY_PASSWORD"
     adapter_name: str = "Infotecs"
     service_name: str = ""
+    qualified_versions: list[str] = field(default_factory=list)
+    qualified_architectures: list[str] = field(default_factory=list)
+    expected_publisher: str = ""
     probe_host: str = "10.0.1.10"
     probe_port: int = 3389
     routes: list[str] = field(default_factory=list)
     dns_servers: list[str] = field(default_factory=list)
+
+
+    def __post_init__(self):
+        for entries in (self.qualified_versions, self.qualified_architectures):
+            if not isinstance(entries, list) or any(not isinstance(value, str) for value in entries):
+                raise ValueError("Qualified provider versions/architectures must be string lists")
+        if not isinstance(self.expected_publisher, str):
+            raise ValueError("Provider publisher must be a string")
 
 
 @dataclass(slots=True)
@@ -133,11 +144,27 @@ class PortForwardSpec:
 
 
 @dataclass(slots=True)
+class SecuritySpec:
+    askpass_helper_path: str = r"%LOCALAPPDATA%\EnclaveGateway\bin\egw-askpass.exe"
+    trusted_signers: list[str] = field(default_factory=list)
+    require_signed_helpers: bool = True
+    require_signed_agents: bool = True
+
+
+    def __post_init__(self):
+        if type(self.require_signed_helpers) is not bool or type(self.require_signed_agents) is not bool:
+            raise ValueError("Signature requirements must be boolean")
+        if not isinstance(self.trusted_signers, list) or any(not isinstance(value, str) or not re.fullmatch(r"[A-Fa-f0-9]{40,64}", value.replace(" ", "")) for value in self.trusted_signers):
+            raise ValueError("Trusted signers must be certificate thumbprints")
+
+
+@dataclass(slots=True)
 class EnclaveConfig:
     profile: str = "default"
     appliance: ApplianceSpec = field(default_factory=ApplianceSpec)
     provider: ProviderSpec = field(default_factory=ProviderSpec)
     bastion: BastionSpec = field(default_factory=BastionSpec)
+    security: SecuritySpec = field(default_factory=SecuritySpec)
     targets: dict[str, TargetNodeSpec] = field(default_factory=dict)
     forwards: dict[str, PortForwardSpec] = field(default_factory=dict)
 
@@ -198,6 +225,7 @@ class EnclaveConfig:
 
         return cls(
             profile=str(raw.get("profile", "default")),
+            security=SecuritySpec(**{key: value for key, value in dict(raw.get("security") or {}).items() if key in SecuritySpec.__dataclass_fields__}),
             appliance=ApplianceSpec(
                 **{k: v for k, v in app_raw.items() if k in ApplianceSpec.__dataclass_fields__}
             ),

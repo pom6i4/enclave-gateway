@@ -13,6 +13,7 @@ import secrets
 import shlex
 import tarfile
 import time
+import threading
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -32,6 +33,10 @@ DEFAULT_SYNC_EXCLUDES = (
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 from enclave_gateway.audit.flight_recorder import FlightRecorder
+from enclave_gateway.operations.context import OperationError, budget, checkpoint, current, mark_dispatched, principal, timed, owned_cleanup
+from enclave_gateway.operations.journal import TransactionJournal, TERMINAL
+from enclave_gateway.operations.runner import tracked
+from enclave_gateway.providers import provider_adapter
 from enclave_gateway.config import EnclaveConfig, TargetNodeSpec
 from enclave_gateway.control.qga_client import (
     ControlChannel,
@@ -42,6 +47,7 @@ from enclave_gateway.control.qga_client import (
 from enclave_gateway.hypervisor.driver import ApplianceHypervisor
 from enclave_gateway.security.secrets import SecretVault, verify_command_safety
 from enclave_gateway.security.quoting import ps_quote, ssh_config_quote
+from enclave_gateway.security.policy import active_grant
 from enclave_gateway.transports.ssh_hop import _node_uri, _build_b64_decode_expr
 from enclave_gateway.transports.rdp_vfs import RdpVfsTransport, generate_tx_id
 from enclave_gateway.transports.ssh_hop import SshHopExecutor
@@ -86,11 +92,16 @@ class EnclaveEngine:
         vault: SecretVault | None = None,
         recorder: FlightRecorder | None = None,
         control_override: ControlChannel | None = None,
+        journal: TransactionJournal | None = None,
     ) -> None:
         self.config = config or EnclaveConfig.load()
         self.vault = vault or SecretVault()
         self.recorder = recorder or FlightRecorder()
         self.recorder.scrubber = self.vault.scrubber
+        self.journal = journal or TransactionJournal(self.recorder.log_path.with_suffix(".transactions.sqlite3"))
+        self._operations_lock = threading.RLock()
+        self._operations = {}
+        self._pending_cancels = set()
         self.hypervisor = ApplianceHypervisor(self.config.appliance)
 
         if control_override is not None:
@@ -109,11 +120,17 @@ class EnclaveEngine:
             push_hop_fn=self._push_bastion_vfs_stage,
             pull_hop_fn=self._pull_bastion_vfs_stage,
             stage_dir=self.config.bastion.bastion_spool_dir,
+            helper_path=self.config.security.askpass_helper_path,
+            trusted_signers=self.config.security.trusted_signers,
+            require_signed=self.config.security.require_signed_helpers,
         )
         self.appliance_ssh = SshHopExecutor(
             exec_hop_fn=self.control.exec_powershell,
             push_hop_fn=self._push_to_appliance_with_sha,
             pull_hop_fn=self._pull_from_appliance_with_sha,
+            helper_path=self.config.security.askpass_helper_path,
+            trusted_signers=self.config.security.trusted_signers,
+            require_signed=self.config.security.require_signed_helpers,
         )
 
     def _push_bastion_vfs_stage(
@@ -149,7 +166,9 @@ class EnclaveEngine:
     ) -> str:
         from enclave_gateway.transports.rdp_vfs import compute_file_sha256
 
+        checkpoint("appliance.upload")
         sha = compute_file_sha256(local_path)
+        mark_dispatched()
         self.control.write_file(local_path, guest_path)
         return sha
 
@@ -158,6 +177,7 @@ class EnclaveEngine:
     ) -> str:
         from enclave_gateway.transports.rdp_vfs import compute_file_sha256
 
+        checkpoint("appliance.download")
         self.control.read_file(guest_path, local_path)
         return compute_file_sha256(local_path)
 
@@ -167,6 +187,7 @@ class EnclaveEngine:
             stdout=self.vault.scrubber.scrub(res.stdout),
             stderr=self.vault.scrubber.scrub(res.stderr),
             duration_ms=res.duration_ms,
+            tx_id=res.tx_id, timings_ms=dict(res.timings_ms),
         )
 
     def status(self) -> dict[str, Any]:
@@ -200,26 +221,10 @@ class EnclaveEngine:
             return report
 
         provider = self.config.provider
-        service = provider.service_name or {"wireguard": "WireGuardTunnel$*", "anyconnect": "vpnagent", "openvpn": "OpenVPNService*"}.get(provider.type, "")
-        probe_ps = f"""
-$info = ""
-$ptype = {ps_quote(provider.type)}
-$binary = {ps_quote(provider.binary_path)}
+        adapter = provider_adapter(provider.type)
+        probe_ps = adapter.probe_script(provider) + f"""
 $adapterName = {ps_quote(provider.adapter_name)}
 $adapter = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {{ $_.Name -eq $adapterName -or $_.InterfaceDescription -like "*$adapterName*" }})
-$serviceName = {ps_quote(service)}
-if ($serviceName) {{ $info = (Get-Service -Name $serviceName -ErrorAction SilentlyContinue | Select-Object Name, Status | Out-String).Trim() }}
-if ($ptype -eq 'wireguard') {{
-    if (-not $binary) {{ $binary = Join-Path $env:ProgramFiles 'WireGuard\\wg.exe' }}
-    if (Test-Path -LiteralPath $binary) {{ $info = (& $binary show | Out-String).Trim() }}
-}} elseif ($ptype -eq 'anyconnect') {{
-    if (-not $binary) {{
-        foreach ($candidate in @("${{env:ProgramFiles(x86)}}\\Cisco\\Cisco Secure Client\\vpncli.exe", "${{env:ProgramFiles(x86)}}\\Cisco\\Cisco AnyConnect Secure Mobility Client\\vpncli.exe")) {{
-            if (Test-Path -LiteralPath $candidate) {{ $binary = $candidate; break }}
-        }}
-    }}
-    if ($binary -and (Test-Path -LiteralPath $binary)) {{ $info = (& $binary state | Out-String).Trim() }}
-}}
 $tcp = Test-NetConnection -ComputerName {ps_quote(provider.probe_host)} -Port {provider.probe_port} -WarningAction SilentlyContinue
 $spool = {ps_quote(self.config.bastion.appliance_spool_dir)}
 $stateJson = ""
@@ -235,15 +240,18 @@ $out = @{{
     source_ip = [string]$tcp.SourceAddress
     source_interface = [string]$tcp.InterfaceAlias
     vpn_info = $info
+    provider_evidence = $providerEvidence
     worker = $stateJson
 }}
-ConvertTo-Json $out -Compress
+ConvertTo-Json $out -Compress -Depth 8
 """
         try:
             res = self.control.exec_powershell(probe_ps, timeout_sec=20.0)
             if res.exit_code == 0 and res.stdout:
                 data = json.loads(res.stdout.splitlines()[-1])
                 report["provider"]["tunnel_up"] = bool(data.get("tunnel_up"))
+                report["provider"]["evidence"] = data.get("provider_evidence", {})
+                report["provider"]["capabilities"] = adapter.capabilities()
                 report["provider"]["source_ip"] = data.get("source_ip", "")
                 report["provider"]["probe_reachable"] = data.get("probe_reachable", False)
                 report["provider"]["source_interface"] = data.get("source_interface", "")
@@ -262,9 +270,10 @@ ConvertTo-Json $out -Compress
 
         return report
 
+    @tracked("heal")
     def heal(self, *, update_credentials: bool = False, actor: str = "cli") -> ExecResult:
         """Self-heal clock drift, MTU, RDP UDP policy, interactive credentials, and Bastion RDP session."""
-        tx_id = generate_tx_id()
+        tx_id = current().tx_id if current() else generate_tx_id()
         sync_fn = getattr(self.control, "sync_guest_clock", None)
         if callable(sync_fn):
             sync_fn()
@@ -358,6 +367,7 @@ ConvertTo-Json $out -Compress
             )
         return False
 
+    @tracked("exec_node")
     def exec_node(
         self,
         node: str,
@@ -372,16 +382,19 @@ ConvertTo-Json $out -Compress
     ) -> ExecResult:
         """Execute a script on @appliance, @bastion, or a named TargetNode."""
         verify_command_safety(script, confirm_destructive=confirm_destructive)
-        tx_id = generate_tx_id()
+        tx_id = current().tx_id if current() else generate_tx_id()
         is_ps = self._is_powershell_node(node)
         full_script = self._inject_env_into_script(
             script, is_powershell=is_ps, env=env, secret_env=secret_env
         )
 
         if node in ("@appliance", "appliance"):
-            raw_res = self.control.exec_powershell(full_script, timeout_sec=timeout_sec)
+            mark_dispatched()
+            with timed("appliance.exec"):
+                raw_res = self.control.exec_powershell(full_script, timeout_sec=budget(timeout_sec))
         elif node in ("@bastion", "bastion"):
-            raw_res = self.rdp_vfs.exec_bastion(full_script, timeout_sec=timeout_sec)
+            with timed("bastion.exec"):
+                raw_res = self.rdp_vfs.exec_bastion(full_script, timeout_sec=budget(timeout_sec))
         else:
             target = self._resolve_target(node)
             ssh_pw = (
@@ -415,6 +428,7 @@ ConvertTo-Json $out -Compress
         )
         return clean_res
 
+    @tracked("transfer_file")
     def transfer_file(
         self,
         direction: str,
@@ -428,9 +442,10 @@ ConvertTo-Json $out -Compress
         actor: str = "cli",
     ) -> dict[str, Any]:
         """Push or pull a file between Host and @appliance, @bastion, or a TargetNode."""
-        tx_id = generate_tx_id()
+        tx_id = current().tx_id if current() else generate_tx_id()
         started = time.monotonic()
         lpath = Path(local_path).expanduser().resolve()
+        self._verify_scoped_path(node, remote_path, timeout_sec)
 
         if direction == "push":
             if not lpath.is_file():
@@ -513,6 +528,7 @@ ConvertTo-Json $out -Compress
             "duration_ms": duration_ms,
         }
 
+    @tracked("read_remote_file")
     def read_remote_file(
         self,
         node: str,
@@ -556,6 +572,7 @@ ConvertTo-Json $out -Compress
                 "content": scrubbed,
             }
 
+    @tracked("patch_remote_file")
     def patch_remote_file(
         self,
         node: str,
@@ -651,7 +668,7 @@ echo EGW_PATCH_COMMIT_OK
             finally:
                 cleanup = (f"Remove-Item -LiteralPath {ps_quote(stage)} -Force -ErrorAction SilentlyContinue" if self._is_powershell_node(node)
                            else f"rm -f -- {shlex.quote(stage)}")
-                self.exec_node(node, cleanup, as_root=as_root, confirm_destructive=True, timeout_sec=30.0, actor=actor)
+                self._cleanup_owned(node, cleanup, as_root=as_root, actor=actor)
             return {
                 "node": node,
                 "remote_path": remote_path,
@@ -661,6 +678,7 @@ echo EGW_PATCH_COMMIT_OK
                 "as_root": as_root,
             }
 
+    @tracked("sync_directory")
     def sync_directory(
         self,
         direction: str,
@@ -674,7 +692,7 @@ echo EGW_PATCH_COMMIT_OK
         actor: str = "cli",
     ) -> dict[str, Any]:
         """Batch-synchronize a directory between Host and @appliance, @bastion, or a TargetNode via streaming tar.gz."""
-        tx_id = generate_tx_id()
+        tx_id = current().tx_id if current() else generate_tx_id()
         started = time.monotonic()
         ldir = Path(local_dir).expanduser().resolve()
         patterns = list(DEFAULT_SYNC_EXCLUDES) + list(exclude or [])
@@ -833,13 +851,7 @@ echo "SYNC_PACK_OK"
                         if is_windows_node
                         else f"rm -f '{remote_stage}'"
                     )
-                    self.exec_node(
-                        node,
-                        cleanup_cmd,
-                        as_root=as_root and not is_windows_node,
-                        timeout_sec=30.0,
-                        actor=actor,
-                    )
+                    self._cleanup_owned(node, cleanup_cmd, as_root=as_root and not is_windows_node, actor=actor)
 
                 ldir.mkdir(parents=True, exist_ok=True)
                 with tarfile.open(archive_path, "r:gz") as tf:
@@ -873,9 +885,10 @@ echo "SYNC_PACK_OK"
             "duration_ms": duration_ms,
         }
 
+    @tracked("bootstrap_ssh_key")
     def bootstrap_ssh_key(self, node: str, *, actor: str = "cli") -> ExecResult:
         """Generate hop host SSH keypair if missing and install public key onto TargetNode."""
-        tx_id = generate_tx_id()
+        tx_id = current().tx_id if current() else generate_tx_id()
         target = self._resolve_target(node)
         ssh_pw = self.vault.get(target.password_env) if target.password_env else ""
         hop, jump_node = self._resolve_hop_and_jump(target)
@@ -900,6 +913,7 @@ echo "SYNC_PACK_OK"
         fix: bool = False,
         probe_targets: bool = False,
         actor: str = "cli",
+        nodes: set[str] | None = None,
     ) -> dict[str, Any]:
         """Run end-to-end L1-L7 diagnostic checklist across Host, Appliance, VPN, Bastion, and Targets."""
         st = self.status()
@@ -989,6 +1003,8 @@ Write-Output ("DIAG_CLOCK:" + $epoch + ":UDP:" + [int]$udpPol)
 
         if probe_targets and wrk_ok:
             for t_name in self.config.targets:
+                if nodes is not None and t_name not in nodes:
+                    continue
                 t_res = self.exec_node(t_name, "echo TARGET_SSH_OK", timeout_sec=20.0, actor=actor)
                 checks.append(
                     {
@@ -1003,7 +1019,7 @@ Write-Output ("DIAG_CLOCK:" + $epoch + ":UDP:" + [int]$udpPol)
             heal_result = self.heal(actor=actor)
             healed = heal_result.exit_code == 0
             if healed:
-                refreshed = self.doctor(fix=False, probe_targets=probe_targets, actor=actor)
+                refreshed = self.doctor(fix=False, probe_targets=probe_targets, actor=actor, nodes=nodes)
                 refreshed["auto_healed"] = True
                 return refreshed
 
@@ -1014,18 +1030,14 @@ Write-Output ("DIAG_CLOCK:" + $epoch + ":UDP:" + [int]$udpPol)
             "checks": checks,
         }
 
+    @tracked("clean_session")
     def clean_session(self, *, actor: str = "cli") -> dict[str, Any]:
         """Purge transient spool chunks, staging files, and idle multiplexed sockets across tiers."""
-        tx_id = generate_tx_id()
+        tx_id = current().tx_id if current() else generate_tx_id()
         started = time.monotonic()
 
+        self.rdp_vfs.close_mux_sessions()
         bastion_clean_ps = """
-if ($Global:EnclaveMuxSockets) {
-    foreach ($k in @($Global:EnclaveMuxSockets.Keys)) {
-        try { $Global:EnclaveMuxSockets[$k].Client.Close() } catch {}
-    }
-    $Global:EnclaveMuxSockets.Clear()
-}
 $stageDir = Join-Path $env:LOCALAPPDATA 'EnclaveGateway\\stage'
 if (Test-Path $stageDir) {
     Get-ChildItem -Path $stageDir -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
@@ -1067,6 +1079,7 @@ Write-Output 'APPLIANCE_CLEAN_OK'
         *,
         config_path: str | None = None,
         prefix: str = "enclave-",
+        nodes: set[str] | None = None,
     ) -> str:
         """Generate an OpenSSH ~/.ssh/config block using `egw stdio-proxy %h %p`."""
         cfg_flag = f" -c {shlex.quote(config_path)}" if config_path else ""
@@ -1076,6 +1089,10 @@ Write-Output 'APPLIANCE_CLEAN_OK'
         if not re.fullmatch(r"[A-Za-z0-9_-]*", prefix):
             raise ValueError("Invalid SSH alias prefix")
         for name, spec in sorted(self.config.targets.items()):
+            if nodes is not None and name not in nodes:
+                continue
+            if nodes is not None and spec.via in self.config.targets and spec.via not in nodes:
+                raise OperationError("access_denied", "ssh.config", message="Jump node is outside the grant")
             host_alias = f"{prefix}{name}" if prefix else name
             lines.extend(
                 [
@@ -1246,7 +1263,8 @@ Write-Output 'APPLIANCE_CLEAN_OK'
             if body:
                 encoded = base64.b64encode(body.encode()).decode("ascii")
                 body_arg = f"-Body ([Convert]::FromBase64String('{encoded}'))"
-            script = f"$ErrorActionPreference='Stop'; $resp=Invoke-WebRequest -Uri {ps_quote(url)} -Method {ps_quote(method)} -Headers @{{{entries}}} {body_arg} -UseBasicParsing; Write-Output $resp.Content; Write-Output \"---HTTP_STATUS:$($resp.StatusCode)---\""
+            redirect_option = "-MaximumRedirection 0" if active_grant() else ""
+            script = f"$ErrorActionPreference='Stop'; $resp=Invoke-WebRequest -Uri {ps_quote(url)} -Method {ps_quote(method)} -Headers @{{{entries}}} {body_arg} {redirect_option} -UseBasicParsing; Write-Output $resp.Content; Write-Output \"---HTTP_STATUS:$($resp.StatusCode)---\""
             return self.exec_node(node, script, actor=actor)
         data = {"url": url, "method": method, "headers": headers or {}, "body": body, "insecure": insecure_tls}
         encoded = base64.b64encode(json.dumps(data).encode()).decode("ascii")
@@ -1254,17 +1272,112 @@ Write-Output 'APPLIANCE_CLEAN_OK'
                   f"d=json.loads(base64.b64decode('{encoded}')); "
                   "r=urllib.request.Request(d['url'],data=d['body'].encode() if d['body'] else None,headers=d['headers'],method=d['method']); "
                   "ctx=ssl._create_unverified_context() if d['insecure'] else None; "
-                  "\ntry: p=urllib.request.urlopen(r,context=ctx,timeout=30)\nexcept urllib.error.HTTPError as e: p=e\n"
+                  "\nclass NoRedirect(urllib.request.HTTPRedirectHandler):\n def redirect_request(self,*args,**kwargs): return None\n"
+                  "opener=urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx),NoRedirect)\n"
+                  "try: p=opener.open(r,timeout=30)\nexcept urllib.error.HTTPError as e: p=e\n"
                   "print(p.read().decode('utf-8','replace')); print('---HTTP_STATUS:'+str(p.status)+'---')")
         header_args = " ".join("-H " + shlex.quote(f"{k}: {v}") for k, v in (headers or {}).items())
         body64 = base64.b64encode(body.encode()).decode("ascii")
         curl = f"curl -sS --max-time 30 --proto '=http,https' {'-k' if insecure_tls else ''} -X {shlex.quote(method)} {header_args} {'--data-binary @-' if body else ''} -w '\\n---HTTP_STATUS:%{{http_code}}---\\n' -- {shlex.quote(url)}"
         if body:
             curl = _build_b64_decode_expr(body64) + " | " + curl
-        wget = (f"wget --timeout=30 -S -O- {'--no-check-certificate' if insecure_tls else ''} -- {shlex.quote(url)}" if method == "GET" and not headers and not body
+        wget = (f"wget --timeout=30 --max-redirect=0 -S -O- {'--no-check-certificate' if insecure_tls else ''} -- {shlex.quote(url)}" if method == "GET" and not headers and not body
                 else "echo 'No HTTP client supports the requested method/headers/body' >&2; exit 1")
         script = f"if command -v curl >/dev/null 2>&1; then {curl}; elif command -v python3 >/dev/null 2>&1; then python3 -c {shlex.quote(python)}; else {wget}; fi"
         return self.exec_node(node, script, actor=actor)
+
+    def _cleanup_owned(self, node, script, *, as_root=False, actor="cli"):
+        try:
+            with owned_cleanup():
+                self.exec_node(node, script, as_root=as_root, confirm_destructive=True, timeout_sec=2, actor=actor)
+        except Exception:
+            # Cleanup of a tx-specific stage is bounded and best effort. It must
+            # not mask a conflict, cancellation, or the original remote failure.
+            pass
+
+    def _verify_scoped_path(self, node: str, path: str, timeout: float) -> None:
+        grant = active_grant()
+        if not grant or grant.unrestricted_paths:
+            return
+        # Path grants cover structured file operations only. Reject reparse points
+        # and symlink ancestors instead of treating lexical containment as proof.
+        if isinstance(self.control, DirectHostControlChannel) and node in ("@appliance", "appliance"):
+            target = self.control._map_path(path)
+            if self.control.root_dir is not None:
+                raw = path.replace("\\", "/")
+                if len(raw) > 1 and raw[1] == ":":
+                    raw = raw[2:]
+                target = self.control.root_dir / raw.lstrip("/")
+            for item in [target] + list(target.parents):
+                if item.is_symlink():
+                    raise OperationError("access_denied", "path", node=node, message="Symlink paths are not granted")
+            return
+        if self._is_powershell_node(node):
+            script = f"""
+$ErrorActionPreference='Stop'
+$p=[IO.Path]::GetFullPath({ps_quote(path)})
+while ($p) {{
+    if (Test-Path -LiteralPath $p) {{
+        $item=Get-Item -LiteralPath $p -Force
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {{ throw 'Reparse-point paths are not granted' }}
+    }}
+    $parent=[IO.Path]::GetDirectoryName($p)
+    if ($parent -eq $p) {{ break }}
+    $p=$parent
+}}
+Write-Output 'PATH_GRANT_OK'
+"""
+        else:
+            script = "p=" + shlex.quote(path) + "; while [ \"$p\" != / ]; do [ ! -L \"$p\" ] || exit 1; p=$(dirname -- \"$p\") || exit 1; done; echo PATH_GRANT_OK"
+        result = self.exec_node(node, script, timeout_sec=budget(timeout, "path.verify"))
+        if result.exit_code or "PATH_GRANT_OK" not in result.stdout:
+            raise OperationError("access_denied", "path", node=node, message="Cannot prove remote path containment")
+
+    def capabilities(self):
+        import platform
+        import shutil
+        import sys
+        return {"host": {"os": platform.system(), "arch": platform.machine(), "python": sys.version.split()[0]},
+                "tools": {name: bool(shutil.which(name)) for name in ("ssh", "pwsh", "powershell.exe", "qemu-img")},
+                "provider": provider_adapter(self.config.provider.type).capabilities(),
+                "transactions": {"durable": True, "replay_ambiguous": False, "cancellation": "requested-until-confirmed"},
+                "security": {"signed_helper_required": self.config.security.require_signed_helpers,
+                             "signed_agents_required": self.config.security.require_signed_agents,
+                             "trusted_publishers_configured": bool(self.config.security.trusted_signers)},
+                "qualification": {"windows_guest": "not_verified", "rdpdr": "not_verified", "vendor_driver": "not_verified"}}
+
+    def transaction_status(self, tx_id: str | None = None, *, limit: int = 25):
+        if tx_id:
+            record = self.journal.get(tx_id, principal())
+            if record is None:
+                raise OperationError("transaction_not_found", "journal", tx_id=tx_id)
+            return record
+        return self.journal.recent(principal(), limit)
+
+    def request_cancel_pending(self, tx_id: str):
+        owner = principal()
+        with self._operations_lock:
+            context = self._operations.get(tx_id)
+            if context is None:
+                self._pending_cancels.add((owner, tx_id))
+        if context and context.principal == owner:
+            context.cancel()
+
+    def cancel_transaction(self, tx_id: str):
+        record = self.journal.get(tx_id, principal())
+        if record is None:
+            raise OperationError("transaction_not_found", "cancel", tx_id=tx_id)
+        if record["state"] in TERMINAL:
+            return record
+        with self._operations_lock:
+            context = self._operations.get(tx_id)
+        if context and context.principal == principal():
+            context.cancel()
+            # Cancellation request is not confirmation of remote process exit.
+            self.journal.request_cancel(tx_id, principal())
+        else:
+            self.journal.reconcile_expired(principal())
+        return self.transaction_status(tx_id)
 
     def _resolve_target(self, name: str) -> TargetNodeSpec:
         if name not in self.config.targets:

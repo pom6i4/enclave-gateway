@@ -11,11 +11,12 @@ import subprocess
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, Protocol
 
 from enclave_gateway.control.wire import SocketLineReader
+from enclave_gateway.operations.context import budget, checkpoint, current, mark_dispatched, timed, owned_cleanup
 
 try:
     import fcntl
@@ -34,6 +35,8 @@ class ExecResult:
     stdout: str
     stderr: str
     duration_ms: int
+    tx_id: str = ""
+    timings_ms: dict[str, int] = field(default_factory=dict)
 
 
 class ControlChannel(Protocol):
@@ -63,6 +66,7 @@ def _file_lock(lock_path: Path, timeout_sec: float = 30.0) -> Iterator[None]:
             fp.flush()
         deadline = time.monotonic() + timeout_sec
         while True:
+            checkpoint("control.file_lock")
             try:
                 if fcntl is not None:
                     fcntl.flock(fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -109,9 +113,15 @@ class QgaClient:
 
     @contextmanager
     def _connect_synced(self, timeout_sec: float = 30.0) -> Iterator[tuple[socket.socket, object]]:
+        timeout_sec = budget(timeout_sec, "qga.lock")
         deadline = time.monotonic() + timeout_sec
-        if not self._thread_lock.acquire(timeout=max(0.0, timeout_sec)):
-            raise TimeoutError("Timed out waiting for control channel thread lock")
+        while True:
+            checkpoint("qga.lock")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Timed out waiting for control channel thread lock")
+            if self._thread_lock.acquire(timeout=min(0.1, remaining)):
+                break
         try:
             with _file_lock(self.lock_path, max(0.0, deadline - time.monotonic())):
                 with self._open_synced(deadline) as connection:
@@ -143,6 +153,12 @@ class QgaClient:
         payload = {"execute": command}
         if arguments is not None:
             payload["arguments"] = arguments
+        checkpoint("qga." + command)
+        context = current()
+        if context:
+            sock.settimeout(context.remaining())
+        if command == "guest-exec":
+            mark_dispatched()
         sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
         response = json.loads(reader.readline())
         if not isinstance(response, dict) or "return" not in response:
@@ -163,7 +179,7 @@ class QgaClient:
                 self._request(sock, reader, "guest-file-close", {"handle": handle})
             except Exception:
                 try:
-                    with self._open_synced(time.monotonic() + 5.0) as (cleanup_sock, cleanup_reader):
+                    with owned_cleanup(), self._open_synced(time.monotonic() + 2.0) as (cleanup_sock, cleanup_reader):
                         self._request(cleanup_sock, cleanup_reader, "guest-file-close", {"handle": handle})
                 except Exception:
                     if not active_error:
@@ -198,6 +214,7 @@ class QgaClient:
                         raise OSError("QGA file read made no progress")
 
     def exec_powershell(self, script: str, timeout_sec: float = 120.0) -> ExecResult:
+        timeout_sec = budget(timeout_sec, "qga.exec")
         started = time.monotonic()
         deadline = started + timeout_sec
         encoded_cmd = base64.b64encode(script.encode("utf-16le")).decode("ascii")
@@ -210,6 +227,7 @@ class QgaClient:
             pid = result["pid"]
         delay = 0.015
         while time.monotonic() < deadline:
+            checkpoint("qga.exec_status")
             time.sleep(min(delay, max(0.0, deadline - time.monotonic())))
             delay = min(0.15, delay * 1.6)
             remaining = deadline - time.monotonic()
@@ -315,13 +333,35 @@ class DirectHostControlChannel:
             if os.name == "nt"
             else ["sh", "-c", script]
         )
-        res = subprocess.run(
-            shell_cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout_sec,
-            check=False,
-        )
+        timeout_sec = budget(timeout_sec, "direct.exec")
+        deadline = time.monotonic() + timeout_sec
+        mark_dispatched()
+        with subprocess.Popen(shell_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                              start_new_session=(os.name != "nt")) as process:
+            try:
+                while True:
+                    checkpoint("direct.exec")
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("Direct command deadline expired")
+                    try:
+                        output, error = process.communicate(timeout=min(0.1, remaining))
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
+            except BaseException:
+                if process.poll() is None:
+                    if os.name != "nt":
+                        import signal
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    else:
+                        process.kill()
+                process.communicate()
+                raise
+        res = subprocess.CompletedProcess(shell_cmd, process.returncode, output, error)
         return ExecResult(
             exit_code=res.returncode,
             stdout=res.stdout.replace("\r\n", "\n").strip(),

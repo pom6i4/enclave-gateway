@@ -17,7 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from enclave_gateway.security.quoting import validate_endpoint
+from enclave_gateway.security.quoting import validate_endpoint, ps_quote
+from enclave_gateway.operations.context import budget, checkpoint, current, mark_dispatched, timed, bind_context, OperationError
 from enclave_gateway.transports.listener import TcpListener
 from enclave_gateway.config import BastionSpec
 from enclave_gateway.control.qga_client import ControlChannel, ExecResult
@@ -233,7 +234,7 @@ $blockSize = [int64]{block_size}
 if ($fileSize -le $blockSize -or {streams} -le 1 -or $ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {{
     $stagePath = Join-Path '{vfs_spool}' 'pull_{tx_id}.bin'
     Copy-Item -LiteralPath $src -Destination $stagePath -Force
-    Write-Output "SHA256:$sha:CHUNKS:0"
+    Write-Output "SHA256:${{sha}}:CHUNKS:0"
     return
 }}
 
@@ -299,7 +300,7 @@ try {{
     }}
 }}
 
-Write-Output "SHA256:$sha:CHUNKS:$numChunks"
+Write-Output "SHA256:${{sha}}:CHUNKS:$numChunks"
 """
 
 
@@ -319,6 +320,7 @@ class RdpVfsTransport:
         extra_fields: dict[str, Any] | None = None,
     ) -> ExecResult:
         """Dispatch a PowerShell script to BastionWorker via transactional JSON envelope."""
+        timeout_sec = budget(timeout_sec, "vfs.dispatch")
         tx_id = generate_tx_id()
         envelope: dict[str, Any] = {
             "tx_id": tx_id,
@@ -326,6 +328,9 @@ class RdpVfsTransport:
             "payload_b64": base64.b64encode(ps_script.encode("utf-8")).decode("ascii"),
             "timeout_ms": int(timeout_sec * 1000),
         }
+        context = current()
+        if context:
+            envelope["operation_id"] = context.tx_id
         if extra_fields:
             if set(extra_fields) & set(envelope):
                 raise ValueError("Reserved envelope fields cannot be overridden")
@@ -335,6 +340,26 @@ class RdpVfsTransport:
     def _dispatch_envelope(
         self, envelope: dict[str, Any], timeout_sec: float = 120.0
     ) -> ExecResult:
+        context = current()
+        if not context:
+            return self._dispatch_envelope_impl(envelope, timeout_sec)
+        request_id = str(envelope["tx_id"])
+        with context.cancellation_hook("vfs_" + request_id, lambda: self.request_cancel(request_id)):
+            try:
+                return self._dispatch_envelope_impl(envelope, timeout_sec)
+            except OperationError:
+                if context.dispatched:
+                    try:
+                        self.request_cancel(request_id)
+                    except Exception:
+                        pass
+                raise
+
+    def _dispatch_envelope_impl(
+        self, envelope: dict[str, Any], timeout_sec: float = 120.0
+    ) -> ExecResult:
+        timeout_sec = budget(timeout_sec, "vfs.dispatch")
+        deadline = time.monotonic() + timeout_sec
         tx_id = str(envelope["tx_id"])
         if not re.fullmatch(r"[A-Za-z0-9_]+", tx_id):
             raise ValueError("Invalid transaction identifier")
@@ -351,11 +376,13 @@ class RdpVfsTransport:
             publisher = getattr(self.control, "publish_bytes", None)
             if callable(publisher):
                 # Publication failure is ambiguous: never replay a mutating command.
-                publisher(raw_envelope, req_guest)
-                deadline = time.monotonic() + timeout_sec
+                mark_dispatched()
+                with timed("vfs.publish"):
+                    publisher(raw_envelope, req_guest)
                 delay = 0.005
                 raw_res_text = ""
                 while time.monotonic() < deadline:
+                    checkpoint("vfs.response")
                     res_bytes = try_read_fn(res_guest, truncate_after_read=False)
                     if res_bytes:
                         raw_res_text = res_bytes.decode("utf-8", errors="replace").strip()
@@ -370,6 +397,8 @@ class RdpVfsTransport:
                     delay = min(0.035, delay * 1.4)
 
                 if not raw_res_text:
+                    self.request_cancel(tx_id)
+                    checkpoint("vfs.response")
                     return ExecResult(
                         exit_code=124,
                         stdout="",
@@ -419,7 +448,8 @@ Remove-Item $reqFile -Force -ErrorAction SilentlyContinue
 Write-Error 'Timed out waiting for BastionWorker response for {tx_id}'
 exit 124
 """
-        res = self.control.exec_powershell(appliance_ps, timeout_sec=timeout_sec + 15.0)
+        mark_dispatched()
+        res = self.control.exec_powershell(appliance_ps, timeout_sec=budget(max(0.001, deadline - time.monotonic()), "vfs.response"))
         if res.exit_code != 0:
             return ExecResult(
                 exit_code=res.exit_code,
@@ -428,6 +458,16 @@ exit 124
                 duration_ms=int((time.monotonic() - started) * 1000),
             )
         return self._parse_envelope_response(res.stdout, res.duration_ms, tx_id)
+
+    def request_cancel(self, request_id: str) -> None:
+        if not re.fullmatch(r"[A-Za-z0-9_]{1,128}", request_id):
+            raise ValueError("Invalid request id")
+        publisher = getattr(self.control, "publish_bytes", None)
+        if callable(publisher):
+            from enclave_gateway.operations.context import owned_cleanup
+            with owned_cleanup():
+                path = self.spec.appliance_spool_dir.rstrip("\\/") + "\\cancel_" + request_id + ".json"
+                publisher(json.dumps({"tx_id": request_id}).encode(), path)
 
     @staticmethod
     def _parse_envelope_response(raw_stdout: str, fallback_duration_ms: int, tx_id: str | None = None) -> ExecResult:
@@ -439,6 +479,11 @@ exit 124
                 raise ValueError("Response transaction mismatch")
             if type(parsed["exit_code"]) is not int:
                 raise ValueError("Invalid exit status")
+            context = current()
+            if context and parsed.get("state") in ("indeterminate", "cancelled"):
+                raise OperationError("cancelled" if parsed["state"] == "cancelled" else "remote_indeterminate",
+                                     "vfs.response", tx_id=context.tx_id, node=context.node,
+                                     indeterminate=parsed["state"] == "indeterminate")
             stdout_str = (
                 base64.b64decode(parsed.get("stdout_b64", ""), validate=True)
                 .decode("utf-8", errors="replace")
@@ -545,6 +590,7 @@ Write-Output 'MISS'
             blocks_to_stage.append(blk)
 
         def _stage_single_block(blk: BlockDigest) -> int:
+            checkpoint("vfs.upload.block")
             with local_path.open("rb") as fp:
                 fp.seek(blk.offset)
                 raw_chunk = fp.read(blk.size)
@@ -562,7 +608,7 @@ Write-Output 'MISS'
         max_workers = max(1, min(self.spec.parallel_streams, len(blocks_to_stage) or 1))
         if max_workers > 1:
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                changed_indices = list(pool.map(_stage_single_block, blocks_to_stage))
+                changed_indices = list(pool.map(bind_context(_stage_single_block), blocks_to_stage))
         else:
             changed_indices = [_stage_single_block(b) for b in blocks_to_stage]
 
@@ -621,20 +667,21 @@ Write-Output 'MISS'
                 try:
                     self.control.read_file(appliance_stage, temp_path)
                 finally:
-                    self.control.exec_powershell(f"Remove-Item -LiteralPath '{appliance_stage.replace(chr(39), chr(39)*2)}' -Force -ErrorAction SilentlyContinue")
+                    self._cleanup_stage(appliance_stage)
             else:
                 def fetch(idx):
+                    checkpoint("vfs.download.block")
                     path = f"{self.spec.appliance_spool_dir}\\pull_{tx_id}_{idx:05d}.bin"
                     try:
                         return self.control.read_bytes(path)
                     finally:
-                        self.control.exec_powershell(f"Remove-Item -LiteralPath '{path.replace(chr(39), chr(39)*2)}' -Force -ErrorAction SilentlyContinue")
+                        self._cleanup_stage(path)
                 max_workers = max(1, min(self.spec.parallel_streams, num_chunks))
                 with ThreadPoolExecutor(max_workers=max_workers) as pool:
                     # Consume ordered chunks incrementally; avoid retaining the whole file.
                     with temp_path.open("wb") as stream:
                         for start in range(0, num_chunks, max_workers):
-                            for chunk in pool.map(fetch, range(start, min(num_chunks, start + max_workers))):
+                            for chunk in pool.map(bind_context(fetch), range(start, min(num_chunks, start + max_workers))):
                                 stream.write(chunk)
             actual_sha = compute_file_sha256(temp_path)
             if actual_sha != expected_sha:
@@ -644,6 +691,16 @@ Write-Output 'MISS'
         finally:
             temp_path.unlink(missing_ok=True)
 
+
+    def _cleanup_stage(self, path):
+        from enclave_gateway.operations.context import owned_cleanup
+        try:
+            with owned_cleanup():
+                self.control.exec_powershell(f"Remove-Item -LiteralPath '{path.replace(chr(39), chr(39)*2)}' -Force -ErrorAction SilentlyContinue", timeout_sec=2)
+        except Exception:
+            # An expired transport must not replace the original operation error.
+            # The tx-specific spool filename remains available for later cleanup.
+            pass
 
     def mux_open(
         self, target_host: str, target_port: int, timeout_sec: float = 15.0
@@ -791,6 +848,11 @@ Write-Output 'MUX_SHUTDOWN_OK'
         result = self.exec_bastion(script, timeout_sec=timeout_sec, op="mux", extra_fields={"mux_action": "shutdown_write", "conn_id": conn_id})
         if result.exit_code:
             raise ConnectionError("Failed to half-close multiplexed stream")
+
+    def close_mux_sessions(self) -> None:
+        result = self.exec_bastion("Write-Output 'MUX_CLOSED_ALL'", op="mux", extra_fields={"mux_action": "close_all"})
+        if result.exit_code:
+            raise ConnectionError("Failed to close worker mux sessions")
 
     def mux_close(self, conn_id: str, timeout_sec: float = 10.0) -> None:
         """Close and remove a multiplexed TCP connection on Bastion."""

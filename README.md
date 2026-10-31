@@ -5,6 +5,7 @@
 ---
 
 Local security audit and compatibility limits: [31 October 2026 audit](docs/SECURITY_AUDIT_2026-10-31.md).
+Operation journals, principal grants, isolated qualification and Windows release procedure: [hardening guide](docs/HARDENING_AND_QUALIFICATION.md). Windows, RDPdr, vendor-driver and Authenticode acceptance remain separate from local runtime tests.
 
 ## Overview
 
@@ -49,7 +50,7 @@ Connecting modern developer workstations (**macOS on Apple Silicon `M1–M5`**, 
 6. **VFS Transit, Binary SSH Streams, & `sudo` Injection**
    * Payloads destined for upstream Linux `TargetNodes` are Base64-encoded end-to-end and stripped of `CR` (`\r`) characters (`tr -d '\r'`), reducing newline and quoting ambiguities; command arguments and file paths are escaped separately.
    * File transfers to `TargetNodes` (`via: bastion`) transit directly through `\\tsclient\C\EnclaveGateway\spool` without writing temporary staging copies onto the Bastion's local `C:` disk, and automatically fall back to pure `ssh.exe` streaming (`cat > ...`) if `scp` / `sftp-server` is disabled on a hardened target.
-   * Elevated `--sudo` operations use `sudo -S -p ''` without temporary password files. SSH askpass uses a static helper and a serialized process environment. Base64 is transport encoding, not protection from privileged process inspection. Host keys must be provisioned before SSH connections.
+   * Elevated `--sudo` operations use `sudo -S -p ''` without temporary password files. SSH askpass requires the managed native `egw-askpass.exe`, a valid Authenticode signature and an explicitly trusted signer by default. Its process environment is serialized. Base64 is transport encoding, not protection from privileged process inspection. Host keys must be provisioned before SSH connections.
 
 7. **Built-In Model Context Protocol (MCP) Server (`egw mcp`)**
    * JSON-RPC 2.0 MCP server with newline stdio, optional Content-Length framing and stateless HTTP. Protocol versions 2024-11-05 and 2025-03-26 are negotiated; SSE/session resumption is not implemented. See the audit for validation boundaries.
@@ -65,7 +66,7 @@ Connecting modern developer workstations (**macOS on Apple Silicon `M1–M5`**, 
 | **Post-snapshot clock drift (>5 min) breaks Kerberos / NLA (`CredSSP`) & TLS** | Restoring a `qcow2` snapshot (`egw reset`) or resuming after host sleep leaves the guest Windows clock hours or days behind; `w32tm` refuses large phase jumps and NTP (`UDP 123`) is blocked inside the enclave. | `QgaClient.sync_guest_clock()` (`guest-set-time`) and `appliance_init.ps1` (`-HostEpochUtc` + `MaxPosPhaseCorrection=0xFFFFFFFF`) deterministically align guest UTC time to the Host before RDP login. |
 | **RDP idle timeout unmounts redirected drives** | Domain policy or session disconnection can remove the VFS channel. | Configure an approved RDP session policy and monitor reconnects. The worker does not call SetThreadExecutionState; that API does not override domain RDP idle policy. |
 | **`cmdkey` updates via QGA fail NLA login (`LogonUI.exe`)** | QEMU Guest Agent runs as `NT AUTHORITY\SYSTEM` (Session 0), whereas `mstsc.exe` runs in the interactive desktop user session. Windows Credential Manager vaults are strictly isolated per session. | `session_supervisor.ps1` injects `cmdkey` credentials directly into the interactive user session via an ephemeral `/it` scheduled task (`UpdateEnclaveRDPCred`). |
-| **Windows OpenSSH fails non-interactive password auth or root `scp` (`Permission denied`)** | Built-in Windows OpenSSH 7.7/8.1 rejects stdin passwords, and direct `scp` cannot write to root-owned `/etc` or `/opt` paths on Linux `TargetNodes`. | `SshHopExecutor` provides an ephemeral `SSH_ASKPASS` wrapper, `egw ssh-copy-id <node>` key bootstrapping, and `egw cp --sudo` staging via `/tmp` + `sudo mv`. |
+| **Windows OpenSSH fails non-interactive password auth or root `scp` (`Permission denied`)** | Built-in Windows OpenSSH 7.7/8.1 rejects stdin passwords, and direct `scp` cannot write to root-owned `/etc` or `/opt` paths on Linux `TargetNodes`. | `SshHopExecutor` uses a preinstalled signed native `SSH_ASKPASS` helper, `egw ssh-copy-id <node>` key bootstrapping, and `egw cp --sudo` staging via `/tmp` + `sudo mv`. |
 | **Spurious `invalid_grant` / auth failures in bash scripts called from PowerShell** | Windows PowerShell 5.1 pipelines append `\r\n` to every piped line; Linux `read -r` retains the trailing `\r` as part of the password string. | `SecretVault` and `SshHopExecutor` strip `\r` on both ingress and egress (`tr -d '\r'`). |
 
 ---
