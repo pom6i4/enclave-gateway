@@ -1,6 +1,7 @@
 param([string]$PackageDir, [Parameter(Mandatory=$true)][string[]]$TrustedThumbprints,
       [string]$InstallDir="$env:LOCALAPPDATA\EnclaveGateway",
-      [ValidateSet('Install','Rollback','Status','Recover')][string]$Action='Install')
+      [ValidateSet('Install','Rollback','Status','Recover','Migrate','MigrateRollback')][string]$Action='Install',
+      [string]$LegacyDir,[switch]$DryRun)
 $ErrorActionPreference='Stop'
 if ($env:OS -ne 'Windows_NT') {throw 'Managed installation requires Windows'}
 $InstallDir=[IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($InstallDir))
@@ -31,7 +32,12 @@ function Protect-Directory([string]$Path) {
 }
 function Read-Selection {
     $path=Join-Path $InstallDir 'installation.json'
-    if (-not (Test-Path -LiteralPath $path)) {return $null}
+    if (-not (Test-Path -LiteralPath $path)) {
+        $withdrawn=Join-Path $InstallDir 'migration-withdrawn.json';Assert-NoReparse $withdrawn
+        if(-not (Test-Path -LiteralPath $withdrawn)){return $null}
+        if(-not $migration){throw 'Migration is withdrawn; use Migrate to resume with its preserved high-water mark'}
+        $path=$withdrawn
+    }
     $value=Get-Content -LiteralPath $path -Raw -Encoding UTF8|ConvertFrom-Json
     if ($value.revision -ne 2 -or $value.max_sequence -isnot [int] -or $value.max_sequence -lt 1 -or $value.channel -cnotmatch '^[a-z0-9][a-z0-9-]{0,31}$' -or $value.highest_release -notmatch '^[a-f0-9]{64}$' -or $value.current -notmatch '^[a-f0-9]{64}$' -or ($value.previous -and $value.previous -notmatch '^[a-f0-9]{64}$')) {throw 'Invalid installation selection'}
     return $value
@@ -64,6 +70,44 @@ function Select-Version([string]$Current,[string]$Previous,[int]$Maximum,[string
         if(Test-Path -LiteralPath $path) {[IO.File]::Replace($temporary,$path,[NullString]::Value)} else {[IO.File]::Move($temporary,$path)}
     } finally {if(Test-Path -LiteralPath $temporary){Remove-Item -LiteralPath $temporary -Force}}
 }
+$migration=($Action -eq 'Migrate');$legacyHandle=$null
+if($DryRun -and -not $migration){throw 'DryRun requires Migrate'}
+if($migration -or $Action -eq 'MigrateRollback'){
+    if(-not $LegacyDir){throw 'LegacyDir is required for migration'}
+    $LegacyDir=[IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($LegacyDir)).TrimEnd('\')
+    $InstallDir=$InstallDir.TrimEnd('\')
+    foreach($p in @($LegacyDir,$InstallDir)){Assert-NoReparse $p}
+    if($LegacyDir.Equals($InstallDir,[StringComparison]::OrdinalIgnoreCase) -or
+       $LegacyDir.StartsWith($InstallDir+'\',[StringComparison]::OrdinalIgnoreCase) -or
+       $InstallDir.StartsWith($LegacyDir+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'Migration directories must be separate and cannot overlap'}
+    $legacySelection=Join-Path $LegacyDir 'installation.json';Assert-NoReparse $legacySelection
+    $legacyBytes=[IO.File]::ReadAllBytes($legacySelection)
+    $legacyValue=[Text.Encoding]::UTF8.GetString($legacyBytes)|ConvertFrom-Json
+    if($legacyValue.revision -ne 1){throw 'Migration requires a v1 installation'}
+    # This hash is preservation evidence, never an authenticated release or a
+    # source of executable paths, channel, ordering, pins or trust anchors.
+    $hash=[Security.Cryptography.SHA256]::Create()
+    try{$legacyHash=([BitConverter]::ToString($hash.ComputeHash($legacyBytes))).Replace('-','').ToLowerInvariant()}finally{$hash.Dispose()}
+    $migrationPath=Join-Path $InstallDir 'migration.json';Assert-NoReparse $migrationPath
+    $existingMigration=$null
+    if(Test-Path -LiteralPath $InstallDir){
+        $owner=(Get-Acl -LiteralPath $InstallDir).GetOwner([Security.Principal.SecurityIdentifier]).Value
+        if($owner -notin @($sid,'S-1-5-18') -and -not ($administrative -and $owner -eq 'S-1-5-32-544')){throw 'Migration target belongs to a different account'}
+        if(-not (Test-Path -LiteralPath $migrationPath)){throw 'Migration requires a new or matching interrupted target'}
+        $existingMigration=Get-Content -LiteralPath $migrationPath -Raw -Encoding UTF8|ConvertFrom-Json
+        if($existingMigration.revision -ne 1 -or $existingMigration.legacy_dir -cne $LegacyDir -or $existingMigration.legacy_selection_sha256 -ne $legacyHash){throw 'Migration target does not match this preserved source'}
+    }
+    if($Action -eq 'MigrateRollback'){
+        if(-not $existingMigration){throw 'No migration to withdraw'}
+    } else {
+    if(-not $PackageDir){throw 'PackageDir is required for Migrate'}
+    & (Join-Path $PSScriptRoot 'verify_windows.ps1') -PackageDir $PackageDir -TrustedThumbprints $TrustedThumbprints | Out-Null
+    if($DryRun){
+        @{status='migration_plan_valid';source_trust='unsigned_not_promoted';target=$InstallDir;legacy_selection_sha256=$legacyHash;worker_started=$false;changes_made=$false}|ConvertTo-Json
+        return
+    }
+    }
+}
 Assert-NoReparse $InstallDir
 if (Test-Path -LiteralPath $InstallDir) {
     $owner=(Get-Acl -LiteralPath $InstallDir).GetOwner([Security.Principal.SecurityIdentifier]).Value
@@ -72,7 +116,33 @@ if (Test-Path -LiteralPath $InstallDir) {
 Protect-Directory $InstallDir
 $lock=$null;$stage=$null
 try {
+    if($migration){
+        $legacyHandle=New-Object IO.FileStream($legacySelection,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+        if((Get-FileHash -LiteralPath $legacySelection -Algorithm SHA256).Hash.ToLowerInvariant() -ne $legacyHash){throw 'Legacy selection changed during migration'}
+    }
     $lock=New-Object IO.FileStream((Join-Path $InstallDir '.deployment.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+    if($Action -eq 'MigrateRollback'){
+        $selected=Read-Selection
+        if(-not $selected){throw 'No selected migration to withdraw'}
+        [void](Assert-Version $selected.current)
+        $withdrawn=Join-Path $InstallDir 'migration-withdrawn.json';Assert-NoReparse $withdrawn
+        $active=Join-Path $InstallDir 'installation.json'
+        if(Test-Path -LiteralPath $withdrawn){[IO.File]::Replace($active,$withdrawn,[NullString]::Value)}else{[IO.File]::Move($active,$withdrawn)}
+        @{status='migration_withdrawn';retained_target=$InstallDir;legacy_unchanged=$true;worker_started=$false;activation='explicit_legacy_trust_review_required'}|ConvertTo-Json
+        return
+    }
+    if($migration){
+        if(-not $existingMigration){
+            $record=[Text.Encoding]::UTF8.GetBytes((@{revision=1;legacy_dir=$LegacyDir;legacy_selection_sha256=$legacyHash;source_trust='unsigned_not_promoted'}|ConvertTo-Json -Compress))
+            $temporary=Join-Path $InstallDir ('.migration-'+[Guid]::NewGuid().ToString('N'))
+            try{
+                $journal=New-Object IO.FileStream($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+                try{$journal.Write($record,0,$record.Length);$journal.Flush($true)}finally{$journal.Dispose()}
+                [IO.File]::Move($temporary,$migrationPath)
+            }finally{if(Test-Path -LiteralPath $temporary){Remove-Item -LiteralPath $temporary -Force}}
+        }
+        $Action='Install'
+    }
     $versions=Join-Path $InstallDir 'versions';Assert-NoReparse $versions
     [void][IO.Directory]::CreateDirectory($versions);Protect-Directory $versions
     $selection=Read-Selection
@@ -102,7 +172,7 @@ try {
             [IO.Directory]::Move($stage,$destination);$stage=$null
         }
         [void](Assert-Version $version)
-        if (-not $selection -or $selection.current -ne $version) {
+        if (-not $selection -or $selection.current -ne $version -or -not (Test-Path -LiteralPath (Join-Path $InstallDir 'installation.json'))) {
             Select-Version $version $(if($selection){$selection.current}else{''}) $maximum $highest $metadata.channel
         }
     } elseif($Action -eq 'Rollback') {
@@ -129,4 +199,5 @@ try {
 } finally {
     if($stage -and (Test-Path -LiteralPath $stage)){Remove-Item -LiteralPath $stage -Recurse -Force}
     if($lock){$lock.Dispose()}
+    if($legacyHandle){$legacyHandle.Dispose()}
 }

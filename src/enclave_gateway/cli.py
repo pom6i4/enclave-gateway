@@ -91,6 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument('--seed-iso',default='',help='Read-only seed ISO prepared from the generated bundle.')
     p_init.add_argument('--guest-agent-sha256',default='',help='Explicitly approve these QGA MSI bytes; unsigned media otherwise requires Authenticode.')
     p_init.add_argument('--completion-mode',choices=['StartupTask','SetupComplete'],default='StartupTask',help='SYSTEM preparation trigger after Windows Setup.')
+    p_init.add_argument('--recover-machine-preparation',action='store_true',help='Finish a matching prepared generation through QGA without running MSI.')
     p_init.add_argument('--admin-user',default='Admin',help='New disposable/appliance local administrator name.')
     p_init.add_argument('--detach-installer',action='store_true',help='Detach a requested installer and verify its QMP identity.')
     p_init.add_argument(
@@ -596,6 +597,15 @@ def _main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "init":
+        if args.recover_machine_preparation:
+            if args.create_disk or args.force_disk or args.launch_installer or args.detach_installer:
+                parser.error('Machine recovery cannot create a disk or launch an installer')
+            from enclave_gateway.provision.recovery import recover_machine
+            from enclave_gateway.control.qga_client import QgaClient
+            from enclave_gateway.hypervisor.driver import detect_host_arch
+            architecture=cfg.appliance.arch if args.arch=='auto' else args.arch
+            print(json.dumps(recover_machine(QgaClient(cfg.appliance.qga_socket),detect_host_arch(architecture)),indent=2))
+            return 0
         if args.detach_installer and not args.launch_installer:parser.error('--detach-installer requires --launch-installer')
         with engine.hypervisor.state_store().locked():
             if args.launch_installer:engine.hypervisor._assert_offline()

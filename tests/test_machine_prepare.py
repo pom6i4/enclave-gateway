@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import unittest
 from enclave_gateway.config import EnclaveConfig
 from enclave_gateway.provision.builder import ProvisionOptions,ApplianceProvisioner
@@ -13,6 +14,7 @@ ROOT=Path(__file__).resolve().parents[1]
 
 
 def invoke_harness(harness,path):
+    harness=harness.replace('$PSCommandPath',"'"+str(path).replace("'","''")+"'")
     path.write_text(harness,encoding='utf-8-sig')
     literal="'"+str(path).replace("'","''")+"'"
     loader='& ([scriptblock]::Create([IO.File]::ReadAllText('+literal+')))'
@@ -91,3 +93,54 @@ if($case -eq 'delete-failure'){
                 result=invoke_harness(harness,root/'harness.ps1')
                 self.assertEqual(result.returncode,0,(result.stdout+result.stderr).decode('utf-8','replace'))
                 if case=='delete-failure':self.assertEqual((root/'provision-machine.json').read_text(),before)
+
+    @unittest.skipUnless(os.environ.get('EGW_TEST_POWERSHELL'),'Real PowerShell is opt-in')
+    def test_actual_kill_after_task_deletion_recovers_without_media(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            quote=lambda value:"'"+str(value).replace("'","''")+"'"
+            (root/'provision-media.json').write_text(json.dumps({'revision':1,'guest_agent_sha256':'a'*64,'completion_mode':'StartupTask'}))
+            (root/'provision-machine.json').write_text(json.dumps({'revision':1,'status':'machine_ready','architecture':'x86_64','approved_sha256':'a'*64,'qga_mode':'msi-native','media_verification':'sha256-pin'}))
+            (root/'task').touch()
+            source=(ROOT/'src/enclave_gateway/agents/machine_prepare.ps1').read_text().replace("$install='C:\\EnclaveGateway'",'$install='+quote(root)).replace('$PSScriptRoot',quote(root))
+            harness=r"""
+$ErrorActionPreference='Stop';$root=ROOT
+function Get-ItemProperty {param($Path);return @{SystemSetupInProgress=0;OOBEInProgress=0;SetupType=0}}
+function Get-Service {[CmdletBinding()]param($Name);return [pscustomobject]@{Status='Running'}}
+function Get-PSDrive {[CmdletBinding()]param($PSProvider);throw 'Recovery entered the MSI/media path'}
+function Get-ScheduledTask {
+ [CmdletBinding()]param($TaskName)
+ if(-not (Test-Path (Join-Path $root 'task'))){return}
+ $expected="-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$root\machine_prepare.ps1`" -Architecture x86_64 -CompleteSetup -WaitForSetup"
+ [pscustomobject]@{Actions=@([pscustomobject]@{Execute="$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe";Arguments=$expected});Principal=[pscustomobject]@{UserId='SYSTEM'}}
+}
+function Unregister-ScheduledTask {
+ [CmdletBinding(SupportsShouldProcess=$true)]param($TaskName)
+ Remove-Item (Join-Path $root 'task')
+ # Model the first-ever publication gap, with no previous readiness record.
+ Remove-Item (Join-Path $root 'provision-machine.json')
+ [IO.File]::WriteAllText((Join-Path $root 'deleted'),'barrier')
+ Start-Sleep -Seconds 180
+}
+& {SOURCE} -Architecture x86_64 -CompleteSetup -RecoverOnly:([bool]$env:EGW_RECOVER_FIXTURE)
+""".replace('ROOT',quote(root)).replace('SOURCE',source)
+            path=root/'harness.ps1';harness=harness.replace('$PSCommandPath',quote(path));path.write_text(harness,encoding='utf-8-sig')
+            loader='& ([scriptblock]::Create([IO.File]::ReadAllText('+quote(path)+')))'
+            command=[os.environ['EGW_TEST_POWERSHELL'],'-NoProfile','-EncodedCommand',base64.b64encode(loader.encode('utf-16le')).decode()]
+            with subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE) as process:
+                try:
+                    deadline=time.monotonic()+30
+                    while not (root/'deleted').exists():
+                        if process.poll() is not None or time.monotonic()>deadline:
+                            raise AssertionError(process.communicate(timeout=2))
+                        time.sleep(.02)
+                    process.kill();process.communicate(timeout=5)
+                finally:
+                    if process.poll() is None:process.kill();process.communicate(timeout=5)
+            self.assertFalse((root/'provision-machine.json').exists())
+            self.assertEqual(json.loads((root/'machine-prepared.json').read_text())['status'],'prepared')
+            result=subprocess.run(command,env={**os.environ,'EGW_RECOVER_FIXTURE':'1'},capture_output=True,timeout=60)
+            self.assertEqual(result.returncode,0,(result.stdout+result.stderr).decode('utf-8','replace'))
+            self.assertEqual(json.loads((root/'provision-machine.json').read_text())['revision'],2)
+            self.assertFalse((root/'task').exists())
+            self.assertFalse(list(root.glob('.machine-*')))

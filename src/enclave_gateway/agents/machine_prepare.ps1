@@ -1,12 +1,22 @@
 param([ValidateSet('arm64','x86_64')][string]$Architecture,[switch]$CompleteSetup,
-      [ValidateSet('StartupTask','SetupComplete')][string]$CompletionMode='StartupTask',[switch]$WaitForSetup)
+      [ValidateSet('StartupTask','SetupComplete')][string]$CompletionMode='StartupTask',[switch]$WaitForSetup,[switch]$RecoverOnly)
 $ErrorActionPreference='Stop'
 $install='C:\EnclaveGateway'
 [void][IO.Directory]::CreateDirectory($install)
 $phase='media-policy';$mediaVerification='';$msiExit=$null
+function Write-MachineRecord([string]$Name,$Value){
+    $path=Join-Path $install $Name
+    $temporary=Join-Path $install ('.machine-'+[Guid]::NewGuid().ToString('N'))
+    try{
+        $bytes=[Text.Encoding]::UTF8.GetBytes(($Value|ConvertTo-Json -Compress))
+        $stream=New-Object IO.FileStream($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+        try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
+        if(Test-Path -LiteralPath $path){[IO.File]::Replace($temporary,$path,[NullString]::Value)}else{[IO.File]::Move($temporary,$path)}
+    }finally{if(Test-Path -LiteralPath $temporary){Remove-Item -LiteralPath $temporary -Force}}
+}
 function Set-MachinePhase([string]$Name){
     $script:phase=$Name
-    @{revision=1;status='running';phase=$Name}|ConvertTo-Json|Set-Content (Join-Path $install 'machine-progress.json') -Encoding UTF8
+    Write-MachineRecord 'machine-progress.json' @{revision=1;status='running';phase=$Name}
     Write-Host "Machine preparation: $Name"
 }
 function Assert-GuestAgentMedia([string]$Path,[string]$ExpectedHash){
@@ -32,6 +42,11 @@ function Invoke-AgentMsi([string]$CommandLine){
     }finally{$process.Dispose()}
 }
 function Complete-Preparation([string]$QgaMode,[string]$Verification,[string]$ApprovedHash){
+    # Durable commit intent precedes removing the only startup trigger. QGA
+    # recovery validates this generation and never re-enters the MSI path.
+    Write-MachineRecord 'machine-prepared.json' @{revision=1;status='prepared';architecture=$Architecture;qga_mode=$QgaMode;
+      media_verification=$Verification;approved_sha256=$ApprovedHash;completion_mode=$CompletionMode;
+      script_sha256=(Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()}
     $removed=$false
     if($CompletionMode -eq 'StartupTask'){
         Set-MachinePhase 'completion-task-cleanup'
@@ -50,10 +65,11 @@ function Complete-Preparation([string]$QgaMode,[string]$Verification,[string]$Ap
     Set-MachinePhase 'complete'
     # Publish readiness last. A controller may power down as soon as it sees
     # this record; neither task deletion nor installer work may follow it.
-    @{revision=2;status='machine_ready';architecture=$Architecture;qga_mode=$QgaMode;media_verification=$Verification;approved_sha256=$ApprovedHash;
-      completion_mode=$CompletionMode;completion_task_removed=$removed;automatic_logon='not_configured';provider='not_installed'}|ConvertTo-Json|Set-Content (Join-Path $install 'provision-machine.json') -Encoding UTF8
+    Write-MachineRecord 'provision-machine.json' @{revision=2;status='machine_ready';architecture=$Architecture;qga_mode=$QgaMode;media_verification=$Verification;approved_sha256=$ApprovedHash;
+      completion_mode=$CompletionMode;completion_task_removed=$removed;automatic_logon='not_configured';provider='not_installed'}
 }
 try{
+    if($RecoverOnly -and -not $CompleteSetup){throw 'Recovery requires completion mode'}
     if($WaitForSetup){
         if(-not $CompleteSetup){throw 'Setup wait requires completion mode'}
         $until=[DateTime]::UtcNow.AddHours(2)
@@ -109,6 +125,19 @@ try{
         [IO.File]::WriteAllText($hook,$command,[Text.Encoding]::ASCII)
         return
     }
+    $prepared=Join-Path $install 'machine-prepared.json'
+    if($CompleteSetup -and (Test-Path -LiteralPath $prepared)){
+        $prior=Get-Content -LiteralPath $prepared -Raw -Encoding UTF8|ConvertFrom-Json
+        if($prior.revision -ne 1 -or $prior.status -ne 'prepared' -or $prior.architecture -ne $Architecture -or
+           [string]$prior.approved_sha256 -ne $approvedHash -or $prior.completion_mode -ne $CompletionMode -or
+           $prior.script_sha256 -ne (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant() -or
+           $prior.qga_mode -notin @('msi-native','x64-emulated-vss-not-qualified') -or
+           $prior.media_verification -notin @('authenticode','sha256-pin','sha256-and-authenticode')){throw 'Prepared generation does not match this recovery entry point'}
+        if((Get-Service qemu-ga -ErrorAction Stop).Status -ne 'Running'){throw 'Recovery requires the installed guest agent'}
+        Complete-Preparation $prior.qga_mode $prior.media_verification $approvedHash
+        return
+    }
+    if($RecoverOnly){throw 'No recoverable prepared generation'}
     # Recover a previously completed generation whose one-time cleanup was
     # interrupted. Missing removable media must not trigger another MSI run.
     $readyFile=Join-Path $install 'provision-machine.json'

@@ -79,9 +79,13 @@ def run(args):
         (folder/(label+'.out.log')).write_bytes(result.stdout);(folder/(label+'.err.log')).write_bytes(result.stderr)
         if result.returncode:raise RuntimeError('Public CLI '+label+' failed; inspect its private log')
     report={'status':'running','scope':'new-isolated-public-cli-provision','actions':'not_used','client_environment':'not_used','guest_agent_sha256':agent_sha256}
+    full_lifecycle=getattr(args,'full_lifecycle',False)
+    if full_lifecycle:
+        from windows_lifecycle import blank_disk,powercycle,cleanup
     atomic_json(folder/'result.json',report)
     try:
         cli(['--create-disk'],'prepare')
+        if full_lifecycle:proof=blank_disk(folder,args)
         shutil.copyfile(args.guest_agent_msi,folder/'seed'/args.guest_agent_msi.name)
         seed_iso(folder/'seed',folder/'seed.iso')
         cli(['--seed-iso',str(folder/'seed.iso'),'--launch-installer','--detach-installer'],'launch')
@@ -90,7 +94,12 @@ def run(args):
 if(Test-Path 'C:\EnclaveGateway\provision-machine.json'){$m=Get-Content 'C:\EnclaveGateway\provision-machine.json' -Raw -Encoding UTF8|ConvertFrom-Json}
 $complete=($m.revision -eq 2 -and $m.status -eq 'machine_ready' -and $m.completion_mode -eq '__COMPLETION_MODE__')
 if($m.completion_mode -eq 'StartupTask'){$complete=($complete -and $m.completion_task_removed -eq $true -and -not (Get-ScheduledTask -TaskName EnclaveGatewayMachinePreparation -ErrorAction SilentlyContinue))}
-@{ready=(-not ($s.OOBEInProgress -or $s.SystemSetupInProgress -or $s.SetupType));machine=$complete}|ConvertTo-Json -Compress""".replace('__COMPLETION_MODE__',completion_mode)
+$pending=(Test-Path 'C:\EnclaveGateway\machine-prepared.json') -and -not (Get-ScheduledTask -TaskName EnclaveGatewayMachinePreparation -ErrorAction SilentlyContinue)
+if($pending -and -not $complete){
+ $active=@(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object {$_.ProcessId -ne $PID -and $_.CommandLine -match '(?i)-File\s+"?C:\\EnclaveGateway\\machine_prepare\.ps1(?:"|\s|$)'})
+ $pending=($active.Count -eq 0)
+}
+@{ready=(-not ($s.OOBEInProgress -or $s.SystemSetupInProgress -or $s.SetupType));machine=$complete;recoverable=$pending}|ConvertTo-Json -Compress""".replace('__COMPLETION_MODE__',completion_mode)
         while time.monotonic()<deadline:
             try:
                 with agent._connect_synced(5) as(s,r):agent._request(s,r,'guest-ping')
@@ -98,6 +107,11 @@ if($m.completion_mode -eq 'StartupTask'){$complete=($complete -and $m.completion
                 value=json.loads(status.stdout) if not status.exit_code else {}
                 if value.get('ready') and value.get('machine'):break
             except (OSError,ValueError,RuntimeError):pass
+            else:
+                if value.get('ready') and value.get('recoverable'):
+                    from enclave_gateway.provision.recovery import recover_machine
+                    report['preparation_recovery']=recover_machine(agent,args.arch)
+                    atomic_json(folder/'result.json',report)
             report['elapsed_sec']=round(args.deadline_sec-max(0,deadline-time.monotonic()),1)
             atomic_json(folder/'result.json',report)
             time.sleep(5)
@@ -128,11 +142,19 @@ Get-Content C:\EnclaveGateway\provision-machine.json -Raw
         started=time.monotonic()
         try:report['guest_security']=verify_guest_security(agent,secure_boot=args.secure_boot,tpm=args.tpm)
         finally:report['security_elapsed_sec']=round(time.monotonic()-started,3)
+        if full_lifecycle:report['lifecycle']=powercycle(folder,proof,verify_guest_security)
         report.update(status='passed',phase='complete')
     except BaseException as error:
         report.update(status='failed',error_type=type(error).__name__)
         raise
-    finally:atomic_json(folder/'result.json',report)
+    finally:
+        if full_lifecycle:
+            try:cleanup(folder);report['cleanup']='passed'
+            except BaseException as error:
+                report.update(status='failed',cleanup='failed',cleanup_error_type=type(error).__name__)
+                atomic_json(folder/'result.json',report)
+                raise
+        atomic_json(folder/'result.json',report)
     print(json.dumps(report,indent=2));return report
 
 
@@ -144,6 +166,7 @@ if __name__=='__main__':
     p.add_argument('--cpus',type=int,default=2);p.add_argument('--memory-mb',type=int,default=4096)
     p.add_argument('--tpm',action='store_true');p.add_argument('--secure-boot',action='store_true');p.add_argument('--port-base',type=int,default=24689)
     p.add_argument('--completion-mode',choices=['StartupTask','SetupComplete'],default='StartupTask')
+    p.add_argument('--full-lifecycle',action='store_true',help='Prove blank disk/source, cold security, full powercycle, unchanged readiness and owned VM/TPM cleanup.')
     p.add_argument('--vnc-display',type=int,default=106);p.add_argument('--deadline-sec',type=int,default=3600)
     a=p.parse_args()
     if not 60<=a.deadline_sec<=7200:p.error('deadline must be 60..7200 seconds')
