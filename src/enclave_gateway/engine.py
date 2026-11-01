@@ -130,7 +130,11 @@ class EnclaveEngine:
             owned_commands=self.config.security.owned_ssh_commands,
             runtime_helper_path=self.config.security.runtime_helper_path,
         )
-        self.appliance_ssh = SshHopExecutor(
+        local_posix=self.config.appliance.hypervisor=='direct' and os.name!='nt' and isinstance(self.control,DirectHostControlChannel)
+        if local_posix:
+            from enclave_gateway.transports.posix_ssh import PosixSshExecutor
+        appliance_executor=PosixSshExecutor if local_posix else SshHopExecutor
+        self.appliance_ssh = appliance_executor(
             exec_hop_fn=self.control.exec_powershell,
             push_hop_fn=self._push_to_appliance_with_sha,
             pull_hop_fn=self._pull_from_appliance_with_sha,

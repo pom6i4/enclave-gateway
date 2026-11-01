@@ -44,6 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="egw",
         description="Enclave Gateway: Cryptographic Appliance, RDP VFS Relay, Multi-Hop SSH Router & MCP Server.",
     )
+    parser.add_argument('--state-dir',type=Path,help='Private audit/journal/environment directory for this invocation.')
     parser.add_argument(
         "-c",
         "--config",
@@ -87,6 +88,10 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Optional path to virtio-win drivers ISO.",
     )
+    p_init.add_argument('--seed-iso',default='',help='Read-only seed ISO prepared from the generated bundle.')
+    p_init.add_argument('--guest-agent-sha256',default='',help='Explicitly approve these QGA MSI bytes; unsigned media otherwise requires Authenticode.')
+    p_init.add_argument('--admin-user',default='Admin',help='New disposable/appliance local administrator name.')
+    p_init.add_argument('--detach-installer',action='store_true',help='Detach a requested installer and verify its QMP identity.')
     p_init.add_argument(
         "--create-disk",
         action="store_true",
@@ -104,7 +109,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     sub.add_parser("up", help="Start the Appliance VM and verify tunnel readiness.")
-    sub.add_parser("down", help="Gracefully stop the Appliance VM via ACPI powerdown.")
+    sub.add_parser("down", help="Gracefully stop the Appliance VM via guest agent or ACPI.")
     sub.add_parser("status", help="Display health telemetry across Appliance, VPN, Bastion, and Targets.")
 
     p_doc = sub.add_parser(
@@ -154,14 +159,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     p_reset = sub.add_parser(
-        "reset", help="Restore the Appliance disk to its golden qcow2 snapshot."
+        "reset", help="Restore a verified offline disk, firmware variables and optional TPM bundle."
     )
     p_reset.add_argument("--snapshot", default=None, help="Snapshot name to restore.")
 
     p_snap = sub.add_parser(
-        "snapshot", help="Create a golden qcow2 snapshot of the current Appliance state."
+        "snapshot", help="Create a consistent offline Appliance state bundle."
     )
-    p_snap.add_argument("--name", default=None, help="Snapshot name to save.")
+    p_snap.add_argument("--name", default=None, help="State bundle name to save.")
+    p_snap.add_argument("--recover",action="store_true",help="Recover an interrupted offline restore without creating a bundle.")
 
     p_exec = sub.add_parser(
         "exec",
@@ -476,6 +482,12 @@ def _main(argv: list[str] | None = None) -> int:
         if not args.worker_state_dir: raise ValueError('Worker state directory is required')
         private_directory(args.worker_state_dir)
         engine=EnclaveEngine(config=cfg,vault=SecretVault(env_file=Path(args.config).resolve().parent/'.env'),recorder=FlightRecorder(args.worker_state_dir/'audit.jsonl'))
+    elif args.state_dir:
+        from enclave_gateway.security.secrets import SecretVault
+        from enclave_gateway.operations.retention import private_directory
+        from enclave_gateway.audit.flight_recorder import FlightRecorder
+        private_directory(args.state_dir)
+        engine=EnclaveEngine(config=cfg,vault=SecretVault(env_file=args.state_dir/'.env'),recorder=FlightRecorder(args.state_dir/'audit.jsonl'))
     else:
         engine = EnclaveEngine(config=cfg)
 
@@ -583,28 +595,56 @@ def _main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "init":
-        admin_pw = (
-            engine.vault.get("ENCLAVE_APPLIANCE_PASSWORD") or ProvisionOptions().admin_password
-        )
-        opts = ProvisionOptions(
-            arch=args.arch,
-            admin_password=admin_pw,
-            computer_name=cfg.appliance.name[:15],
-            disk_size_gb=args.disk_size_gb,
-            win_iso_path=args.win_iso,
-            virtio_iso_path=args.virtio_iso,
-        )
-        provisioner = ApplianceProvisioner(cfg)
-        manifest = provisioner.prepare_bundle(
-            Path(args.output_dir),
-            opts,
-            create_disk=args.create_disk,
-            force_disk=args.force_disk,
-        )
-        print(json.dumps(manifest, indent=2, ensure_ascii=False))
-        if args.launch_installer:
-            subprocess.run(manifest["qemu_install_command"], check=True)
-        return 0
+        if args.detach_installer and not args.launch_installer:parser.error('--detach-installer requires --launch-installer')
+        with engine.hypervisor.state_store().locked():
+            if args.launch_installer:engine.hypervisor._assert_offline()
+            admin_pw = (
+                engine.vault.get("ENCLAVE_APPLIANCE_PASSWORD") or ProvisionOptions().admin_password
+            )
+            opts = ProvisionOptions(
+                arch=args.arch,
+                admin_password=admin_pw,
+                admin_user=args.admin_user,
+                seed_iso_path=args.seed_iso,
+                guest_agent_sha256=args.guest_agent_sha256,
+                computer_name=cfg.appliance.name[:15],
+                disk_size_gb=args.disk_size_gb,
+                win_iso_path=args.win_iso,
+                virtio_iso_path=args.virtio_iso,
+            )
+            provisioner = ApplianceProvisioner(cfg)
+            manifest = provisioner.prepare_bundle(
+                Path(args.output_dir),
+                opts,
+                create_disk=args.create_disk,
+                force_disk=args.force_disk,
+            )
+            print(json.dumps(manifest, indent=2, ensure_ascii=False))
+            if args.launch_installer:
+                from enclave_gateway.hypervisor.state import private_dir
+                private_dir(Path(cfg.appliance.runtime_dir))
+                engine.hypervisor._assert_offline()
+                engine.hypervisor._start_tpm()
+                command=manifest['qemu_install_command']
+                try:
+                    if args.detach_installer:
+                        if os.name=='nt':
+                            subprocess.Popen(command,cwd=cfg.appliance.runtime_dir,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+                                             creationflags=getattr(subprocess,'DETACHED_PROCESS',0)|getattr(subprocess,'CREATE_NEW_PROCESS_GROUP',0))
+                        else:subprocess.run([*command,'-daemonize'],check=True)
+                        import time
+                        deadline=time.monotonic()+30
+                        while not engine.hypervisor.is_running()[0]:
+                            if time.monotonic()>=deadline:raise TimeoutError('Installer did not expose its expected QMP identity')
+                            time.sleep(.1)
+                        print(json.dumps({'installer_started':True,'pid':engine.hypervisor.is_running()[1]}))
+                    else:
+                        subprocess.run(command,cwd=cfg.appliance.runtime_dir,check=True)
+                        engine.hypervisor._assert_offline()
+                except BaseException:
+                    if not cfg.appliance.pid_file.exists():engine.hypervisor._assert_offline()
+                    raise
+            return 0
 
     if args.command == "up":
         pid = engine.hypervisor.start()
@@ -648,12 +688,16 @@ def _main(argv: list[str] | None = None) -> int:
 
     if args.command == "reset":
         engine.hypervisor.restore_snapshot(args.snapshot)
-        print("Appliance disk restored to golden snapshot.")
+        print("Appliance offline state restored from verified bundle.")
         return 0
 
     if args.command == "snapshot":
-        engine.hypervisor.create_snapshot(args.name)
-        print("Appliance snapshot created.")
+        if args.recover:
+            if args.name:parser.error('--recover cannot be combined with --name')
+            print(json.dumps({'recovered':engine.hypervisor.recover_snapshot_restore()}))
+        else:
+            engine.hypervisor.create_snapshot(args.name)
+            print("Appliance offline state bundle created.")
         return 0
 
     if args.command == "exec":

@@ -35,6 +35,9 @@ def private_directory(path: Path):
     if path.is_symlink():
         raise PermissionError('Archive directory must not be a symlink')
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if os.name=='nt':
+        from enclave_gateway.security.windows_acl import protect_directory
+        protect_directory(path)
     if os.name != 'nt':
         if path.stat().st_uid != os.getuid():
             raise PermissionError('Archive directory has another owner')

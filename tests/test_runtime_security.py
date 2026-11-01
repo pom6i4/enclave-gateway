@@ -65,6 +65,17 @@ class AttestationTests(unittest.TestCase):
 
 @unittest.skipIf(os.name=='nt','POSIX supervisor/UID fixture')
 class IsolationTests(unittest.TestCase):
+    @unittest.skipIf(os.name=='nt','POSIX stdin supervisor fixture')
+    def test_large_owned_script_preserves_empty_command_stdin(self):
+        from enclave_gateway.agents.owned_command import execute
+        import base64,secrets
+        script='#'+'x'*300000+'\nprintf start; cat; printf "\\nтест\\n"'
+        with patch.object(os,'waitid',None,create=True):
+            result=execute({'token':secrets.token_hex(32),'script':script,'timeout_sec':5})
+        self.assertEqual(result['exit_code'],0)
+        self.assertEqual(base64.b64decode(result['stdout_b64']).decode(),'start\nтест\n')
+        self.assertTrue(result['owned_tree_stopped'])
+
     def test_owned_remote_supervisor_cancels_descendants(self):
         token=secrets.token_hex(32)
         process=subprocess.Popen(['sh','-c',script({'action':'exec','token':token,'script':'sleep 30 & wait','timeout_sec':10})],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)

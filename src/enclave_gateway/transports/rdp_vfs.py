@@ -393,6 +393,7 @@ class RdpVfsTransport:
     def _dispatch_envelope_impl(
         self, envelope: dict[str, Any], timeout_sec: float = 120.0
     ) -> ExecResult:
+        context=current()
         evidence=self._verify_dispatch(envelope.get('op'))
         timeout_sec = budget(timeout_sec, "vfs.dispatch")
         deadline = time.monotonic() + timeout_sec
@@ -440,6 +441,8 @@ class RdpVfsTransport:
                 if not raw_res_text:
                     self.request_cancel(tx_id)
                     checkpoint("vfs.response")
+                    if context:
+                        raise OperationError('worker_response_timeout','vfs.response',tx_id=context.tx_id,node=context.node,indeterminate=True)
                     return ExecResult(
                         exit_code=124,
                         stdout="",
@@ -492,6 +495,8 @@ exit 124
         mark_dispatched()
         res = self.control.exec_powershell(appliance_ps, timeout_sec=budget(max(0.001, deadline - time.monotonic()), "vfs.response"))
         if res.exit_code != 0:
+            if context:
+                raise OperationError('worker_response_unavailable','vfs.response',tx_id=context.tx_id,node=context.node,indeterminate=True)
             return ExecResult(
                 exit_code=res.exit_code,
                 stdout="",
@@ -549,6 +554,8 @@ exit 124
                 duration_ms=int(parsed.get("duration_ms", fallback_duration_ms)),
             )
         except (TypeError, AttributeError, KeyError, ValueError) as exc:
+            if current():
+                raise OperationError('worker_response_invalid','vfs.response',tx_id=current().tx_id,node=current().node,indeterminate=True) from exc
             return ExecResult(
                 exit_code=1,
                 stdout="",

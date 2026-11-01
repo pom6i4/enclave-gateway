@@ -9,6 +9,8 @@ Functional follow-up: [scoped sync, provider lifecycle, OS isolation and running
 
 Operation journals, principal grants, isolated qualification and Windows release procedure: [hardening guide](docs/HARDENING_AND_QUALIFICATION.md). [Disposable Windows qualification](docs/WINDOWS_LAB_QUALIFICATION_2026-11-01.md) records actual Windows, RDPdr, account isolation and lab-signing checks with their deployment boundaries.
 
+Offline VM state, versioned installation and the expanded isolated platform checks: [autonomous qualification](docs/AUTONOMOUS_QUALIFICATION_2026-11-01.md).
+
 ## Overview
 
 Connecting modern developer workstations (**macOS on Apple Silicon `M1–M5`**, **modern Linux kernels `6.8+`**, or clean **Windows** hosts) to isolated corporate and government network enclaves protected by proprietary VPN clients (**InfoTeCS ViPNet Client 4/5**, etc.) and locked-down **RDP Jump Hosts (Bastions)** normally requires manual GUI workflows, dedicated laptops, or fragile nested quoting across multiple shells.
@@ -30,7 +32,7 @@ Connecting modern developer workstations (**macOS on Apple Silicon `M1–M5`**, 
 1. **Hardware-Accelerated Cross-Platform Appliance (`HVF` / `KVM` / `WHPX`)**
    * Builds ARM64 and x86_64 Windows appliance configurations. Native HVF/KVM/WHPX requires matching host and guest architectures; provider support must be qualified against the exact Windows installer and driver package. ViPNet Windows ARM64 compatibility is not established by this repository.
    * Keeps **Linux** (`6.8+` kernels where proprietary out-of-tree modules fail to build) and **Windows** host network stacks completely clean of third-party NDIS filter drivers.
-   * Supports offline disk snapshots (`egw reset`) and Copy-on-Write profile overlays. Restore duration depends on storage and guest startup; disk snapshots do not include RAM or an independent NVRAM backup.
+   * Captures verified offline bundles containing a standalone disk, matching UEFI/NVRAM and optional managed software TPM state. Interrupted replacement can recover the previous complete generation. RAM is outside the bundle; restore time depends on storage and guest startup.
 
 2. **Transactional RDP Virtual File System IPC (`RdpVfsTransport` over `[MS-RDPEFS]`)**
    * When an enterprise firewall blocks `SSH (22)`, `SMB (445)`, and `WinRM (5985/5986)` on the Jump Host—leaving only `RDP (3389/TCP)` open—`egw` mounts a shared spool directory over the RDP File System Virtual Channel (`\\tsclient\C\EnclaveGateway\spool`).
@@ -46,7 +48,7 @@ Connecting modern developer workstations (**macOS on Apple Silicon `M1–M5`**, 
    * Native **`OpenSSH ProxyCommand`** bridge (`egw stdio-proxy <host> <port>` + `egw ssh-config`) lets `ssh`, `scp`, `sftp`, `rsync`, `ansible`, and VS Code / Cursor Remote-SSH connect directly to `TargetNodes` over the RDP VFS channel.
 
 5. **Automated Unattended Provisioning (`egw init`), CoW Profiles (`egw profile`), Watchdog (`egw watch`), & Interactive TUI (`egw top`)**
-   * `egw init` generates architecture-aware (`arm64` / `x86_64`) `Autounattend.xml` and post-install provisioning media with `VirtIO` drivers, `QEMU Guest Agent`, `MTU=1350`, and optional MSI installation; key import requires a validated provider-specific procedure; `egw profile create <name>` provisions lightweight Copy-on-Write (`qcow2 -b`) overlays.
+   * `egw init` generates architecture-aware (`arm64` / `x86_64`) unattended media with `VirtIO` drivers and machine-stage QGA installation. It configures no automatic logon or hardware-check bypass. Provider configuration remains an explicit subsequent step; key import requires a validated provider-specific procedure. `egw profile create <name> --create-disk` captures a pinned, complete offline base and builds an independent CoW profile from it.
    * `egw top` renders a live terminal dashboard tracking `Host -> Appliance -> VPN -> Bastion -> TargetNodes`, while `egw watch` runs an autonomous self-healing loop (`doctor --fix`).
 
 6. **VFS Transit, Binary SSH Streams, & `sudo` Injection**
@@ -257,4 +259,5 @@ MIT License. See [LICENSE](LICENSE) for details.
 - HTTP validates Origin and Host, limits connections and body size, and does not grant wildcard CORS. Use `ENCLAVE_MCP_TOKEN` or `--token-env` to avoid putting a bearer token in argv; `--allowed-origin` grants explicit browser access. Non-loopback binding requires a token; remote deployments also need TLS and an explicit origin policy.
 - QGA IPC publishes requests through temp plus rename. QGA has no native file-rename command, so publication requires a guest command; polling uses direct file reads.
 - Directory sync excludes `.env*`, `.ssh` and `.aws` by default and refuses unsafe tar members. Transfer an explicitly selected file separately when needed.
-- Generated unattended media contains credentials and must remain private. CoW profiles copy topology and use separate NVRAM and planned ports; ports are not reserved until VM start.
+- Generated unattended media contains credentials and must remain private. CoW creation with `--create-disk` requires a stopped source and copies matching NVRAM/software TPM state. Planned ports are reserved only at VM start.
+- POSIX Direct mode uses native OpenSSH key authentication, private command supervision and rooted file operations. Payloads travel through stdin, including large scripts. This route requires a POSIX Python target; password authentication and password-based sudo are explicitly unsupported on this route.

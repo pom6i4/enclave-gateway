@@ -7,6 +7,9 @@ import secrets
 import re
 import json
 import hashlib
+import uuid
+import os
+import tempfile
 import subprocess
 from dataclasses import dataclass, field, replace, asdict
 from pathlib import Path
@@ -35,6 +38,14 @@ class ProvisionOptions:
     locale: str = "en-US"
     win_iso_path: str = ""
     virtio_iso_path: str = ""
+    seed_iso_path: str = ""
+    guest_agent_sha256: str = ""
+
+    def __post_init__(self):
+        if self.guest_agent_sha256:
+            if not isinstance(self.guest_agent_sha256,str) or not re.fullmatch(r'[a-fA-F0-9]{64}',self.guest_agent_sha256):
+                raise ValueError('Guest agent approval must be an exact SHA-256')
+            self.guest_agent_sha256=self.guest_agent_sha256.lower()
 
     def resolved_arch(self, config_arch: str = "auto") -> str:
         pref = self.arch if self.arch != "auto" else config_arch
@@ -45,7 +56,7 @@ def generate_autounattend_xml(cfg: EnclaveConfig, opts: ProvisionOptions) -> str
     """Generate a Windows 11 Unattended answer file (Autounattend.xml) for ARM64 or x86_64."""
     arch = opts.resolved_arch(cfg.appliance.arch)
     xml_arch = "arm64" if arch == "arm64" else "amd64"
-    virtio_arch_dir = "ARM64\\w11" if arch == "arm64" else "amd64\\w11"
+    driver_arch_dir = "ARM64" if arch == "arm64" else "amd64"
     qga_msi_name = "qemu-ga-aarch64.msi" if arch == "arm64" else "qemu-ga-x86_64.msi"
 
     user_esc = escape(opts.admin_user)
@@ -56,13 +67,15 @@ def generate_autounattend_xml(cfg: EnclaveConfig, opts: ProvisionOptions) -> str
     driver_paths_xml_parts: list[str] = []
     path_key = 1
     for drive_letter in ("D", "E", "F"):
-        for drv in ("viostor", "NetKVM", "vioserial", "qxldod"):
-            driver_paths_xml_parts.append(
-                f'        <PathAndCredentials wcm:action="add" wcm:keyValue="{path_key}">\n'
-                f"          <Path>{drive_letter}:\\{drv}\\{virtio_arch_dir}</Path>\n"
-                f"        </PathAndCredentials>"
-            )
-            path_key += 1
+        for drv in ("viostor", "NetKVM", "vioserial", "viogpudo", "qxldod"):
+            paths=(f"{drv}\\{driver_arch_dir}\\w11",f"{drv}\\w11\\{driver_arch_dir}",f"Drivers\\{drv}\\w11\\{driver_arch_dir}")
+            for relative in paths:
+                driver_paths_xml_parts.append(
+                    f'        <PathAndCredentials wcm:action="add" wcm:keyValue="{path_key}">\n'
+                    f"          <Path>{drive_letter}:\\{relative}</Path>\n"
+                    f"        </PathAndCredentials>"
+                )
+                path_key += 1
     driver_paths_xml = "\n".join(driver_paths_xml_parts)
 
     disk_config_xml = ""
@@ -150,29 +163,18 @@ def generate_autounattend_xml(cfg: EnclaveConfig, opts: ProvisionOptions) -> str
         <FullName>{user_esc}</FullName>
         <Organization>EnclaveGateway</Organization>
       </UserData>
-      <RunSynchronous>
-        <RunSynchronousCommand wcm:action="add">
-          <Order>1</Order>
-          <Path>reg.exe add "HKLM\\SYSTEM\\Setup\\LabConfig" /v BypassTPMCheck /t REG_DWORD /d 1 /f</Path>
-        </RunSynchronousCommand>
-        <RunSynchronousCommand wcm:action="add">
-          <Order>2</Order>
-          <Path>reg.exe add "HKLM\\SYSTEM\\Setup\\LabConfig" /v BypassSecureBootCheck /t REG_DWORD /d 1 /f</Path>
-        </RunSynchronousCommand>
-        <RunSynchronousCommand wcm:action="add">
-          <Order>3</Order>
-          <Path>reg.exe add "HKLM\\SYSTEM\\Setup\\LabConfig" /v BypassRAMCheck /t REG_DWORD /d 1 /f</Path>
-        </RunSynchronousCommand>
-        <RunSynchronousCommand wcm:action="add">
-          <Order>4</Order>
-          <Path>reg.exe add "HKLM\\SYSTEM\\Setup\\LabConfig" /v BypassStorageCheck /t REG_DWORD /d 1 /f</Path>
-        </RunSynchronousCommand>
-      </RunSynchronous>
+
     </component>
   </settings>
   <settings pass="specialize">
+    <component name="Microsoft-Windows-Deployment" processorArchitecture="{xml_arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <RunSynchronous><RunSynchronousCommand wcm:action="add"><Order>1</Order>
+        <Path>powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$s=@(Get-PSDrive -PSProvider FileSystem|%{{Join-Path $_.Root machine_prepare.ps1}}|?{{Test-Path -LiteralPath $_}});if($s.Count -ne 1){{exit 1}};&amp; $s[0] -Architecture '{arch}'"</Path>
+      </RunSynchronousCommand></RunSynchronous>
+    </component>
     <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="{xml_arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
       <ComputerName>{comp_esc}</ComputerName>
+      <TimeZone>UTC</TimeZone>
     </component>
     <component name="Microsoft-Windows-TerminalServices-LocalSessionManager" processorArchitecture="{xml_arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
       <fDenyTSConnections>false</fDenyTSConnections>
@@ -186,7 +188,9 @@ def generate_autounattend_xml(cfg: EnclaveConfig, opts: ProvisionOptions) -> str
         <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
         <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
         <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
-        <ProtectYourPC>3</ProtectYourPC>
+        <ProtectYourPC>1</ProtectYourPC>
+        <SkipMachineOOBE>true</SkipMachineOOBE>
+        <SkipUserOOBE>true</SkipUserOOBE>
       </OOBE>
       <UserAccounts>
         <LocalAccounts>
@@ -202,26 +206,7 @@ def generate_autounattend_xml(cfg: EnclaveConfig, opts: ProvisionOptions) -> str
           </LocalAccount>
         </LocalAccounts>
       </UserAccounts>
-      <AutoLogon>
-        <Password>
-          <Value>{pw_esc}</Value>
-          <PlainText>true</PlainText>
-        </Password>
-        <Enabled>true</Enabled>
-        <Username>{user_esc}</Username>
-      </AutoLogon>
-      <FirstLogonCommands>
-        <SynchronousCommand wcm:action="add">
-          <Order>1</Order>
-          <Description>Install QEMU Guest Agent from VirtIO ISO</Description>
-          <CommandLine>powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "foreach ($d in @('D','E','F','G')) {{ $p = \"$($d):\\guest-agent\\{qga_msi_name}\"; if (Test-Path $p) {{ Start-Process msiexec.exe -ArgumentList \"/i `\"$p`\" /qn /norestart\" -Wait; break }} }}"</CommandLine>
-        </SynchronousCommand>
-        <SynchronousCommand wcm:action="add">
-          <Order>2</Order>
-          <Description>Execute Enclave Gateway Appliance Post-Install Provisioner</Description>
-          <CommandLine>powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "foreach ($d in @('D','E','F','G')) {{ $s = \"$($d):\\post_install.ps1\"; if (Test-Path $s) {{ &amp; $s; break }} }}"</CommandLine>
-        </SynchronousCommand>
-      </FirstLogonCommands>
+
     </component>
   </settings>
 </unattend>
@@ -229,7 +214,7 @@ def generate_autounattend_xml(cfg: EnclaveConfig, opts: ProvisionOptions) -> str
 
 
 def generate_post_install_ps1(cfg: EnclaveConfig, opts: ProvisionOptions) -> str:
-    """Generate the PowerShell post-installation script executed on first logon."""
+    """Generate machine provisioning runnable from its media or through QGA."""
     spool_dir = cfg.bastion.appliance_spool_dir
     bastion_host = cfg.bastion.host
     bastion_port = cfg.bastion.port
@@ -237,9 +222,16 @@ def generate_post_install_ps1(cfg: EnclaveConfig, opts: ProvisionOptions) -> str
     mtu = cfg.appliance.mtu
     adapter_name = cfg.provider.adapter_name
 
-    return f"""# Enclave Gateway Appliance First-Logon Provisioning Script
-$ErrorActionPreference = "Continue"
+    return f"""# Enclave Gateway Appliance Machine Provisioning Script
+$ErrorActionPreference = "Stop"
 $SeedRoot = $PSScriptRoot
+if (-not $SeedRoot) {{
+    $seeds=@(Get-PSDrive -PSProvider FileSystem | Where-Object {{
+        (Test-Path (Join-Path $_.Root 'machine_prepare.ps1')) -and (Test-Path (Join-Path $_.Root 'bastion_worker.ps1'))
+    }})
+    if ($seeds.Count -ne 1) {{throw 'Expected one attached provision seed'}}
+    $SeedRoot=$seeds[0].Root
+}}
 $InstallRoot = "C:\\EnclaveGateway"
 $SpoolDir = {ps_quote(spool_dir)}
 
@@ -258,6 +250,11 @@ foreach ($scriptName in @("appliance_init.ps1", "session_supervisor.ps1", "basti
 # 2. Ensure QEMU Guest Agent service is running
 Get-Service -Name "qemu-ga" -ErrorAction SilentlyContinue | Set-Service -StartupType Automatic
 Start-Service -Name "qemu-ga" -ErrorAction SilentlyContinue
+
+if (-not {str(cfg.bastion.enabled).lower().replace('true','$true').replace('false','$false')}) {{
+    Write-Output 'ENCLAVE_PROVISION_COMPLETE_NO_BASTION'
+    return
+}}
 
 # 3. Synthesize RDP connection profile with rdpdr drive redirection enabled
 $RdpFile = Join-Path $InstallRoot "bastion.rdp"
@@ -308,13 +305,16 @@ class ApplianceProvisioner:
     ) -> dict[str, Any]:
         """Generate Autounattend.xml, agent scripts, and optional qcow2/EFI storage."""
         options = opts or ProvisionOptions()
+        if create_disk:
+            self.hypervisor._assert_offline()
         out_path = output_dir.expanduser().resolve()
-        out_path.mkdir(parents=True, exist_ok=True, mode=0o700)
-        out_path.chmod(0o700)
+        from enclave_gateway.hypervisor.state import private_dir
+        private_dir(out_path)
 
         autounattend_path = out_path / "Autounattend.xml"
         autounattend_xml = generate_autounattend_xml(self.config, options)
         autounattend_path.write_text(autounattend_xml, encoding="utf-8")
+        (out_path/'provision-media.json').write_text(json.dumps({'revision':1,'guest_agent_sha256':options.guest_agent_sha256})+'\n',encoding='utf-8')
 
         post_install_path = out_path / "post_install.ps1"
         post_install_ps1 = generate_post_install_ps1(self.config, options)
@@ -327,6 +327,7 @@ class ApplianceProvisioner:
             "session_supervisor.ps1",
             "bastion_worker.ps1",
             "bastion_bootstrap.ps1",
+            "machine_prepare.ps1",
         ):
             src = agents_dir / agent_file
             if src.is_file():
@@ -340,14 +341,12 @@ class ApplianceProvisioner:
         efi_created = False
 
         if create_disk:
-            if self.config.appliance.pid_file.exists() or self.hypervisor.is_running()[0]:
-                raise RuntimeError("Stop the appliance before provisioning its disk")
             disk_created = self._ensure_qcow2_disk(
                 disk_path, options.disk_size_gb, force=force_disk
             )
             arch = options.resolved_arch(self.config.appliance.arch)
             code = resolve_efi_code_path(arch, self.config.appliance.efi_code_path)
-            efi_created = self._ensure_efi_vars(efi_vars_path, template=resolve_efi_vars_template(arch, code), force=force_disk)
+            efi_created = self._ensure_efi_vars(efi_vars_path, template=resolve_efi_vars_template(arch, code, self.config.appliance.efi_vars_template_path), force=force_disk)
 
         qemu_cmd = self.build_install_qemu_command(out_path, options)
 
@@ -382,9 +381,14 @@ class ApplianceProvisioner:
                     "-drive",
                     f"file={qemu_value(win_iso)},media=cdrom,readonly=on,if=none,id=cdrom_win",
                     "-device",
-                    "usb-storage,drive=cdrom_win,bootindex=0",
+                    # An empty system disk falls through to this installer;
+                    # after setup, the populated system disk remains first.
+                    "usb-storage,drive=cdrom_win,bootindex=2",
                 ]
             )
+        # A prebuilt ISO avoids distributor-specific VVFAT filename handling.
+        source=f"file={qemu_value(Path(opts.seed_iso_path).expanduser().resolve())}" if opts.seed_iso_path else f"file=fat:{qemu_value(seed_dir.resolve())}"
+        cmd.extend(['-drive',source+(',media=cdrom' if opts.seed_iso_path else '')+',readonly=on,format=raw,if=none,id=seed_vvfat','-device','usb-storage,drive=seed_vvfat'])
         if opts.virtio_iso_path:
             virtio_iso = str(Path(opts.virtio_iso_path).expanduser().resolve())
             cmd.extend(
@@ -396,15 +400,6 @@ class ApplianceProvisioner:
                 ]
             )
 
-        # Attach the provisioning directory as a read-only Virtual VFAT USB drive containing Autounattend.xml
-        cmd.extend(
-            [
-                "-drive",
-                f"file=fat:{qemu_value(seed_dir.resolve())},readonly=on,format=raw,if=none,id=seed_vvfat",
-                "-device",
-                "usb-storage,drive=seed_vvfat",
-            ]
-        )
         return cmd
 
     @staticmethod
@@ -417,7 +412,7 @@ class ApplianceProvisioner:
         qemu_img = shutil.which("qemu-img") or "/opt/homebrew/bin/qemu-img"
         subprocess.run(
             [qemu_img, "create", "-f", "qcow2", str(disk_path), f"{size_gb}G"],
-            check=True,
+            check=True,capture_output=True,
         )
         return True
 
@@ -450,7 +445,8 @@ class ApplianceProvisioner:
             if output_dir is not None
             else base_path.parent / "profiles" / profile_name
         )
-        prof_dir.mkdir(parents=True, exist_ok=True)
+        from enclave_gateway.hypervisor.state import private_dir,digest,copy_resource
+        private_dir(prof_dir)
 
         overlay_disk = prof_dir / f"{profile_name}.qcow2"
         profile_yaml = prof_dir / f"enclave.{profile_name}.yaml"
@@ -471,24 +467,44 @@ class ApplianceProvisioner:
         if profile_yaml.exists():
             raise FileExistsError("Profile configuration already exists")
         overlay_created = False
+        base_bundle=None
         if create_disk:
-            self.hypervisor.create_profile_overlay(base_path, overlay_disk)
+            if base_path!=self.config.appliance.resolved_disk_path:
+                raise ValueError('Create a profile from a configuration matching the complete base state')
+            store=self.hypervisor.state_store()
+            with store.locked():
+                self.hypervisor._assert_offline()
+                name='profile_'+profile_name[:40]+'_'+uuid.uuid4().hex[:12]
+                store.create(name);base_bundle=(store.root/name).resolve();base_path=base_bundle/'disk'
+                self.hypervisor.create_profile_overlay(base_path, overlay_disk)
+            qemu_img_cmd[qemu_img_cmd.index('-b')+1]=str(base_path)
             overlay_created = True
 
         profile_data = asdict(self.config)
         profile_data["profile"] = profile_name
-        profile_data["appliance"]["name"] = f"enclave-{profile_name}"
+        profile_data["appliance"]["name"] = f"enclave-{profile_name}" if len(profile_name)<=24 else 'enclave-'+hashlib.sha256(profile_name.encode()).hexdigest()[:16]
+        profile_data['appliance']['runtime_dir']=tempfile.mkdtemp(prefix='egw-profile-',dir='/tmp' if os.name!='nt' else None)
         profile_data["appliance"]["disk_path"] = str(overlay_disk)
+        profile_data['appliance']['snapshot_dir']=''
+        if base_bundle:
+            profile_data['appliance']['profile_base_bundle']=str(base_bundle)
+            profile_data['appliance']['profile_base_manifest_sha256']=digest(base_bundle/'manifest.json')
+        if self.config.appliance.tpm_state_dir:
+            profile_data['appliance']['tpm_state_dir']=str(prof_dir/'tpm')
+            source=base_bundle/'tpm' if base_bundle else Path(self.config.appliance.tpm_state_dir)
+            if create_disk:copy_resource(source,prof_dir/'tpm')
         # Stable, distinct planned ports. Binding at VM start remains the final
         # collision check; these ports are not reserved by profile generation.
-        port_base = 20000 + (int(hashlib.sha256(profile_name.encode()).hexdigest()[:8], 16) % 10000) * 3
+        port_base = 20000 + (int(hashlib.sha256(profile_name.encode()).hexdigest()[:8], 16) % 7500) * 4
         for offset, key in enumerate(("rdp_forward_port", "vm_rdp_forward_port", "socks5_port")):
             profile_data["appliance"][key] = port_base + offset
+        profile_data['appliance']['ssh_forward_port']=port_base+3 if self.config.appliance.ssh_forward_port else 0
         profile_data["appliance"]["vnc_display"] = 100 + port_base % 1000
         profile_vars = prof_dir / "efi_vars.fd"
         profile_data["appliance"]["efi_vars_path"] = str(profile_vars)
-        if self.config.appliance.resolved_efi_vars_path.is_file() and not profile_vars.exists():
-            shutil.copyfile(self.config.appliance.resolved_efi_vars_path, profile_vars)
+        nvram_source=base_bundle/'nvram' if base_bundle else self.config.appliance.resolved_efi_vars_path
+        if nvram_source.is_file() and not profile_vars.exists():
+            shutil.copyfile(nvram_source, profile_vars)
         profile_yaml.write_text(json.dumps(profile_data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
         return {

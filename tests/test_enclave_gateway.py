@@ -427,13 +427,20 @@ targets:
         root_arm = ET.fromstring(arm_xml)
         self.assertIn("unattend", root_arm.tag)
         self.assertIn("ARM64\\w11", arm_xml)
-        self.assertIn("qemu-ga-aarch64.msi", arm_xml)
-        self.assertIn("BypassTPMCheck", arm_xml)
+        self.assertIn('machine_prepare.ps1',arm_xml)
+        self.assertNotIn('AutoLogon',arm_xml)
+        self.assertNotIn('BypassTPMCheck',arm_xml)
+        self.assertNotIn('BypassSecureBootCheck',arm_xml)
 
         x64_xml = generate_autounattend_xml(cfg, ProvisionOptions(arch="x86_64"))
         ET.fromstring(x64_xml)
         self.assertIn("amd64\\w11", x64_xml)
-        self.assertIn("qemu-ga-x86_64.msi", x64_xml)
+        self.assertIn("-Architecture 'x86_64'", x64_xml)
+        # Windows Setup rejects longer commands before it starts PowerShell.
+        for document in (root_arm, ET.fromstring(x64_xml)):
+            command = document.find('.//{*}RunSynchronousCommand/{*}Path')
+            self.assertIsNotNone(command)
+            self.assertLessEqual(len(command.text), 259)
 
         with TemporaryDirectory() as tmp:
             out_dir = Path(tmp) / "seed"
@@ -442,6 +449,7 @@ targets:
                 out_dir,
                 ProvisionOptions(
                     arch="arm64",
+                    guest_agent_sha256='A'*64,
                     win_iso_path="/tmp/win11_arm64.iso",
                     virtio_iso_path="/tmp/virtio-win.iso",
                 ),
@@ -449,7 +457,14 @@ targets:
             )
             self.assertTrue((out_dir / "Autounattend.xml").is_file())
             self.assertTrue((out_dir / "post_install.ps1").is_file())
+            self.assertEqual(json.loads((out_dir/'provision-media.json').read_text())['guest_agent_sha256'],'a'*64)
+            with self.assertRaises(ValueError):ProvisionOptions(guest_agent_sha256='unapproved')
             self.assertIn("bastion_worker.ps1", manifest["copied_agents"])
+            original_seed=(out_dir/'Autounattend.xml').read_bytes()
+            with patch.object(provisioner.hypervisor,'is_running',return_value=(True,123)):
+                with self.assertRaisesRegex(RuntimeError,'Stop the appliance'):
+                    provisioner.prepare_bundle(out_dir,ProvisionOptions(admin_password='changed-fixture-password'),create_disk=True)
+            self.assertEqual((out_dir/'Autounattend.xml').read_bytes(),original_seed)
             qemu_cmd_str = " ".join(manifest["qemu_install_command"])
             self.assertIn("file=fat:", qemu_cmd_str)
             self.assertNotIn("fat:rw:", qemu_cmd_str)
@@ -1264,7 +1279,7 @@ class AuditRegressionTests(unittest.TestCase):
                 if command == "guest-file-close": break
         with TemporaryDirectory() as tmp, self.wire_peer(peer) as endpoint:
             client = QgaClient(Path(tmp) / "qga.sock")
-            with patch("enclave_gateway.control.qga_client.socket.socket", return_value=endpoint):
+            with patch("enclave_gateway.control.local_socket.connect_local", return_value=endpoint):
                 client.write_bytes(b"\0\xffabc", r"C:\папка с пробелом\file.bin")
         self.assertEqual(captured, b"\0\xffabc")
         self.assertEqual(commands[-2:], ["guest-file-flush", "guest-file-close"])
@@ -1286,7 +1301,7 @@ class AuditRegressionTests(unittest.TestCase):
                         conn.sendall(json.dumps(result).encode() + b"\n")
                 with TemporaryDirectory() as tmp, self.wire_peer(peer) as endpoint:
                     client = QgaClient(Path(tmp) / "qga.sock")
-                    with patch("enclave_gateway.control.qga_client.socket.socket", return_value=endpoint):
+                    with patch("enclave_gateway.control.local_socket.connect_local", return_value=endpoint):
                         with self.assertRaises((OSError, RuntimeError)):
                             client.write_bytes(b"abc", "file") if operation == "write" else client.read_bytes("file")
                 self.assertEqual(commands[-1], "guest-file-close")
@@ -1300,7 +1315,7 @@ class AuditRegressionTests(unittest.TestCase):
             self.assertEqual(request, {"execute": "guest-set-time", "arguments": {"time": expected}})
             conn.sendall(b'{"return":{}}\n')
         with TemporaryDirectory() as tmp, self.wire_peer(peer) as endpoint:
-            with patch("enclave_gateway.control.qga_client.socket.socket", return_value=endpoint):
+            with patch("enclave_gateway.control.local_socket.connect_local", return_value=endpoint):
                 self.assertTrue(QgaClient(Path(tmp) / "qga.sock").sync_guest_clock(expected))
 
     def test_qga_exec_signal_and_clixml_errors_are_preserved(self):
@@ -1328,7 +1343,7 @@ class AuditRegressionTests(unittest.TestCase):
             conn.sendall(b'{"event":"RESUME"}\n{"return":{},"id":"other"}\n')
             conn.sendall(json.dumps({"return": {"status": "running"}, "id": request["id"]}).encode() + b"\n")
         with self.wire_peer(peer) as endpoint:
-            with patch("enclave_gateway.control.qmp_client.socket.socket", return_value=endpoint):
+            with patch("enclave_gateway.control.qmp_client.connect_local", return_value=endpoint):
                 result = QmpClient("unused").execute("query-status")
         self.assertEqual(result["return"]["status"], "running")
 
@@ -1371,6 +1386,33 @@ class AuditRegressionTests(unittest.TestCase):
             self.assertEqual(FlightRecorder(log).read_recent(0), [])
             log.write_text("[]\n")
             self.assertEqual(FlightRecorder(log).verify_integrity(), (False, 0))
+
+    def test_independent_processes_initialize_and_append_one_audit_chain(self):
+        import sys
+        with TemporaryDirectory() as tmp:
+            root=Path(tmp);log=root/'audit.jsonl';gate=root/'start';children=[]
+            program='''
+import os,sys,time
+from pathlib import Path
+sys.path.insert(0,sys.argv[2])
+from enclave_gateway.audit.flight_recorder import FlightRecorder
+root=Path(sys.argv[1]);deadline=time.monotonic()+15
+while not (root/'start').exists():
+ if time.monotonic()>deadline:raise TimeoutError('Fixture start deadline')
+ time.sleep(.005)
+for index in range(20):
+ FlightRecorder(root/'audit.jsonl').record(tx_id='p'+str(os.getpid())+'_'+str(index),actor='fixture',operation='read',node='app01',summary='concurrent fixture',exit_code=0,duration_ms=1)
+'''
+            try:
+                for _ in range(2):children.append(subprocess.Popen([sys.executable,'-c',program,str(root),str(Path(__file__).resolve().parents[1]/'src')],stdout=subprocess.PIPE,stderr=subprocess.PIPE))
+                gate.touch()
+                for child in children:
+                    output,error=child.communicate(timeout=60)
+                    self.assertEqual(child.returncode,0,error.decode(errors='replace'))
+                self.assertEqual(FlightRecorder(log).verify_integrity(),(True,40))
+            finally:
+                for child in children:
+                    if child.poll() is None:child.kill();child.communicate(timeout=5)
 
     def test_secret_scrubber_nested_short_tokens_and_partial_private_key(self):
         from enclave_gateway.security.secrets import SecretScrubber
@@ -1712,7 +1754,7 @@ class AuditRegressionTests(unittest.TestCase):
             self.assertIn("a,,b.qcow2", " ".join(command))
         with TemporaryDirectory() as tmp:
             with self.assertRaises(FileNotFoundError): resolve_efi_code_path("arm64", str(Path(tmp) / "missing.fd"))
-            spec = ApplianceSpec(runtime_dir=tmp)
+            spec = ApplianceSpec(runtime_dir=tmp,disk_path=str(Path(tmp)/"disk.qcow2"),efi_vars_path=str(Path(tmp)/"vars.fd"))
             spec.pid_file.write_text("123")
             hypervisor = ApplianceHypervisor(spec)
             hypervisor.is_running = Mock(return_value=(True, 123))
@@ -1793,7 +1835,7 @@ class AuditRegressionTests(unittest.TestCase):
             self.assertEqual(command["execute"], "guest-set-time")
             conn.sendall(b'{"return":{}}\n')
         with TemporaryDirectory() as tmp, self.wire_peer(peer) as endpoint:
-            with patch("enclave_gateway.control.qga_client.socket.socket", return_value=endpoint):
+            with patch("enclave_gateway.control.local_socket.connect_local", return_value=endpoint):
                 self.assertTrue(QgaClient(Path(tmp) / "socket").sync_guest_clock(1))
 
     @unittest.skipUnless(shutil.which("sh"), "POSIX shell runtime required")

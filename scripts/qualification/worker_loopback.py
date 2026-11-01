@@ -112,8 +112,9 @@ class EchoServer:
 
 
 class Worker:
-    def __init__(self, powershell: str, directory: Path, runtime=None, allow_unsigned_lab=False, trusted_signer=''):
+    def __init__(self, powershell: str, directory: Path, runtime=None, allow_unsigned_lab=False, trusted_signer='', *, startup_timeout_sec=15):
         self.powershell, self.directory = powershell, directory
+        self.startup_timeout_sec=startup_timeout_sec
         self.runtime,self.allow_unsigned_lab=runtime,allow_unsigned_lab
         self.trusted_signer=trusted_signer
         self.spool = directory / "spool"
@@ -136,7 +137,7 @@ class Worker:
         if self.allow_unsigned_lab: command+=['-AllowUnsignedLab']
         if self.trusted_signer: command+=['-TrustedSignerThumbprints',self.trusted_signer]
         self.process = subprocess.Popen(command, stdout=self.output, stderr=self.output, env=environment)
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + self.startup_timeout_sec
         while not (self.spool / "worker_state.json").exists():
             if self.process.poll() is not None or time.monotonic() >= deadline:
                 self.close()

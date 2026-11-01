@@ -7,10 +7,32 @@ import platform
 import shutil
 import subprocess
 import time
+import socket
+from dataclasses import replace
 from pathlib import Path
 
 from enclave_gateway.config import ApplianceSpec
 from enclave_gateway.control.qmp_client import QmpClient
+
+
+def process_running(pid):
+    if os.name!='nt':
+        try:os.kill(pid,0)
+        except ProcessLookupError:return False
+        except PermissionError:return True
+        return True
+    import ctypes
+    kernel=ctypes.WinDLL('kernel32',use_last_error=True)
+    kernel.OpenProcess.argtypes=[ctypes.c_uint32,ctypes.c_int,ctypes.c_uint32]
+    kernel.OpenProcess.restype=ctypes.c_void_p
+    kernel.WaitForSingleObject.argtypes=[ctypes.c_void_p,ctypes.c_uint32]
+    kernel.CloseHandle.argtypes=[ctypes.c_void_p]
+    handle=kernel.OpenProcess(0x100000,False,pid)
+    if not handle:
+        if ctypes.get_last_error()==87:return False
+        return True
+    try:return kernel.WaitForSingleObject(handle,0)!=0
+    finally:kernel.CloseHandle(handle)
 
 
 def detect_host_accelerator(preference: str = "auto") -> str:
@@ -59,7 +81,7 @@ def resolve_efi_code_path(arch: str, configured_path: str = "") -> str:
         expanded = Path(os.path.expanduser(configured_path))
         if not expanded.is_file():
             raise FileNotFoundError(f"Configured UEFI firmware does not exist: {expanded}")
-        return str(expanded)
+        return str(expanded.absolute())
 
     if arch == "arm64":
         candidates = [
@@ -98,7 +120,11 @@ def qemu_value(path: str | Path) -> str:
     return value.replace(",", ",,")
 
 
-def resolve_efi_vars_template(arch: str, code_path: str) -> Path:
+def resolve_efi_vars_template(arch: str, code_path: str, configured_path: str = '') -> Path:
+    if configured_path:
+        path=Path(configured_path).expanduser().absolute()
+        if not path.is_file():raise FileNotFoundError('Configured firmware variable template is missing')
+        return path
     code = Path(code_path)
     names = (["edk2-aarch64-vars.fd", "AAVMF_VARS.fd", "edk2-arm-vars.fd", "AAVMF_VARS.ms.fd", "vars-template-pflash.raw"] if arch == "arm64" else
              [code.name.replace("CODE", "VARS"), "edk2-i386-vars.fd", "OVMF_VARS_4M.fd", "OVMF_VARS.fd"])
@@ -127,6 +153,9 @@ class ApplianceHypervisor:
             # to Windows and cannot establish ownership after PID reuse.
             if "return" not in self.qmp.query_status():
                 return False, None
+            identity=self.qmp.execute('query-name')
+            if identity.get('return',{}).get('name')!=self.spec.name:
+                raise RuntimeError('Control endpoint belongs to a different VM')
             return True, pid
         except (ValueError, OSError):
             return False, None
@@ -140,6 +169,8 @@ class ApplianceHypervisor:
                 accel = "tcg"
             else:
                 raise ValueError("Native acceleration requires matching host and guest architectures")
+        for endpoint in (self.spec.qga_socket,self.spec.qmp_socket,self.spec.tpm_socket):
+            if len(os.fsencode(endpoint))>=104:raise ValueError('Use a shorter private runtime_dir for UNIX control sockets')
         qemu_bin = resolve_qemu_binary(arch)
         efi_code = resolve_efi_code_path(arch, self.spec.efi_code_path)
 
@@ -148,7 +179,9 @@ class ApplianceHypervisor:
             f"hostfwd=tcp:127.0.0.1:{self.spec.vm_rdp_forward_port}-:3389",
             f"hostfwd=tcp:127.0.0.1:{self.spec.socks5_port}-:1080",
         ]
-        netdev_arg = "user,id=net0," + ",".join(hostfwd_rules)
+        if self.spec.ssh_forward_port:
+            hostfwd_rules.append(f'hostfwd=tcp:127.0.0.1:{self.spec.ssh_forward_port}-:22')
+        netdev_arg = "user,id=net0," + ("restrict=on," if self.spec.network_restrict else "") + ",".join(hostfwd_rules)
 
         cmd: list[str] = [
             qemu_bin,
@@ -163,6 +196,9 @@ class ApplianceHypervisor:
             "-m",
             f"{self.spec.memory_mb}M",
         ]
+        if platform.system()=='Windows':
+            data=Path(qemu_bin).parent/'share'
+            if data.is_dir():cmd.extend(['-L',str(data)])
 
         if arch == "arm64":
             cmd.extend(
@@ -174,13 +210,16 @@ class ApplianceHypervisor:
                     "-drive",
                     f"if=pflash,format=raw,file={qemu_value(self.spec.resolved_efi_vars_path)}",
                     "-device",
-                    "ramfb",
+                    self.spec.display_device,
                 ]
             )
         else:
-            cmd.extend(["-M", "q35", "-drive", f"if=pflash,format=raw,readonly=on,file={qemu_value(efi_code)}",
+            cmd.extend(["-M", "q35,smm=on" if self.spec.secure_boot else "q35", "-drive", f"if=pflash,format=raw,readonly=on,file={qemu_value(efi_code)}",
                         "-drive", f"if=pflash,format=raw,file={qemu_value(self.spec.resolved_efi_vars_path)}"])
 
+        if self.spec.secure_boot:
+            if arch!='x86_64':raise ValueError('Configured secure firmware mode currently requires x86_64')
+            cmd.extend(['-global','driver=cfi.pflash01,property=secure,value=on'])
         cmd.extend(
             [
                 "-device",
@@ -212,83 +251,163 @@ class ApplianceHypervisor:
                 str(self.spec.pid_file),
             ]
         )
+        if self.spec.tpm_state_dir:
+            if os.name=='nt':raise ValueError('Managed swtpm requires a POSIX host')
+            cmd.extend(['-chardev',f'socket,id=tpmctrl,path={qemu_value(self.spec.tpm_socket)}',
+                        '-tpmdev','emulator,id=tpm0,chardev=tpmctrl','-device',
+                        'tpm-tis-device,tpmdev=tpm0' if arch=='arm64' else 'tpm-tis,tpmdev=tpm0'])
         if platform.system() == "Windows":
             cmd.remove("-daemonize")
         return cmd
 
+    def state_store(self):
+        from enclave_gateway.hypervisor.state import StateStore
+        spec=replace(self.spec,arch=detect_host_arch(self.spec.arch))
+        return StateStore(spec,resolve_efi_code_path(spec.arch,spec.efi_code_path))
+
+    def _assert_offline(self):
+        if self.is_running()[0] or self.spec.pid_file.exists():
+            raise RuntimeError('Stop the appliance before changing its offline state')
+        if self.spec.qmp_socket.exists():
+            # An orphan control endpoint is not proof that its disk is stopped.
+            try:
+                result=self.qmp.execute('query-name')
+            except (OSError,ValueError):pass
+            else:raise RuntimeError('VM control endpoint is still active')
+        self._stop_tpm()
+
+    def _stop_tpm(self):
+        if not self.spec.tpm_state_dir or not self.spec.tpm_socket.exists():return
+        with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as probe:
+            probe.settimeout(1)
+            try:probe.connect(str(self.spec.tpm_socket))
+            except OSError:return
+        tool=shutil.which('swtpm_ioctl')
+        if not tool:raise FileNotFoundError('swtpm_ioctl is required to quiesce TPM state')
+        subprocess.run([tool,'--unix',str(self.spec.tpm_socket),'-s'],check=True,capture_output=True,timeout=10)
+        deadline=time.monotonic()+5
+        while self.spec.tpm_socket.exists():
+            if time.monotonic()>deadline:raise TimeoutError('TPM backend has not stopped')
+            time.sleep(.05)
+
+    def _start_tpm(self):
+        if not self.spec.tpm_state_dir:return
+        from enclave_gateway.hypervisor.state import private_dir
+        state=Path(self.spec.tpm_state_dir).expanduser().absolute();private_dir(state)
+        self._stop_tpm()
+        self.spec.tpm_socket.unlink(missing_ok=True)
+        executable=shutil.which('swtpm')
+        if not executable:raise FileNotFoundError('swtpm is required for this appliance')
+        subprocess.run([executable,'socket','--tpm2','--tpmstate','dir='+str(state),
+                        '--ctrl','type=unixio,path='+str(self.spec.tpm_socket),
+                        '--flags','not-need-init','--daemon'],check=True,capture_output=True,timeout=10)
+
     def start(self) -> int:
+        store=self.state_store()
+        with store.locked():
+            if store.pending.exists():
+                self._assert_offline();store.recover()
+            return self._start()
+
+    def _start(self) -> int:
         running, pid = self.is_running()
         if running and pid is not None:
             return pid
 
         if self.spec.pid_file.exists():
             raise RuntimeError("Unresponsive VM PID file exists; verify process ownership before removing stale state")
+        self._assert_offline()
         runtime = Path(self.spec.runtime_dir)
         if runtime.is_symlink():
             raise ValueError("Runtime directory must not be a symlink")
-        runtime.mkdir(parents=True, exist_ok=True, mode=0o700)
-        if os.name != "nt" and (runtime.stat().st_uid != os.getuid() or runtime.stat().st_mode & 0o077):
-            raise PermissionError("Runtime directory must be owned by the current user with mode 0700")
+        from enclave_gateway.hypervisor.state import private_dir
+        private_dir(runtime)
         for stale in (self.spec.qmp_socket, self.spec.qga_socket):
             stale.unlink(missing_ok=True)
         cmd = self.build_qemu_command()
         if not self.spec.resolved_disk_path.is_file() or not self.spec.resolved_efi_vars_path.is_file():
             raise FileNotFoundError("Appliance disk or UEFI variable store is missing")
+        if self.spec.profile_base_bundle:
+            from enclave_gateway.hypervisor.state import digest
+            import json
+            base=Path(self.spec.profile_base_bundle).expanduser().absolute()
+            if digest(base/'manifest.json')!=self.spec.profile_base_manifest_sha256:raise ValueError('Profile base manifest changed')
+            verifier=self.state_store();verifier.root=base.parent;verifier.verify(base.name)
+            info=json.loads(subprocess.check_output([shutil.which('qemu-img') or 'qemu-img','info','--output=json',str(self.spec.resolved_disk_path)]))
+            backing=info.get('full-backing-filename')
+            if not backing or Path(backing).resolve()!=(base/'disk').resolve():raise ValueError('Profile backing image mismatch')
+        self._start_tpm()
         if platform.system() == "Windows":
-            subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                             creationflags=getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+            log=runtime/'qemu-start.log'
+            if log.is_symlink():raise ValueError('QEMU startup log cannot be a link')
+            with log.open('wb') as stderr:
+                process=subprocess.Popen(cmd, cwd=runtime, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=stderr,
+                                         creationflags=getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
             deadline = time.monotonic() + 15.0
-            while time.monotonic() < deadline and not self.spec.pid_file.exists():
+            while time.monotonic() < deadline and process.poll() is None:
+                if self.is_running()[0]:break
                 time.sleep(0.05)
+            if process.poll() is not None:
+                raise RuntimeError('QEMU exited during startup; inspect the private qemu-start.log')
         else:
-            subprocess.run(cmd, check=True)
+            try:
+                subprocess.run(cmd, check=True)
+            except (OSError, subprocess.CalledProcessError):
+                # Quiesce only after the ordinary offline ownership checks.
+                # An ambiguous live endpoint must keep its backend untouched.
+                self._assert_offline()
+                raise
         _, new_pid = self.is_running()
         if new_pid is None:
             raise RuntimeError("QEMU process exited immediately without writing PID file.")
         return new_pid
 
-    def stop(self, timeout_sec: float = 15.0) -> None:
+    def stop(self, timeout_sec: float = 120.0) -> None:
+        with self.state_store().locked():self._stop(timeout_sec)
+
+    def _stop(self, timeout_sec: float) -> None:
         running, pid = self.is_running()
         if not running or pid is None:
             if self.spec.pid_file.exists():
                 raise RuntimeError("Cannot verify appliance state; runtime files are preserved")
             return
 
-        self.qmp.system_powerdown()
         deadline = time.monotonic() + timeout_sec
+        try:
+            from enclave_gateway.control.qga_client import QgaClient
+            QgaClient(self.spec.qga_socket).shutdown_guest(timeout_sec=min(10,max(.001,timeout_sec)))
+        except (OSError,ValueError,RuntimeError):
+            if not self.qmp.system_powerdown():raise RuntimeError('Neither guest shutdown nor ACPI was acknowledged')
         while time.monotonic() < deadline:
             still_up, _ = self.is_running()
-            if not still_up:
+            if not still_up and not process_running(pid):
                 break
             time.sleep(0.5)
         else:
             raise TimeoutError("Appliance did not stop; runtime state is preserved")
 
+        self._stop_tpm()
         for stale in (self.spec.qmp_socket, self.spec.qga_socket, self.spec.pid_file):
             stale.unlink(missing_ok=True)
 
     def create_snapshot(self, snapshot_name: str | None = None) -> None:
-        if self.is_running()[0] or self.spec.pid_file.exists():
-            raise RuntimeError("Stop the appliance before creating an offline disk snapshot")
-        name = snapshot_name or self.spec.golden_snapshot
-        qemu_img = shutil.which("qemu-img") or "/opt/homebrew/bin/qemu-img"
-        subprocess.run(
-            [qemu_img, "snapshot", "-c", name, str(self.spec.resolved_disk_path)],
-            check=True,
-        )
+        store=self.state_store()
+        with store.locked():
+            self._assert_offline()
+            store.create(snapshot_name or self.spec.golden_snapshot)
 
     def restore_snapshot(self, snapshot_name: str | None = None) -> None:
-        running, _ = self.is_running()
-        if running:
-            self.stop()
-        if self.spec.pid_file.exists():
-            raise RuntimeError("Cannot restore a disk with unverified VM ownership")
-        name = snapshot_name or self.spec.golden_snapshot
-        qemu_img = shutil.which("qemu-img") or "/opt/homebrew/bin/qemu-img"
-        subprocess.run(
-            [qemu_img, "snapshot", "-a", name, str(self.spec.resolved_disk_path)],
-            check=True,
-        )
+        if self.is_running()[0]:self.stop()
+        store=self.state_store()
+        with store.locked():
+            self._assert_offline()
+            store.restore(snapshot_name or self.spec.golden_snapshot)
+
+    def recover_snapshot_restore(self):
+        store=self.state_store()
+        with store.locked():
+            self._assert_offline()
+            return store.recover()
 
     def create_profile_overlay(self, base_disk: Path, overlay_disk: Path) -> None:
         if overlay_disk.exists():
@@ -309,5 +428,5 @@ class ApplianceHypervisor:
                 str(base_disk.resolve()),
                 str(overlay_disk.resolve()),
             ],
-            check=True,
+            check=True,capture_output=True,
         )

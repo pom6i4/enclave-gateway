@@ -50,7 +50,7 @@ def _node_uri(node: TargetNodeSpec) -> str:
     return f"{node.user}@{host}"
 
 
-def _ssh_args(node, *, scp=False, has_ssh_password=False, connect_timeout_sec=15, jump_node=None):
+def _ssh_args(node, *, scp=False, has_ssh_password=False, connect_timeout_sec=15, jump_node=None, windows=True):
     _node_uri(node)
     args = ["-o", f"BatchMode={'no' if has_ssh_password else 'yes'}", "-o", "StrictHostKeyChecking=yes",
             "-o", f"ConnectTimeout={int(connect_timeout_sec)}", "-o", "ServerAliveInterval=15",
@@ -63,11 +63,11 @@ def _ssh_args(node, *, scp=False, has_ssh_password=False, connect_timeout_sec=15
         if any(j.ssh_key_path for j in jumps):
             def channel(host, port, index):
                 jump = jumps[index]
-                command = ["ssh.exe"] + _ssh_args(jump)
+                command = ["ssh.exe" if windows else "ssh"] + _ssh_args(jump,windows=windows)
                 if index:
                     command += ["-o", "ProxyCommand=" + channel(jump.host, jump.port, index - 1)]
                 command += ["-W", f"[{host}]:{port}", _node_uri(jump)]
-                return subprocess.list2cmdline(command)
+                return subprocess.list2cmdline(command) if windows else shlex.join(command)
             args.extend(["-o", "ProxyCommand=" + channel(node.host, node.port, len(jumps) - 1)])
         else:
             args.extend(["-o", "ProxyJump=" + spec])

@@ -36,6 +36,23 @@ def call(server, tool, args, principal="local", request_id=1):
 
 
 class OperationTests(unittest.TestCase):
+    def test_corrupt_worker_reply_is_indeterminate_and_never_republished(self):
+        with TemporaryDirectory() as root:
+            control=Mock();control.supports_direct_spool_ipc=True
+            def corrupt(path,**_):
+                tx=path.replace('\\','/').rsplit('/',1)[-1][4:-5]
+                return json.dumps({'tx_id':tx,'exit_code':'invalid','stdout_b64':'','stderr_b64':''}).encode()
+            control.try_read_bytes.side_effect=corrupt
+            engine=engine_at(root,control)
+            with self.assertRaises(OperationError) as caught:
+                engine.exec_node('@bastion',"Write-Output 'fixture'",tx_id='corrupt_reply')
+            self.assertTrue(caught.exception.indeterminate)
+            self.assertEqual(engine.transaction_status('corrupt_reply')['state'],'indeterminate')
+            published=control.publish_bytes.call_count
+            with self.assertRaises(OperationError):
+                engine.exec_node('@bastion',"Write-Output 'fixture'",tx_id='corrupt_reply')
+            self.assertEqual(control.publish_bytes.call_count,published)
+
     def test_restart_returns_retained_result_and_does_not_reexecute(self):
         with TemporaryDirectory() as root:
             control=Mock()
@@ -53,6 +70,21 @@ class OperationTests(unittest.TestCase):
                 with self.assertRaises(OperationError):
                     first.exec_node("@appliance","echo once",tx_id="stable")
             if os.name != "nt": self.assertEqual(first.journal.path.stat().st_mode & 0o777,0o600)
+
+    def test_result_storage_failure_retains_identity_and_blocks_replay(self):
+        with TemporaryDirectory() as root:
+            engine=engine_at(root,Mock());engine.control.exec_powershell.return_value=ExecResult(0,'observed','',1)
+            original=engine.journal.update
+            def fail_completed(tx,owner,state,**values):
+                if state in ('completed','indeterminate'):raise OSError('fixture ENOSPC')
+                return original(tx,owner,state,**values)
+            engine.journal.update=fail_completed
+            with self.assertRaises(OSError) as caught:engine.exec_node('@appliance','printf observed',tx_id='storage',timeout_sec=5)
+            self.assertEqual(caught.exception.operation_error.code,'journal_persistence_failed')
+            self.assertTrue(caught.exception.operation_error.indeterminate)
+            engine.journal.update=original
+            with self.assertRaises(OperationError):engine.exec_node('@appliance','printf observed',tx_id='storage',timeout_sec=5)
+            self.assertEqual(engine.control.exec_powershell.call_count,1)
 
     def test_late_cancellation_preserves_obtained_result(self):
         with TemporaryDirectory() as root:

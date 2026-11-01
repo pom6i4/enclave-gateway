@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from enclave_gateway.control.wire import SocketLineReader
+from enclave_gateway.control.local_socket import connect_local
 
 
 class QmpClient:
@@ -18,9 +19,7 @@ class QmpClient:
         self.socket_path = Path(socket_path)
 
     def execute(self, command: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-            sock.settimeout(5.0)
-            sock.connect(str(self.socket_path))
+        with connect_local(self.socket_path,5.0) as sock:
             reader = SocketLineReader(sock, time.monotonic() + 5.0)
             greeting = json.loads(reader.readline())
             if not isinstance(greeting, dict) or "QMP" not in greeting:

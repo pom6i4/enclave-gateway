@@ -12,7 +12,9 @@ from typing import Any
 
 
 def _default_runtime_dir() -> str:
-    return str(Path(tempfile.gettempdir()) / ("enclave-gateway-" + str(getattr(os, "getuid", lambda: "user")())))
+    # Keep AF_UNIX paths below platform limits without sharing users' state.
+    if os.name!='nt':return str(Path('/tmp')/('enclave-gateway-'+str(os.getuid())))
+    return str(Path(os.environ.get('LOCALAPPDATA',tempfile.gettempdir()))/'egw-run')
 
 
 @dataclass(slots=True)
@@ -24,8 +26,17 @@ class ApplianceSpec:
     memory_mb: int = 4096
     disk_path: str = "~/.local/share/enclave-gateway/disk.qcow2"
     efi_code_path: str = ""
+    efi_vars_template_path: str = ""
+    secure_boot: bool = False
     efi_vars_path: str = "~/.local/share/enclave-gateway/efi_vars.fd"
     golden_snapshot: str = "golden_ready"
+    snapshot_dir: str = ""
+    profile_base_bundle: str = ""
+    profile_base_manifest_sha256: str = ""
+    tpm_state_dir: str = ""
+    display_device: str = "ramfb"
+    network_restrict: bool = False
+    ssh_forward_port: int = 0
     mtu: int = 1350
     socks5_port: int = 1080
     rdp_forward_port: int = 13389
@@ -34,8 +45,15 @@ class ApplianceSpec:
     runtime_dir: str = field(default_factory=_default_runtime_dir)
 
     def __post_init__(self):
+        self.runtime_dir=str(Path(self.runtime_dir).expanduser().absolute())
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", self.name):
             raise ValueError("Invalid appliance name")
+        if bool(self.profile_base_bundle)!=bool(self.profile_base_manifest_sha256) or (self.profile_base_manifest_sha256 and not re.fullmatch('[a-f0-9]{64}',self.profile_base_manifest_sha256)):
+            raise ValueError('Profile backing bundle requires its manifest digest')
+        if type(self.ssh_forward_port) is not int or not 0 <= self.ssh_forward_port <= 65535:
+            raise ValueError('Invalid optional SSH forward port')
+        if self.display_device not in ('ramfb','virtio-gpu-pci') or type(self.network_restrict) is not bool or type(self.secure_boot) is not bool:
+            raise ValueError('Invalid display or network isolation setting')
         if self.cpus < 1 or self.memory_mb < 128 or not 576 <= self.mtu <= 9000:
             raise ValueError("Invalid appliance resources or MTU")
 
@@ -58,6 +76,10 @@ class ApplianceSpec:
     @property
     def qga_socket(self) -> Path:
         return Path(self.runtime_dir) / f"{self.name}-qga.sock"
+
+    @property
+    def tpm_socket(self) -> Path:
+        return Path(self.runtime_dir) / f"{self.name}-tpm.sock"
 
     @property
     def qga_lock_file(self) -> Path:

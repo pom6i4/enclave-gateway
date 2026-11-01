@@ -28,10 +28,16 @@ $stateDir = Join-Path $SpoolDir '.transactions'
 $Global:EnclaveMuxSockets = @{}
 $pendingMux = New-Object Collections.Generic.List[object]
 $activeTxJobs = New-Object Collections.Generic.List[object]
-$pool = [runspacefactory]::CreateRunspacePool(1, $ParallelStreams)
-$pool.Open()
-$attestationPool=[runspacefactory]::CreateRunspacePool(1,1)
-$attestationPool.Open()
+function New-WorkerSlot {
+    $runspace=[runspacefactory]::CreateRunspace()
+    $runspace.ThreadOptions='ReuseThread'
+    $runspace.Open()
+    return @{Runspace=$runspace;Busy=$false}
+}
+# Own each resident runspace directly so scheduling and disposal have explicit
+# lifetimes instead of depending on asynchronous pool acquisition resources.
+$executionSlots=@(for($index=0;$index -lt $ParallelStreams;$index++){New-WorkerSlot})
+$attestationSlot=New-WorkerSlot
 $powerShellPath=''
 if ($ProcessIsolation) {
     $self=[Diagnostics.Process]::GetCurrentProcess()
@@ -40,6 +46,8 @@ if ($ProcessIsolation) {
 $clock = [Diagnostics.Stopwatch]::StartNew()
 $lastHeartbeat = -2000
 $completedCount = 0
+$nativeCompletedSinceCleanup = 0
+$nativeCleanupCycles = 0
 $readRetryCount=0
 $workerInstance=[Guid]::NewGuid().ToString('N')
 $loadedWorkerHash=(Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -78,6 +86,21 @@ function Start-WorkerPipeline($Pipe) {
     $inputBuffer.Complete()
     try {return @{Handle=$Pipe.BeginInvoke($inputBuffer,$outputBuffer);Input=$inputBuffer;Output=$outputBuffer}}
     catch {$inputBuffer.Dispose();$outputBuffer.Dispose();throw}
+}
+
+function Close-WorkerPipeline($Job) {
+    $Job.Input.Dispose(); $Job.Output.Dispose()
+    try {$Job.Handle.AsyncWaitHandle.Close()} catch {}
+    if ($Job.StopHandle) {try {$Job.StopHandle.AsyncWaitHandle.Close()} catch {}}
+    # PowerShell.Dispose owns the error/output buffers, but the remaining
+    # PSDataStreams collections also own native wait handles on Windows 5.1.
+    # Release these completed, caller-owned streams before discarding a job.
+    foreach ($name in @('Debug','Verbose','Warning','Progress','Information','Error')) {
+        $stream=$Job.Pipe.Streams.$name
+        if ($null -ne $stream) {$stream.Dispose()}
+    }
+    $Job.Pipe.Dispose()
+    $Job.Slot.Busy=$false
 }
 
 function Stop-Execution($Job) {
@@ -173,7 +196,15 @@ $nativeExecute={
         [void]$errorOutput.GetAwaiter().GetResult()
         if ($proc.ExitCode -in @(124,125)) {return @{ExitCode=125;Stdout='';Stderr='Owned process interrupted';Indeterminate=$true}}
         if ($proc.ExitCode -ne 0) {throw 'Owned process failed'}
-        return ($raw | ConvertFrom-Json)
+        $result=$raw | ConvertFrom-Json
+        if ($null -eq $result -or $result -is [array] -or $result.ExitCode -isnot [int] -or $result.Stdout -isnot [string] -or $result.Stderr -isnot [string]) {
+            throw 'Invalid owned process result'
+        }
+        return $result
+    } catch {
+        # A child can have completed an effect before its stdout is damaged or
+        # the helper exits without a valid envelope. Never call that definitive.
+        return @{ExitCode=125;Stdout='';Stderr='Owned process outcome unavailable';Indeterminate=$true}
     } finally {
         try {if (-not $proc.HasExited) {$proc.Kill()}} catch {}
         # Process.Dispose on Windows PowerShell/.NET Framework does not reliably
@@ -227,11 +258,19 @@ try {
                 Write-Response $job.TxId $code '' ($_ | Out-String) ([int]$job.Timer.ElapsedMilliseconds) $state
             } finally {
                 if ($job.StopHandle -and $job.StopHandle.IsCompleted) { try { $job.Pipe.EndStop($job.StopHandle) } catch {} }
-                $job.Input.Dispose(); $job.Output.Dispose()
-                try {$job.Handle.AsyncWaitHandle.Close()} catch {}
-                if ($job.StopHandle) {try {$job.StopHandle.AsyncWaitHandle.Close()} catch {}}
-                $job.Pipe.Dispose()
+                Close-WorkerPipeline $job
+                if ($job.Native) {$nativeCompletedSinceCleanup++}
             }
+        }
+
+        if ($PSVersionTable.PSEdition -eq 'Desktop' -and $nativeCompletedSinceCleanup -ge 32) {
+            # Windows PowerShell/.NET Framework retains internal async-pipe
+            # Event handles in finalizable objects even after public Dispose.
+            # Bound that backlog by native completions, including sustained
+            # load; request collection without waiting on the finalizer thread.
+            [GC]::Collect(2,[GCCollectionMode]::Forced,$false)
+            $nativeCompletedSinceCleanup=0
+            $nativeCleanupCycles++
         }
 
         # One bounded nonblocking turn per connection. Slow connects/writers never
@@ -353,8 +392,15 @@ try {
                     $timeout=[int][Math]::Max(1,[Math]::Min($timeout,$remaining))
                 } elseif ($ProcessIsolation) { throw 'Isolated execution requires a request deadline' }
                 $action=[string]$request.mux_action
-                if ((-not $action -and $request.op -ne 'attest' -and $activeTxJobs.Count -ge 4*$ParallelStreams) -or
-                    ($request.op -eq 'attest' -and @($activeTxJobs.ToArray() | Where-Object {$_.Attestation}).Count -ge 2)) {
+                $slot=$null
+                if($request.op -eq 'attest') {
+                    if(-not $attestationSlot.Busy){$slot=$attestationSlot}
+                } elseif(-not $action) {
+                    foreach($available in $executionSlots){if(-not $available.Busy){$slot=$available;break}}
+                }
+                if ((-not $action -or $request.op -eq 'attest') -and $null -eq $slot) {
+                    # Leave queued requests unexecuted until a slot is free;
+                    # their original absolute deadline remains authoritative.
                     Move-Item -LiteralPath $claim -Destination $file.FullName
                     continue
                 }
@@ -370,8 +416,9 @@ try {
                         execution_model=if ($ProcessIsolation) {'owned-process-job'} else {'runspace-lab'} }
                     $query=@{ evidence=$evidence; worker_path=$PSCommandPath; runtime_path=$RuntimeHelper; process_isolation=$ProcessIsolation } | ConvertTo-Json -Compress -Depth 5
                     $query64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($query))
-                    # Signature verification may consult OS trust/revocation services.
-                    # Run it outside the dispatcher so it cannot stall socket turns.
+                    # OS trust/revocation providers can block and retain native
+                    # resources. Windows verification uses an owned child;
+                    # neither its lifetime nor its handles belong to the dispatcher.
                     $probe=@'
 param($Encoded)
 $q=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Encoded)) | ConvertFrom-Json
@@ -394,10 +441,18 @@ $e | ConvertTo-Json -Compress -Depth 5
 '@
                     $probe64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($probe))
                     $text="& ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$probe64')))) '$query64'"
-                    $pipe=[powershell]::Create(); $pipe.RunspacePool=$attestationPool
-                    [void]$pipe.AddScript($execute).AddArgument($text)
+                    $pipe=[powershell]::Create(); $pipe.Runspace=$slot.Runspace
+                    $nativeState=$null
+                    if($ProcessIsolation){
+                        if((Get-FileHash -LiteralPath $RuntimeHelper -Algorithm SHA256).Hash.ToLowerInvariant() -ne $runtimeHash){throw 'Runtime changed before trust probe launch'}
+                        $encoded=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($text))
+                        $child="[Console]::OutputEncoding=New-Object Text.UTF8Encoding(`$false); & { $($execute.ToString()) } ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$encoded'))) | ConvertTo-Json -Compress"
+                        $nativeState=[hashtable]::Synchronized(@{Process=$null;Cancelled=$false;Stage='queued'})
+                        [void]$pipe.AddScript($nativeExecute).AddArgument($RuntimeHelper).AddArgument($powerShellPath).AddArgument($child).AddArgument($timeout).AddArgument($nativeState)
+                    }else{[void]$pipe.AddScript($execute).AddArgument($text)}
                     try {$invocation=Start-WorkerPipeline $pipe} catch {$pipe.Dispose();throw}
-                    $activeTxJobs.Add(@{TxId=$txId;Attestation=$true;Pipe=$pipe;Handle=$invocation.Handle;Input=$invocation.Input;Output=$invocation.Output;StopHandle=$null;Timer=[Diagnostics.Stopwatch]::StartNew();TimeoutMs=$timeout;Cancelled=$false})
+                    $slot.Busy=$true
+                    $activeTxJobs.Add(@{Slot=$slot;TxId=$txId;Attestation=$true;Native=$ProcessIsolation;NativeState=$nativeState;Pipe=$pipe;Handle=$invocation.Handle;Input=$invocation.Input;Output=$invocation.Output;StopHandle=$null;Timer=[Diagnostics.Stopwatch]::StartNew();TimeoutMs=$timeout;Cancelled=$false})
                 } elseif ($action) {
                     $connectionId=[string]$request.conn_id
                     if ($connectionId -notmatch '^mux_[0-9a-f]+$' -and $action -ne 'close_all') { throw 'Invalid mux identifier' }
@@ -439,16 +494,18 @@ $e | ConvertTo-Json -Compress -Depth 5
                         $encodedScript=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($scriptText))
                         $child="[Console]::OutputEncoding=New-Object Text.UTF8Encoding(`$false); & { $($execute.ToString()) } ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$encodedScript'))) | ConvertTo-Json -Compress"
                         $state=[hashtable]::Synchronized(@{Process=$null;Cancelled=$false;Stage='queued'})
-                        $pipe=[powershell]::Create(); $pipe.RunspacePool=$pool
+                        $pipe=[powershell]::Create(); $pipe.Runspace=$slot.Runspace
                         [void]$pipe.AddScript($nativeExecute).AddArgument($RuntimeHelper).AddArgument($powerShellPath).AddArgument($child).AddArgument($timeout).AddArgument($state)
                         try {$invocation=Start-WorkerPipeline $pipe} catch {$pipe.Dispose();throw}
-                        $activeTxJobs.Add(@{TxId=$txId;Native=$true;NativeState=$state;Pipe=$pipe;Handle=$invocation.Handle;Input=$invocation.Input;Output=$invocation.Output;StopHandle=$null;Timer=[Diagnostics.Stopwatch]::StartNew();TimeoutMs=$timeout;Cancelled=$false})
+                        $slot.Busy=$true
+                        $activeTxJobs.Add(@{Slot=$slot;TxId=$txId;Native=$true;NativeState=$state;Pipe=$pipe;Handle=$invocation.Handle;Input=$invocation.Input;Output=$invocation.Output;StopHandle=$null;Timer=[Diagnostics.Stopwatch]::StartNew();TimeoutMs=$timeout;Cancelled=$false})
                     } else {
                         $pipe=[powershell]::Create()
-                        $pipe.RunspacePool=$pool
+                        $pipe.Runspace=$slot.Runspace
                         [void]$pipe.AddScript($execute).AddArgument($scriptText)
                         try {$invocation=Start-WorkerPipeline $pipe} catch {$pipe.Dispose();throw}
-                        $activeTxJobs.Add(@{ TxId=$txId; Pipe=$pipe; Handle=$invocation.Handle; Input=$invocation.Input; Output=$invocation.Output; StopHandle=$null; Timer=[Diagnostics.Stopwatch]::StartNew(); TimeoutMs=$timeout; Cancelled=$false })
+                        $slot.Busy=$true
+                        $activeTxJobs.Add(@{ Slot=$slot; TxId=$txId; Pipe=$pipe; Handle=$invocation.Handle; Input=$invocation.Input; Output=$invocation.Output; StopHandle=$null; Timer=[Diagnostics.Stopwatch]::StartNew(); TimeoutMs=$timeout; Cancelled=$false })
                     }
                 }
             } catch {
@@ -467,9 +524,9 @@ $e | ConvertTo-Json -Compress -Depth 5
             $nativeStages=@{}
             foreach($job in $activeTxJobs.ToArray()) {if($job.Native) {$stage=[string]$job.NativeState.Stage; $nativeStages[$stage]=1+[int]$nativeStages[$stage]}}
             $self=[Diagnostics.Process]::GetCurrentProcess()
-            $state=@{ read_retry_count=$readRetryCount; native_stages=$nativeStages; working_set_bytes=$self.WorkingSet64; handles=$self.HandleCount; threads=$self.Threads.Count; pid=$PID; language_mode=[string]$ExecutionContext.SessionState.LanguageMode; uptime_sec=[int]$clock.Elapsed.TotalSeconds;
+            $state=@{ read_retry_count=$readRetryCount; native_stages=$nativeStages; working_set_bytes=$self.WorkingSet64; handles=$self.HandleCount; threads=$self.Threads.Count; pid=$PID; language_mode=[string]$ExecutionContext.SessionState.LanguageMode; powershell_edition=[string]$PSVersionTable.PSEdition; uptime_sec=[int]$clock.Elapsed.TotalSeconds;
                 execution_model=if ($ProcessIsolation) {"owned-process-job"} else {"runspace-lab"}; parallel_streams=$ParallelStreams; active_mux_streams=$Global:EnclaveMuxSockets.Count; active_tx_jobs=$activeTxJobs.Count;
-                pending_mux=$pendingMux.Count; completed_transactions=$completedCount; transaction_records=$transactionCount; transaction_capacity=$MaxTransactionRecords; last_heartbeat_utc=(Get-Date).ToUniversalTime().ToString('o') }
+                pending_mux=$pendingMux.Count; completed_transactions=$completedCount; native_cleanup_cycles=$nativeCleanupCycles; transaction_records=$transactionCount; transaction_capacity=$MaxTransactionRecords; last_heartbeat_utc=(Get-Date).ToUniversalTime().ToString('o') }
             $self.Dispose()
             if ($Diagnostics) {
                 $state.pending_mux_details=@($pendingMux.ToArray() | ForEach-Object {@{tx_id=$_.TxId;action=$_.Action;elapsed_ms=$_.Timer.ElapsedMilliseconds;offset=$_.Offset;bytes=$_.Bytes.Length;read_started=$_.ReadStarted;wait_ms=$_.WaitMs;received=$_.Receive.Length}})
@@ -485,9 +542,7 @@ $e | ConvertTo-Json -Compress -Depth 5
     foreach ($job in @($activeTxJobs.ToArray())) {
         try {Stop-Execution $job; $job.Pipe.Stop()}
         catch {} finally {
-            try {$job.Handle.AsyncWaitHandle.Close()} catch {}
-            if($job.StopHandle) {try {$job.StopHandle.AsyncWaitHandle.Close()} catch {}}
-            $job.Input.Dispose();$job.Output.Dispose();$job.Pipe.Dispose()
+            Close-WorkerPipeline $job
         }
     }
     foreach ($job in @($pendingMux.ToArray())) {
@@ -495,8 +550,7 @@ $e | ConvertTo-Json -Compress -Depth 5
         if ($job.Receive) { $job.Receive.Dispose() }
     }
     foreach ($id in @($Global:EnclaveMuxSockets.Keys)) { Close-Mux $id }
-    $pool.Close()
-    $pool.Dispose()
-    $attestationPool.Close()
-    $attestationPool.Dispose()
+    foreach($slot in $executionSlots){$slot.Runspace.Close();$slot.Runspace.Dispose()}
+    $attestationSlot.Runspace.Close()
+    $attestationSlot.Runspace.Dispose()
 }

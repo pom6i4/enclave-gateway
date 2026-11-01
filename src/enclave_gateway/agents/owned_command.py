@@ -14,6 +14,28 @@ import time
 from pathlib import Path
 
 
+def exit_observer():
+    if callable(getattr(os,'waitid',None)):
+        return lambda pid:os.waitid(os.P_PID,pid,os.WEXITED|os.WNOHANG|os.WNOWAIT) is not None
+    # Some supported macOS CPython distributions omit the Python waitid
+    # binding. Keep the unreaped child identity through the native OS API.
+    import ctypes
+    import sys
+    if sys.platform=='darwin':flags=1|4|32
+    elif sys.platform.startswith('linux'):flags=1|4|0x01000000
+    else:raise RuntimeError('Owned commands require non-reaping waitid support')
+    api=ctypes.CDLL(None,use_errno=True)
+    wait=api.waitid;wait.argtypes=[ctypes.c_uint,ctypes.c_uint,ctypes.c_void_p,ctypes.c_int];wait.restype=ctypes.c_int
+    def observed(pid):
+        # Both ABIs put si_signo first. The buffer exceeds siginfo_t on these
+        # platforms, and a nonblocking call leaves its zeroed signal unchanged
+        # when there is no child status. WNOWAIT never releases the PID.
+        info=ctypes.create_string_buffer(256)
+        if wait(1,pid,info,flags):raise OSError(ctypes.get_errno(),'Could not observe owned child')
+        return ctypes.c_int.from_buffer(info).value!=0
+    return observed
+
+
 def endpoint(token):
     if not isinstance(token,str) or len(token)!=64 or any(c not in '0123456789abcdef' for c in token): raise ValueError('Invalid token')
     directory=Path('/tmp')/('egw-owned-'+str(os.getuid()))
@@ -34,6 +56,7 @@ def cancel(token):
 
 
 def execute(value):
+    observe_exit=exit_observer()
     path=endpoint(value['token']); started=time.monotonic()
     timeout=float(value['timeout_sec'])
     if not 0<timeout<=86400: raise ValueError('Invalid deadline')
@@ -41,7 +64,14 @@ def execute(value):
     with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as listener:
         listener.bind(str(path)); os.chmod(path,0o600); listener.listen(4); listener.setblocking(False)
         with selectors.DefaultSelector() as selector:
-            process=subprocess.Popen(['sh','-c',value['script']],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
+            # Read the entire script from a private pipe before evaluating it.
+            # This preserves EOF stdin for payload commands and avoids argv limits
+            # without writing scripts or credentials to temporary files.
+            process=subprocess.Popen(['sh','-c','eval "$(cat)"'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
+            script_data=value['script'].encode('utf-8');script_offset=0
+            os.set_blocking(process.stdin.fileno(),False)
+            if script_data:selector.register(process.stdin,selectors.EVENT_WRITE,'input')
+            else:process.stdin.close()
             selector.register(listener,selectors.EVENT_READ,'cancel')
             for stream,label in ((process.stdout,'out'),(process.stderr,'err')):
                 os.set_blocking(stream.fileno(),False); selector.register(stream,selectors.EVENT_READ,label)
@@ -59,11 +89,16 @@ def execute(value):
                 exited=False
                 while not exited or len(selector.get_map())>1:
                     # WNOWAIT observes exit without releasing the PID/PGID identity.
-                    exited=os.waitid(os.P_PID,process.pid,os.WEXITED|os.WNOHANG|os.WNOWAIT) is not None
+                    exited=observe_exit(process.pid)
                     if exited: stop()
                     if time.monotonic()-started>=timeout:
                         expired=True; stop()
                     for key,_ in selector.select(0.05):
+                        if key.data=='input':
+                            try:script_offset+=os.write(key.fileobj.fileno(),script_data[script_offset:script_offset+65536])
+                            except BrokenPipeError:script_offset=len(script_data)
+                            if script_offset==len(script_data):selector.unregister(key.fileobj);key.fileobj.close()
+                            continue
                         if key.data=='cancel':
                             client,_=listener.accept()
                             with client:
@@ -84,7 +119,7 @@ def execute(value):
             finally:
                 stop()
                 process.wait(timeout=5)
-                for stream in (process.stdout,process.stderr):
+                for stream in (process.stdin,process.stdout,process.stderr):
                     if not stream.closed: stream.close()
                 path.unlink(missing_ok=True)
     return {'exit_code':125 if cancelled else 124 if expired else code,

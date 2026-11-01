@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import errno
 import json
 import os
 import random
@@ -10,6 +11,7 @@ import socket
 import subprocess
 import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -54,16 +56,13 @@ class ControlChannel(Protocol):
 
 
 @contextmanager
-def _file_lock(lock_path: Path, timeout_sec: float = 30.0) -> Iterator[None]:
+def _os_file_lock(lock_path: Path, timeout_sec: float = 30.0) -> Iterator[None]:
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fp = lock_path.open("a+b")
     acquired = False
     try:
         if not fcntl and not msvcrt:
             raise RuntimeError("No supported interprocess file locking backend")
-        if fp.seek(0, 2) == 0:
-            fp.write(b"\0")
-            fp.flush()
         deadline = time.monotonic() + timeout_sec
         while True:
             checkpoint("control.file_lock")
@@ -75,10 +74,16 @@ def _file_lock(lock_path: Path, timeout_sec: float = 30.0) -> Iterator[None]:
                     msvcrt.locking(fp.fileno(), msvcrt.LK_NBLCK, 1)
                 acquired = True
                 break
-            except OSError:
+            except OSError as error:
+                if error.errno not in (errno.EACCES,errno.EAGAIN,errno.EDEADLK,errno.EINTR):raise
                 if time.monotonic() >= deadline:
                     raise TimeoutError("Timed out waiting for control channel lock")
                 time.sleep(0.01)
+        # Both OS backends can lock an empty file. Initialize its sentinel only
+        # after acquiring the same handle's lock, avoiding a first-open race.
+        if fp.seek(0, 2) == 0:
+            fp.write(b"\0")
+            fp.flush()
         yield
     finally:
         if acquired and fcntl is not None:
@@ -90,6 +95,43 @@ def _file_lock(lock_path: Path, timeout_sec: float = 30.0) -> Iterator[None]:
             fp.seek(0)
             msvcrt.locking(fp.fileno(), msvcrt.LK_UNLCK, 1)
         fp.close()
+
+
+_thread_file_gates={}
+_thread_file_gates_guard=threading.Lock()
+
+
+@contextmanager
+def _file_lock(lock_path: Path, timeout_sec: float = 30.0) -> Iterator[None]:
+    if os.name!='nt':
+        with _os_file_lock(lock_path,timeout_sec):yield
+        return
+    # Windows byte-range locks reject concurrent handles within one process.
+    # Queue local contenders before OS locking instead of letting hot writers
+    # repeatedly win the polling race and starve other recorder instances.
+    key=os.path.normcase(os.path.abspath(lock_path));deadline=time.monotonic()+timeout_sec
+    with _thread_file_gates_guard:
+        gate=_thread_file_gates.get(key)
+        if gate is None:
+            gate={'condition':threading.Condition(),'waiters':deque(),'users':0};_thread_file_gates[key]=gate
+        gate['users']+=1
+    token=object();condition=gate['condition']
+    try:
+        with condition:
+            gate['waiters'].append(token)
+            while gate['waiters'][0] is not token:
+                checkpoint('control.file_lock')
+                remaining=deadline-time.monotonic()
+                if remaining<=0:raise TimeoutError('Timed out waiting for control channel lock')
+                condition.wait(min(.05,remaining))
+        with _os_file_lock(lock_path,max(0,deadline-time.monotonic())):yield
+    finally:
+        with condition:
+            if token in gate['waiters']:gate['waiters'].remove(token)
+            condition.notify_all()
+        with _thread_file_gates_guard:
+            gate['users']-=1
+            if not gate['users']:del _thread_file_gates[key]
 
 
 class QgaClient:
@@ -131,9 +173,8 @@ class QgaClient:
 
     @contextmanager
     def _open_synced(self, deadline):
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-            sock.settimeout(max(0.001, deadline - time.monotonic()))
-            sock.connect(str(self.socket_path))
+        from enclave_gateway.control.local_socket import connect_local
+        with connect_local(self.socket_path,max(0.001,deadline-time.monotonic())) as sock:
             reader = SocketLineReader(sock, deadline)
             sync_id = random.getrandbits(63)
             payload = json.dumps({"execute": "guest-sync-delimited", "arguments": {"id": sync_id}})
@@ -213,18 +254,27 @@ class QgaClient:
                     if not data:
                         raise OSError("QGA file read made no progress")
 
+    def shutdown_guest(self,timeout_sec=10.0):
+        """Request guest OS shutdown; this command intentionally has no response."""
+        with self._connect_synced(timeout_sec) as (sock,reader):
+            info=self._request(sock,reader,'guest-info')
+            if not any(item.get('name')=='guest-shutdown' and item.get('enabled') for item in info['supported_commands']):
+                raise RuntimeError('Guest shutdown is unavailable')
+            sock.sendall((json.dumps({'execute':'guest-shutdown','arguments':{'mode':'powerdown'}})+'\n').encode())
+
     def exec_powershell(self, script: str, timeout_sec: float = 120.0) -> ExecResult:
-        timeout_sec = budget(timeout_sec, "qga.exec")
-        started = time.monotonic()
-        deadline = started + timeout_sec
-        encoded_cmd = base64.b64encode(script.encode("utf-16le")).decode("ascii")
-        with self._connect_synced(min(timeout_sec, 30.0)) as (sock, reader):
-            result = self._request(sock, reader, "guest-exec", {
-                "path": "powershell.exe",
-                "arg": ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded_cmd],
-                "capture-output": True,
-            })
-            pid = result["pid"]
+        encoded_cmd=base64.b64encode(script.encode('utf-16le')).decode('ascii')
+        return self.exec_guest('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',encoded_cmd],timeout_sec=timeout_sec)
+
+    def exec_guest(self,path: str,arguments=(),*,input_data: bytes | None=None,timeout_sec: float=120.0) -> ExecResult:
+        if not isinstance(arguments,(list,tuple)) or not isinstance(path,str) or not path or '\0' in path or any(not isinstance(item,str) or '\0' in item for item in arguments):
+            raise ValueError('Invalid guest command')
+        timeout_sec=budget(timeout_sec,'qga.exec');started=time.monotonic();deadline=started+timeout_sec
+        request={'path':path,'arg':list(arguments),'capture-output':True}
+        if input_data is not None:request['input-data']=base64.b64encode(input_data).decode('ascii')
+        with self._connect_synced(min(timeout_sec,30.0)) as (sock,reader):
+            result=self._request(sock,reader,'guest-exec',request)
+            pid=result['pid']
         delay = 0.015
         while time.monotonic() < deadline:
             checkpoint("qga.exec_status")
@@ -340,9 +390,9 @@ class DirectHostControlChannel:
         shell_cmd = (
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script]
             if os.name == "nt"
-            else ["sh", "-c", script]
+            else ["sh", "-c", 'eval "$(cat)"']
         )
-        request_input=None
+        request_input=script if os.name!='nt' else None
         if os.name=='nt':
             from enclave_gateway.security.native import verified_runtime
             helper=verified_runtime(self.runtime_helper_path,self.trusted_signers,self.require_signed)
@@ -354,7 +404,7 @@ class DirectHostControlChannel:
         timeout_sec = budget(timeout_sec, "direct.exec")
         deadline = time.monotonic() + timeout_sec
         mark_dispatched()
-        with subprocess.Popen(shell_cmd, stdin=subprocess.PIPE if request_input else None, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        with subprocess.Popen(shell_cmd, stdin=subprocess.PIPE if request_input is not None else None, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                               start_new_session=(os.name != "nt")) as process:
             try:
                 while True:

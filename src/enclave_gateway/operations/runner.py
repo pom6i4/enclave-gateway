@@ -53,7 +53,12 @@ def tracked(operation: str):
             identity = principal()
             arguments = {key: _serializable(value) for key, value in bound.arguments.items() if key not in ("self", "actor", "timeout_sec")}
             fingerprint = hashlib.sha256(json.dumps(arguments, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-            previous = self.journal.reserve(tx_id, identity, operation, node, fingerprint, timeout)
+            try:
+                previous = self.journal.reserve(tx_id, identity, operation, node, fingerprint, timeout)
+            except OperationError:raise
+            except Exception as exc:
+                raise OperationError('journal_unavailable','journal',tx_id=tx_id,node=node,
+                                     message='Transaction reservation failed before command dispatch') from exc
             if previous:
                 if previous["state"] in TERMINAL:
                     if previous.get('payload_status') in ('expired','archive_unavailable'):
@@ -117,7 +122,16 @@ def tracked(operation: str):
                     state='failed' if kind=='exec' and value.exit_code else 'completed'
                 data=error.as_dict()
                 if getattr(error,'known_outcome',False): data['known_outcome']=True
-                self.journal.update(tx_id, identity, state, result=captured, error=data, timings=context.timings_ms)
+                try:
+                    self.journal.update(tx_id, identity, state, result=captured, error=data, timings=context.timings_ms)
+                except Exception:
+                    # Storage can fail after an effect but before its result is
+                    # durable. The reserved identity remains; never replay it.
+                    persistence=OperationError('journal_persistence_failed','journal',tx_id=tx_id,node=node,
+                                               indeterminate=context.dispatched,
+                                               message='Restore journal storage and reconcile the retained transaction identity')
+                    try:exc.operation_error=persistence
+                    except (AttributeError,TypeError):pass
                 # Preserve established exception types for local callers.
                 raise
             finally:
