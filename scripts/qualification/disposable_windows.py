@@ -121,7 +121,7 @@ if($pending -and -not $complete){
         post=(folder/'seed/post_install.ps1').read_text(encoding='utf-8')
         result=agent.exec_powershell(post,timeout_sec=120)
         if result.exit_code:raise RuntimeError('Machine post-install failed')
-        cleanup=r"""
+        cleanup_script=r"""
 $reg='HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
 $v=Get-ItemProperty $reg
 if($v.AutoAdminLogon -eq '1' -or $v.PSObject.Properties.Name -contains 'DefaultPassword'){throw 'Unexpected autologon credential'}
@@ -130,7 +130,7 @@ foreach($p in @('C:\Windows\Panther\unattend.xml','C:\Windows\Panther\Unattend\u
 }
 Get-Content C:\EnclaveGateway\provision-machine.json -Raw
 """
-        result=agent.exec_powershell(cleanup,timeout_sec=90)
+        result=agent.exec_powershell(cleanup_script,timeout_sec=90)
         if result.exit_code:raise RuntimeError('Setup credential cleanup failed')
         machine=json.loads(result.stdout)
         if machine.get('status')!='machine_ready':raise RuntimeError('Machine stage did not report readiness')
