@@ -2,6 +2,8 @@
 
 This follow-up covers complete VM state, versioned Windows deployment, public provisioning, failure handling and additional operating-system/load checks. It builds on the [earlier Windows qualification](WINDOWS_LAB_QUALIFICATION_2026-11-01.md) and [operational guide](HARDENING_AND_QUALIFICATION.md). All accounts, signing identities, data and network endpoints used here belong to disposable laboratory fixtures. No client environment, proprietary VPN key container or production signing key was used. Hosted Actions and workflow configuration were unchanged.
 
+The subsequent [cold security readback qualification](COLD_SECURITY_QUALIFICATION_2026-11-01.md) records a new first-use installation passing the unchanged 120-second gate in one attempt. The original cold timeout below remains part of this historical record.
+
 ## Code and behavior
 
 - Offline state bundles capture a flattened disk, UEFI variables and optional software TPM state. They verify firmware compatibility and every resource before replacement, reject backing-chain changes during flattening, serialize lifecycle operations and persist restore intent. Recovery after a real process exit between resource renames restores the previous complete generation. Profiles pin an immutable complete base and receive independent writable state and runtime endpoints.

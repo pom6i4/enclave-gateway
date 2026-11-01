@@ -30,15 +30,13 @@ def seed_iso(seed,destination,volume='EGWSEED'):
 
 def verify_guest_security(agent,*,secure_boot=False,tpm=False):
     """Read back requested firmware/TPM properties from the disposable guest."""
-    script=r"""
-$value=@{}
-if(SECURE_BOOT){$value.secure_boot=Confirm-SecureBootUEFI}
-if(WITH_TPM){$t=Get-Tpm;$value.tpm_present=$t.TpmPresent;$value.tpm_ready=$t.TpmReady;$value.tpm_manufacturer=$t.ManufacturerIdTxt}
-$value|ConvertTo-Json -Compress
-""".replace('SECURE_BOOT','$true' if secure_boot else '$false').replace('WITH_TPM','$true' if tpm else '$false')
+    source=Path(__file__).with_name('windows_security.ps1').read_text(encoding='utf-8')
+    script='& {\n'+source+'\n} -SecureBoot:'+('$true' if secure_boot else '$false')+' -Tpm:'+('$true' if tpm else '$false')
     result=agent.exec_powershell(script,timeout_sec=120)
     if result.exit_code:raise RuntimeError('Guest security readback failed')
     value=json.loads(result.stdout)
+    if not isinstance(value,dict) or type(value.get('query_revision')) is not int or value['query_revision']!=2 or type(value.get('attempts')) is not int or value['attempts']!=1:
+        raise RuntimeError('Invalid guest security evidence')
     if secure_boot and value.get('secure_boot') is not True:raise RuntimeError('Guest Secure Boot is not enabled')
     if tpm and (value.get('tpm_present') is not True or value.get('tpm_ready') is not True):
         raise RuntimeError('Guest software TPM is not ready')
@@ -99,6 +97,8 @@ def run(args):
             atomic_json(folder/'result.json',report)
             time.sleep(5)
         else:raise TimeoutError('Windows installation readiness deadline expired')
+        report.update(setup='complete',phase='post-install')
+        atomic_json(folder/'result.json',report)
         post=(folder/'seed/post_install.ps1').read_text(encoding='utf-8')
         result=agent.exec_powershell(post,timeout_sec=120)
         if result.exit_code:raise RuntimeError('Machine post-install failed')
@@ -117,9 +117,13 @@ Get-Content C:\EnclaveGateway\provision-machine.json -Raw
         if machine.get('status')!='machine_ready':raise RuntimeError('Machine stage did not report readiness')
         if not agent.sync_guest_clock():raise RuntimeError('Guest clock sync failed')
         with agent._connect_synced(15) as(s,r):osinfo=agent._request(s,r,'guest-get-osinfo')
-        report.update(status='passed',machine=machine,os=osinfo,autologon='not_configured',setup='complete',clock_sync='passed',
-                      entry_points=['egw init --create-disk','egw init --launch-installer --detach-installer'],
-                      guest_security=verify_guest_security(agent,secure_boot=args.secure_boot,tpm=args.tpm))
+        report.update(machine=machine,os=osinfo,autologon='not_configured',clock_sync='passed',phase='cold-security-readback',security_attempts=1,
+                      entry_points=['egw init --create-disk','egw init --launch-installer --detach-installer'])
+        atomic_json(folder/'result.json',report)
+        started=time.monotonic()
+        try:report['guest_security']=verify_guest_security(agent,secure_boot=args.secure_boot,tpm=args.tpm)
+        finally:report['security_elapsed_sec']=round(time.monotonic()-started,3)
+        report.update(status='passed',phase='complete')
     except BaseException as error:
         report.update(status='failed',error_type=type(error).__name__)
         raise
