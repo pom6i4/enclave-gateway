@@ -57,7 +57,7 @@ if($script:copies -ne 0 -or $failure -notlike 'Existing *requires explicit integ
     @unittest.skipUnless(os.environ.get('EGW_TEST_POWERSHELL'),'Real PowerShell is opt-in')
     def test_completed_generation_cleans_task_before_ready_without_reinstall(self):
         with tempfile.TemporaryDirectory() as folder:
-            for case in ('delete-failure','success','already-removed'):
+            for case in ('lookup-failure','delete-failure','success','already-removed'):
                 root=Path(folder)/case;root.mkdir()
                 policy={'revision':1,'guest_agent_sha256':'a'*64,'completion_mode':'StartupTask'}
                 (root/'provision-media.json').write_text(json.dumps(policy))
@@ -72,6 +72,10 @@ function Get-Service {[CmdletBinding()]param($Name);return [pscustomobject]@{Sta
 function Get-PSDrive {[CmdletBinding()]param($PSProvider);throw 'Completed preparation must not reinstall from media'}
 function Get-ScheduledTask {
  [CmdletBinding()]param($TaskName)
+ if($case -eq 'lookup-failure'){
+  $record=New-Object Management.Automation.ErrorRecord((New-Object IO.IOException('Task service unavailable')),'FixtureTaskServiceUnavailable','ResourceUnavailable',$null)
+  $PSCmdlet.WriteError($record);return
+ }
  if(-not $script:taskExists){return}
  $expected="-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$root\machine_prepare.ps1`" -Architecture x86_64 -CompleteSetup -WaitForSetup"
  return [pscustomobject]@{Actions=@([pscustomobject]@{Execute="$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe";Arguments=$expected});Principal=[pscustomobject]@{UserId='SYSTEM'}}
@@ -82,9 +86,9 @@ function Unregister-ScheduledTask {
  if($case -eq 'delete-failure'){throw 'Simulated deletion failure'}
  $script:taskExists=$false
 }
-$failed=$false;try{& {SOURCE} -Architecture x86_64 -CompleteSetup -WaitForSetup}catch{$failed=$true;if($case -ne 'delete-failure'){throw}}
+$failed=$false;try{& {SOURCE} -Architecture x86_64 -CompleteSetup -WaitForSetup}catch{$failed=$true;if($case -notin @('delete-failure','lookup-failure')){throw}}
 $m=Get-Content (Join-Path $root 'provision-machine.json') -Raw -Encoding UTF8|ConvertFrom-Json
-if($case -eq 'delete-failure'){
+if($case -in @('delete-failure','lookup-failure')){
  if(-not $failed -or $m.revision -ne 1){throw 'Readiness published before deletion completed'}
 }else{
  if($failed -or $script:taskExists -or $m.revision -ne 2 -or -not $m.completion_task_removed){throw 'Completed generation did not finalize'}
@@ -92,7 +96,7 @@ if($case -eq 'delete-failure'){
 '''.replace('CASE',quote(case)).replace('ROOT',quote(root)).replace('SOURCE',source)
                 result=invoke_harness(harness,root/'harness.ps1')
                 self.assertEqual(result.returncode,0,(result.stdout+result.stderr).decode('utf-8','replace'))
-                if case=='delete-failure':self.assertEqual((root/'provision-machine.json').read_text(),before)
+                if case in ('delete-failure','lookup-failure'):self.assertEqual((root/'provision-machine.json').read_text(),before)
 
     @unittest.skipUnless(os.environ.get('EGW_TEST_POWERSHELL'),'Real PowerShell is opt-in')
     def test_actual_kill_after_task_deletion_recovers_without_media(self):

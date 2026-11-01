@@ -41,6 +41,13 @@ function Invoke-AgentMsi([string]$CommandLine){
         return $process.ExitCode
     }finally{$process.Dispose()}
 }
+function Get-CompletionTask {
+    try{return Get-ScheduledTask -TaskName 'EnclaveGatewayMachinePreparation' -ErrorAction Stop}
+    catch{
+        if($_.CategoryInfo.Category -eq [Management.Automation.ErrorCategory]::ObjectNotFound){return $null}
+        throw
+    }
+}
 function Complete-Preparation([string]$QgaMode,[string]$Verification,[string]$ApprovedHash){
     # Durable commit intent precedes removing the only startup trigger. QGA
     # recovery validates this generation and never re-enters the MSI path.
@@ -51,13 +58,13 @@ function Complete-Preparation([string]$QgaMode,[string]$Verification,[string]$Ap
     if($CompletionMode -eq 'StartupTask'){
         Set-MachinePhase 'completion-task-cleanup'
         $name='EnclaveGatewayMachinePreparation'
-        $existing=Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+        $existing=Get-CompletionTask
         if($existing){
             $exe="$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
             $expected="-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$install\machine_prepare.ps1`" -Architecture $Architecture -CompleteSetup -WaitForSetup"
             if(@($existing.Actions).Count -ne 1 -or $existing.Actions[0].Execute -ne $exe -or $existing.Actions[0].Arguments -ne $expected -or $existing.Principal.UserId -notin @('SYSTEM','S-1-5-18')){throw 'Existing machine preparation task requires explicit integration'}
             Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction Stop
-            if(Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue){throw 'Machine preparation task was not removed'}
+            if(Get-CompletionTask){throw 'Machine preparation task was not removed'}
         }
         $removed=$true
     }
@@ -104,7 +111,7 @@ try{
             $name='EnclaveGatewayMachinePreparation'
             $exe="$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
             $args="-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$install\machine_prepare.ps1`" -Architecture $Architecture -CompleteSetup -WaitForSetup"
-            $existing=Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+            $existing=Get-CompletionTask
             if($existing -and (@($existing.Actions).Count -ne 1 -or $existing.Actions[0].Execute -ne $exe -or $existing.Actions[0].Arguments -ne $args -or $existing.Principal.UserId -notin @('SYSTEM','S-1-5-18'))){throw 'Existing machine preparation task requires explicit integration'}
             Copy-Item -LiteralPath $PSCommandPath -Destination (Join-Path $install 'machine_prepare.ps1') -Force
             if(Test-Path -LiteralPath $policy){Copy-Item -LiteralPath $policy -Destination (Join-Path $install 'provision-media.json') -Force}
