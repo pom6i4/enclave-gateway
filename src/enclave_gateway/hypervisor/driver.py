@@ -142,6 +142,17 @@ class ApplianceHypervisor:
         self.spec = spec
         self.qmp = QmpClient(spec.qmp_socket)
 
+    @staticmethod
+    def tpm_capabilities():
+        supported=platform.system()!='Windows'
+        return {'managed_software_tpm':supported,'backend':'swtpm' if supported else None,
+                'reason':None if supported else 'qemu-windows-tpm-backend-unavailable',
+                'hardware_attestation':False}
+
+    def validate_tpm_host(self):
+        if self.spec.tpm_state_dir and not self.tpm_capabilities()['managed_software_tpm']:
+            raise ValueError('Windows QEMU does not provide a TPM emulator backend; use a POSIX virtualization host')
+
     def is_running(self) -> tuple[bool, int | None]:
         if not self.spec.pid_file.is_file():
             return False, None
@@ -161,6 +172,7 @@ class ApplianceHypervisor:
             return False, None
 
     def build_qemu_command(self) -> list[str]:
+        self.validate_tpm_host()
         accel = detect_host_accelerator(self.spec.hypervisor)
         arch = detect_host_arch(self.spec.arch)
 
@@ -252,7 +264,6 @@ class ApplianceHypervisor:
             ]
         )
         if self.spec.tpm_state_dir:
-            if os.name=='nt':raise ValueError('Managed swtpm requires a POSIX host')
             cmd.extend(['-chardev',f'socket,id=tpmctrl,path={qemu_value(self.spec.tpm_socket)}',
                         '-tpmdev','emulator,id=tpm0,chardev=tpmctrl','-device',
                         'tpm-tis-device,tpmdev=tpm0' if arch=='arm64' else 'tpm-tis,tpmdev=tpm0'])
@@ -292,6 +303,7 @@ class ApplianceHypervisor:
 
     def _start_tpm(self):
         if not self.spec.tpm_state_dir:return
+        self.validate_tpm_host()
         from enclave_gateway.hypervisor.state import private_dir
         state=Path(self.spec.tpm_state_dir).expanduser().absolute();private_dir(state)
         self._stop_tpm()

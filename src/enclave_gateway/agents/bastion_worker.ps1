@@ -78,6 +78,28 @@ if ($ProcessIsolation) {
         }
     }
 }
+$trustProcess=$null;$trustError=$null
+$trustState=[hashtable]::Synchronized(@{Process=$null;Cancelled=$false;Stage='starting'})
+$nativeTrust={
+    param($Query,$Timeout,$State)
+    $ErrorActionPreference='Stop';$read=$null
+    try{
+        if($State.Cancelled -or $State.Process.HasExited){throw 'Native trust host unavailable'}
+        $State.Stage='writing'
+        $read=$State.Process.StandardOutput.ReadLineAsync()
+        $frame=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Query))
+        $State.Process.StandardInput.WriteLine($frame);$State.Process.StandardInput.Flush()
+        $State.Stage='waiting'
+        if(-not $read.Wait($Timeout)){throw 'Native trust deadline expired'}
+        $value=$read.Result|ConvertFrom-Json
+        if($value.ExitCode -isnot [int] -or $value.Stdout -isnot [string] -or $value.Stderr -isnot [string]){throw 'Invalid native trust response'}
+        $State.Stage='ready';return $value
+    }catch{
+        $State.Cancelled=$true
+        try{if(-not $State.Process.HasExited){$State.Process.Kill()}}catch{}
+        return @{ExitCode=125;Stdout='';Stderr='Native trust unavailable';Indeterminate=$true}
+    }finally{if($read -and $read.IsCompleted){$read.Dispose()}}
+}
 function Start-WorkerPipeline($Pipe) {
     # Windows PowerShell retains implicit BeginInvoke input buffers until GC.
     # Own both buffers so their wait handles are released on every completion.
@@ -171,13 +193,13 @@ $execute = {
 # Native process creation and pipe writes can block on OS policy or backpressure.
 # Keep them in bounded runspaces so the dispatcher continues mux/cancellation turns.
 $nativeExecute={
-    param($Runtime,$PowerShell,$Child,$Timeout,$State)
+    param($Runtime,$PowerShell,$Child,$Timeout,$State,$Mode='run')
     $ErrorActionPreference='Stop'
     $proc=New-Object Diagnostics.Process
     try {
         if ($State.Cancelled) {return @{ExitCode=125;Stdout='';Stderr='Cancelled before native launch';Indeterminate=$true}}
         $psi=New-Object Diagnostics.ProcessStartInfo
-        $psi.FileName=$Runtime; $psi.Arguments='run'; $psi.UseShellExecute=$false
+        $psi.FileName=$Runtime; $psi.Arguments=$Mode; $psi.UseShellExecute=$false
         $psi.RedirectStandardInput=$true; $psi.RedirectStandardOutput=$true; $psi.RedirectStandardError=$true
         $psi.StandardOutputEncoding=New-Object Text.UTF8Encoding($false); $psi.StandardErrorEncoding=New-Object Text.UTF8Encoding($false)
         $proc.StartInfo=$psi; $State.Process=$proc
@@ -187,6 +209,7 @@ $nativeExecute={
         $output=$proc.StandardOutput.ReadToEndAsync(); $errorOutput=$proc.StandardError.ReadToEndAsync()
         $bootstrap='[Console]::InputEncoding=New-Object Text.UTF8Encoding($false); & ([scriptblock]::Create([Console]::In.ReadToEnd()))'
         $query=@{command=@($PowerShell,'-NoProfile','-NonInteractive','-Command',$bootstrap);timeout_ms=$Timeout;stdin_b64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Child))}|ConvertTo-Json -Compress
+        if($Mode -eq 'attest'){$query=$Child}
         $State.Stage='writing'
         $proc.StandardInput.WriteLine($query); $proc.StandardInput.Close()
         $State.Stage='waiting'
@@ -218,6 +241,29 @@ $nativeExecute={
 }
 
 try {
+if($ProcessIsolation){
+    $trustProcess=New-Object Diagnostics.Process
+    $start=New-Object Diagnostics.ProcessStartInfo
+    $start.FileName=$RuntimeHelper;$start.Arguments="attest-server $PID";$start.UseShellExecute=$false
+    $start.RedirectStandardInput=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+    $start.StandardOutputEncoding=New-Object Text.UTF8Encoding($false)
+    $trustProcess.StartInfo=$start
+    try{
+        [void]$trustProcess.Start();$trustState.Process=$trustProcess
+        $trustError=$trustProcess.StandardError.ReadToEndAsync()
+        $initial=@{worker_path=$PSCommandPath;runtime_path=$RuntimeHelper;worker_sha256=$loadedWorkerHash;runtime_sha256=$runtimeHash;require_signed=(-not $AllowUnsignedLab)}|ConvertTo-Json -Compress
+        $trustProcess.StandardInput.WriteLine([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($initial)));$trustProcess.StandardInput.Flush()
+        $ready=$trustProcess.StandardOutput.ReadLineAsync()
+        if(-not $ready.Wait(120000)){throw 'Native trust host did not become ready'}
+        $identity=$ready.Result|ConvertFrom-Json
+        if($identity.ready -ne 1){throw "Native trust host initialization failed ($($identity.error):$($identity.native_code))"}
+        $trustState.InitializationMs=$identity.initialization_ms
+        $ready.Dispose();$trustState.Stage='ready'
+    }catch{
+        try{if(-not $trustProcess.HasExited){$trustProcess.Kill();$trustProcess.WaitForExit()}}catch{}
+        $trustProcess.Dispose();throw
+    }
+}
     while (-not $StopFile -or -not (Test-Path -LiteralPath $StopFile)) {
         # Cancellation files have priority over new work. They contain no code.
         foreach ($cancelFile in @(Get-ChildItem -LiteralPath $SpoolDir -Filter 'cancel_*.json' -File | Select-Object -First $MaxRequestsPerTick)) {
@@ -409,6 +455,7 @@ try {
                     $nonce=[string]$request.attestation_nonce
                     if ($nonce -notmatch '^[a-f0-9]{64}$') { throw 'Invalid attestation challenge' }
                     $evidence=@{ protocol_revision=1; version='0.3.0'; runtime_loaded_sha256=$runtimeHash; runtime_current_sha256='';
+                        trust_initialization_ms=$trustState.InitializationMs;
                         nonce=$nonce; instance_id=$workerInstance; pid=$PID; session_id=$workerSessionId;
                         spool_kind=if ($SpoolDir.StartsWith('\\tsclient\',[StringComparison]::OrdinalIgnoreCase)) {'redirected'} else {'local'}; loaded_sha256=$loadedWorkerHash; current_sha256='';
                         signature_status='NotSupported'; signer=''; loaded_signature_status=$workerSignatureStatus; loaded_signer=$workerSigner;
@@ -445,10 +492,8 @@ $e | ConvertTo-Json -Compress -Depth 5
                     $nativeState=$null
                     if($ProcessIsolation){
                         if((Get-FileHash -LiteralPath $RuntimeHelper -Algorithm SHA256).Hash.ToLowerInvariant() -ne $runtimeHash){throw 'Runtime changed before trust probe launch'}
-                        $encoded=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($text))
-                        $child="[Console]::OutputEncoding=New-Object Text.UTF8Encoding(`$false); & { $($execute.ToString()) } ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$encoded'))) | ConvertTo-Json -Compress"
-                        $nativeState=[hashtable]::Synchronized(@{Process=$null;Cancelled=$false;Stage='queued'})
-                        [void]$pipe.AddScript($nativeExecute).AddArgument($RuntimeHelper).AddArgument($powerShellPath).AddArgument($child).AddArgument($timeout).AddArgument($nativeState)
+                        $nativeState=$trustState
+                        [void]$pipe.AddScript($nativeTrust).AddArgument($query).AddArgument($timeout).AddArgument($nativeState)
                     }else{[void]$pipe.AddScript($execute).AddArgument($text)}
                     try {$invocation=Start-WorkerPipeline $pipe} catch {$pipe.Dispose();throw}
                     $slot.Busy=$true
@@ -524,7 +569,7 @@ $e | ConvertTo-Json -Compress -Depth 5
             $nativeStages=@{}
             foreach($job in $activeTxJobs.ToArray()) {if($job.Native) {$stage=[string]$job.NativeState.Stage; $nativeStages[$stage]=1+[int]$nativeStages[$stage]}}
             $self=[Diagnostics.Process]::GetCurrentProcess()
-            $state=@{ read_retry_count=$readRetryCount; native_stages=$nativeStages; working_set_bytes=$self.WorkingSet64; handles=$self.HandleCount; threads=$self.Threads.Count; pid=$PID; language_mode=[string]$ExecutionContext.SessionState.LanguageMode; powershell_edition=[string]$PSVersionTable.PSEdition; uptime_sec=[int]$clock.Elapsed.TotalSeconds;
+            $state=@{ trust_initialization_ms=$trustState.InitializationMs; read_retry_count=$readRetryCount; native_stages=$nativeStages; working_set_bytes=$self.WorkingSet64; handles=$self.HandleCount; threads=$self.Threads.Count; pid=$PID; language_mode=[string]$ExecutionContext.SessionState.LanguageMode; powershell_edition=[string]$PSVersionTable.PSEdition; uptime_sec=[int]$clock.Elapsed.TotalSeconds;
                 execution_model=if ($ProcessIsolation) {"owned-process-job"} else {"runspace-lab"}; parallel_streams=$ParallelStreams; active_mux_streams=$Global:EnclaveMuxSockets.Count; active_tx_jobs=$activeTxJobs.Count;
                 pending_mux=$pendingMux.Count; completed_transactions=$completedCount; native_cleanup_cycles=$nativeCleanupCycles; transaction_records=$transactionCount; transaction_capacity=$MaxTransactionRecords; last_heartbeat_utc=(Get-Date).ToUniversalTime().ToString('o') }
             $self.Dispose()
@@ -539,6 +584,12 @@ $e | ConvertTo-Json -Compress -Depth 5
         Start-Sleep -Milliseconds ([Math]::Max(1, [Math]::Min($PollIntervalMs, 50)))
     }
 } finally {
+    if($trustProcess){
+        try{if(-not $trustProcess.HasExited){$trustProcess.Kill();$trustProcess.WaitForExit()}}catch{}
+        foreach($name in @('StandardInput','StandardOutput','StandardError')){try{$trustProcess.$name.Dispose()}catch{}}
+        $trustProcess.Dispose()
+        if($trustError -and $trustError.IsCompleted){$trustError.Dispose()}
+    }
     foreach ($job in @($activeTxJobs.ToArray())) {
         try {Stop-Execution $job; $job.Pipe.Stop()}
         catch {} finally {

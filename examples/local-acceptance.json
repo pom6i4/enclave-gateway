@@ -1,0 +1,27 @@
+{
+  "revision": 1,
+  "scope": "isolated-local-qualification",
+  "managed_vm_configs": [],
+  "steps": [
+    {
+      "name": "installed-package",
+      "argv": [
+        "{python}",
+        "scripts/qualification/installed_package.py",
+        "--output",
+        "{run_dir}/artifact"
+      ],
+      "timeout_sec": 180
+    },
+    {
+      "name": "core-and-hygiene",
+      "argv": [
+        "{python}",
+        "scripts/qualify.py",
+        "--output-dir",
+        "{run_dir}/matrix"
+      ],
+      "timeout_sec": 300
+    }
+  ]
+}

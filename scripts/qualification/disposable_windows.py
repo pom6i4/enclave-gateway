@@ -49,7 +49,8 @@ def run(args):
     folder.mkdir(parents=True,exist_ok=True,mode=0o700);folder.chmod(0o700)
     atomic_json(folder/'supervisor.json',{'pid':os.getpid()})
     agent_sha256=hashlib.sha256(args.guest_agent_msi.read_bytes()).hexdigest()
-    opts=ProvisionOptions(arch=args.arch,admin_user='EGWLab',guest_agent_sha256=agent_sha256)
+    completion_mode=getattr(args,'completion_mode','StartupTask')
+    opts=ProvisionOptions(arch=args.arch,admin_user='EGWLab',guest_agent_sha256=agent_sha256,completion_mode=completion_mode)
     atomic_json(folder/'credentials.json',{'username':opts.admin_user,'password':opts.admin_password})
     runtime=Path(tempfile.mkdtemp(prefix='egw-provision-',dir='/tmp' if os.name!='nt' else None))
     config={'profile':'isolated-provision','appliance':{'name':'egw-lab-'+hashlib.sha256(str(folder).encode()).hexdigest()[:6],'arch':args.arch,'hypervisor':args.accelerator,
@@ -72,7 +73,7 @@ def run(args):
         virtio=folder/'drivers.iso';seed_iso(media,virtio,'EGWDRIVERS')
     base=[sys.executable,'-m','enclave_gateway.cli','-c',str(folder/'config.json'),'--state-dir',str(folder/'controller'),
           'init','--arch',args.arch,'--admin-user',opts.admin_user,'--disk-size-gb','32','--output-dir',str(folder/'seed'),
-          '--win-iso',str(args.windows_iso.resolve()),'--virtio-iso',str(virtio.resolve()),'--guest-agent-sha256',agent_sha256]
+          '--win-iso',str(args.windows_iso.resolve()),'--virtio-iso',str(virtio.resolve()),'--guest-agent-sha256',agent_sha256,'--completion-mode',completion_mode]
     def cli(arguments,label):
         result=subprocess.run(base+arguments,cwd=ROOT,env=environment,capture_output=True,timeout=180)
         (folder/(label+'.out.log')).write_bytes(result.stdout);(folder/(label+'.err.log')).write_bytes(result.stderr)
@@ -85,7 +86,11 @@ def run(args):
         seed_iso(folder/'seed',folder/'seed.iso')
         cli(['--seed-iso',str(folder/'seed.iso'),'--launch-installer','--detach-installer'],'launch')
         agent=QgaClient(cfg.appliance.qga_socket);deadline=time.monotonic()+args.deadline_sec
-        probe="$s=Get-ItemProperty 'HKLM:\\SYSTEM\\Setup'; @{ready=(-not ($s.OOBEInProgress -or $s.SystemSetupInProgress -or $s.SetupType)); machine=(Test-Path 'C:\\EnclaveGateway\\provision-machine.json')}|ConvertTo-Json -Compress"
+        probe=r"""$s=Get-ItemProperty 'HKLM:\SYSTEM\Setup';$m=$null
+if(Test-Path 'C:\EnclaveGateway\provision-machine.json'){$m=Get-Content 'C:\EnclaveGateway\provision-machine.json' -Raw -Encoding UTF8|ConvertFrom-Json}
+$complete=($m.revision -eq 2 -and $m.status -eq 'machine_ready' -and $m.completion_mode -eq '__COMPLETION_MODE__')
+if($m.completion_mode -eq 'StartupTask'){$complete=($complete -and $m.completion_task_removed -eq $true -and -not (Get-ScheduledTask -TaskName EnclaveGatewayMachinePreparation -ErrorAction SilentlyContinue))}
+@{ready=(-not ($s.OOBEInProgress -or $s.SystemSetupInProgress -or $s.SetupType));machine=$complete}|ConvertTo-Json -Compress""".replace('__COMPLETION_MODE__',completion_mode)
         while time.monotonic()<deadline:
             try:
                 with agent._connect_synced(5) as(s,r):agent._request(s,r,'guest-ping')
@@ -138,6 +143,7 @@ if __name__=='__main__':
     p.add_argument('--arch',choices=['arm64','x86_64'],default='x86_64');p.add_argument('--accelerator',choices=['tcg','hvf'],default='tcg')
     p.add_argument('--cpus',type=int,default=2);p.add_argument('--memory-mb',type=int,default=4096)
     p.add_argument('--tpm',action='store_true');p.add_argument('--secure-boot',action='store_true');p.add_argument('--port-base',type=int,default=24689)
+    p.add_argument('--completion-mode',choices=['StartupTask','SetupComplete'],default='StartupTask')
     p.add_argument('--vnc-display',type=int,default=106);p.add_argument('--deadline-sec',type=int,default=3600)
     a=p.parse_args()
     if not 60<=a.deadline_sec<=7200:p.error('deadline must be 60..7200 seconds')

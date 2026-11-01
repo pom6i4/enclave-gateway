@@ -90,6 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_init.add_argument('--seed-iso',default='',help='Read-only seed ISO prepared from the generated bundle.')
     p_init.add_argument('--guest-agent-sha256',default='',help='Explicitly approve these QGA MSI bytes; unsigned media otherwise requires Authenticode.')
+    p_init.add_argument('--completion-mode',choices=['StartupTask','SetupComplete'],default='StartupTask',help='SYSTEM preparation trigger after Windows Setup.')
     p_init.add_argument('--admin-user',default='Admin',help='New disposable/appliance local administrator name.')
     p_init.add_argument('--detach-installer',action='store_true',help='Detach a requested installer and verify its QMP identity.')
     p_init.add_argument(
@@ -607,6 +608,7 @@ def _main(argv: list[str] | None = None) -> int:
                 admin_user=args.admin_user,
                 seed_iso_path=args.seed_iso,
                 guest_agent_sha256=args.guest_agent_sha256,
+                completion_mode=args.completion_mode,
                 computer_name=cfg.appliance.name[:15],
                 disk_size_gb=args.disk_size_gb,
                 win_iso_path=args.win_iso,

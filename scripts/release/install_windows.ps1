@@ -33,7 +33,7 @@ function Read-Selection {
     $path=Join-Path $InstallDir 'installation.json'
     if (-not (Test-Path -LiteralPath $path)) {return $null}
     $value=Get-Content -LiteralPath $path -Raw -Encoding UTF8|ConvertFrom-Json
-    if ($value.revision -ne 1 -or $value.current -notmatch '^[a-f0-9]{64}$' -or ($value.previous -and $value.previous -notmatch '^[a-f0-9]{64}$')) {throw 'Invalid installation selection'}
+    if ($value.revision -ne 2 -or $value.max_sequence -isnot [int] -or $value.max_sequence -lt 1 -or $value.channel -cnotmatch '^[a-z0-9][a-z0-9-]{0,31}$' -or $value.highest_release -notmatch '^[a-f0-9]{64}$' -or $value.current -notmatch '^[a-f0-9]{64}$' -or ($value.previous -and $value.previous -notmatch '^[a-f0-9]{64}$')) {throw 'Invalid installation selection'}
     return $value
 }
 function Assert-Version([string]$Version) {
@@ -54,11 +54,11 @@ function Assert-Version([string]$Version) {
     }
     return $directory
 }
-function Select-Version([string]$Current,[string]$Previous) {
+function Select-Version([string]$Current,[string]$Previous,[int]$Maximum,[string]$Highest,[string]$Channel) {
     $temporary=Join-Path $InstallDir ('.selection-'+[Guid]::NewGuid().ToString('N'))
     $path=Join-Path $InstallDir 'installation.json'
     try {
-        $bytes=[Text.Encoding]::UTF8.GetBytes((@{revision=1;current=$Current;previous=$Previous}|ConvertTo-Json -Compress))
+        $bytes=[Text.Encoding]::UTF8.GetBytes((@{revision=2;current=$Current;previous=$Previous;max_sequence=$Maximum;highest_release=$Highest;channel=$Channel}|ConvertTo-Json -Compress))
         $stream=New-Object IO.FileStream($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
         try {$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)} finally {$stream.Dispose()}
         if(Test-Path -LiteralPath $path) {[IO.File]::Replace($temporary,$path,[NullString]::Value)} else {[IO.File]::Move($temporary,$path)}
@@ -81,12 +81,19 @@ try {
         if (-not $PackageDir) {throw 'PackageDir is required for Install'}
         & (Join-Path $PSScriptRoot 'verify_windows.ps1') -PackageDir $PackageDir -TrustedThumbprints $TrustedThumbprints | Out-Null
         $version=(Get-FileHash (Join-Path $PackageDir 'signature-manifest.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+        $metadata=Get-Content (Join-Path $PackageDir 'signature-manifest.json') -Raw -Encoding UTF8|ConvertFrom-Json
+        if($selection){
+            if($metadata.channel -cne $selection.channel){throw 'Release channel change requires a separate installation'}
+            if($version -ne $selection.current -and ($metadata.sequence -lt $selection.max_sequence -or ($metadata.sequence -eq $selection.max_sequence -and $version -ne $selection.highest_release))){throw 'Release downgrade or sequence reuse rejected; use explicit Rollback for the verified previous generation'}
+        }
+        $maximum=[int]$metadata.sequence;$highest=$version
+        if($selection -and $selection.max_sequence -gt $maximum){$maximum=$selection.max_sequence;$highest=$selection.highest_release}
         $destination=Join-Path $versions $version
         if (-not (Test-Path -LiteralPath $destination)) {
             $stage=Join-Path $versions ('.stage-'+[Guid]::NewGuid().ToString('N'))
             [void][IO.Directory]::CreateDirectory($stage);Protect-Directory $stage
             foreach($name in @('release','bin','agents')) {[void][IO.Directory]::CreateDirectory((Join-Path $stage $name))}
-            foreach($name in @('bastion_worker.ps1','bastion_bootstrap.ps1','appliance_init.ps1','session_supervisor.ps1','verify_windows.ps1','install_windows.ps1','egw-runtime.exe','egw-askpass.exe','signature-manifest.json')) {
+            foreach($name in @('bastion_worker.ps1','bastion_bootstrap.ps1','appliance_init.ps1','session_supervisor.ps1','verify_windows.ps1','install_windows.ps1','egw-runtime.exe','egw-askpass.exe','signature-manifest.json','signature-manifest.p7s')) {
                 Copy-Item -LiteralPath (Join-Path $PackageDir $name) -Destination (Join-Path (Join-Path $stage 'release') $name)
             }
             & (Join-Path $PSScriptRoot 'verify_windows.ps1') -PackageDir (Join-Path $stage 'release') -TrustedThumbprints $TrustedThumbprints | Out-Null
@@ -96,12 +103,12 @@ try {
         }
         [void](Assert-Version $version)
         if (-not $selection -or $selection.current -ne $version) {
-            Select-Version $version $(if($selection){$selection.current}else{''})
+            Select-Version $version $(if($selection){$selection.current}else{''}) $maximum $highest $metadata.channel
         }
     } elseif($Action -eq 'Rollback') {
         if (-not $selection -or -not $selection.previous) {throw 'No previous installed version'}
         [void](Assert-Version $selection.previous)
-        Select-Version $selection.previous $selection.current
+        Select-Version $selection.previous $selection.current $selection.max_sequence $selection.highest_release $selection.channel
     } elseif(-not $selection) {throw 'No selected installed version'}
     if($Action -eq 'Recover') {
         foreach($abandoned in @(Get-ChildItem -LiteralPath $versions -Directory -Filter '.stage-*')) {

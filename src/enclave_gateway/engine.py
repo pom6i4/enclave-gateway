@@ -1445,6 +1445,7 @@ Write-Output 'PATH_GRANT_OK'
         return {"host": {"os": platform.system(), "arch": platform.machine(), "python": sys.version.split()[0]},
                 "tools": {name: bool(shutil.which(name)) for name in ("ssh", "pwsh", "powershell.exe", "qemu-img")},
                 "provider": provider_adapter(self.config.provider.type).capabilities(),
+                "virtualization":ApplianceHypervisor.tpm_capabilities(),
                 "transactions": {"durable": True, "replay_ambiguous": False, "cancellation": "requested-until-confirmed"},
                 "security": {"signed_helper_required": self.config.security.require_signed_helpers,
                              "signed_agents_required": self.config.security.require_signed_agents,

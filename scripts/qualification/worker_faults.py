@@ -43,7 +43,13 @@ def run(args):
                     while not marker.exists():
                         if pending.done() or time.monotonic()>deadline:raise AssertionError('Actual crash marker not observed')
                         time.sleep(.02)
+                    trust_pid=engine.rdp_vfs._verified_worker.get('trust_host_pid')
                     worker.process.kill();worker.process.wait(5)
+                    if trust_pid:
+                        from enclave_gateway.hypervisor.driver import process_running
+                        limit=time.monotonic()+5
+                        while process_running(trust_pid) and time.monotonic()<limit:time.sleep(.05)
+                        assert not process_running(trust_pid),'Read-only trust host survived its worker'
                     try:pending.result(timeout=15)
                     except OperationError as error:assert error.indeterminate
                     else:raise AssertionError('Lost worker outcome reported as terminal')
@@ -54,6 +60,7 @@ def run(args):
                 else:raise AssertionError('Indeterminate operation was replayed')
                 assert marker.read_text()=='x'
                 report['checks'].append('actual-worker-process-kill:indeterminate-without-replay')
+                if trust_pid:report['checks'].append('native-trust-host-stops-after-worker-kill')
                 original=engine.control.try_read_bytes;corrupted=[]
                 def corrupt(path,**options):
                     raw=original(path,**options)

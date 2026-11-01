@@ -2,7 +2,13 @@ using System.Text.Json;
 
 try
 {
-    if (args.Length != 1 || (args[0] != "fs" && args[0] != "run" && args[0] != "run-as" && args[0] != "cancel")) return 2;
+    // Redirected protocol streams must not change a shared Windows console's
+    // code page. Detect a StreamWriter's UTF-8 preamble at the stream boundary.
+    Console.SetIn(new StreamReader(Console.OpenStandardInput(),new System.Text.UTF8Encoding(false,true),true));
+    Console.SetOut(new StreamWriter(Console.OpenStandardOutput(),new System.Text.UTF8Encoding(false)){AutoFlush=true});
+    if(args.Length==2 && args[0]=="attest-server" && int.TryParse(args[1],out int ownerPid) && ownerPid>0)
+        return Attestation.Serve(ownerPid);
+    if (args.Length != 1 || (args[0] != "fs" && args[0] != "run" && args[0] != "run-as" && args[0] != "cancel" && args[0] != "attest")) return 2;
     int maximum=args[0]=="run"?12*1024*1024:1024*1024;
     var buffer=new System.Text.StringBuilder();
     if(args[0]=="run-as")
@@ -16,6 +22,7 @@ try
     }
     string input=buffer.ToString();
     using var document = JsonDocument.Parse(input);
+    if(args[0]=="attest") {Console.WriteLine(JsonSerializer.Serialize(Attestation.Request(document.RootElement)));return 0;}
     if(args[0]=="cancel") {Console.WriteLine(JsonSerializer.Serialize(Cancellation.Request(document.RootElement)));return 0;}
     if(args[0]=="run") return OwnedJob.Run(document.RootElement);
     if(args[0]=="run-as") return OwnedJob.RunAs(document.RootElement);

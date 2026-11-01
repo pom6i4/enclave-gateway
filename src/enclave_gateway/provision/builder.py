@@ -40,8 +40,10 @@ class ProvisionOptions:
     virtio_iso_path: str = ""
     seed_iso_path: str = ""
     guest_agent_sha256: str = ""
+    completion_mode: str = 'StartupTask'
 
     def __post_init__(self):
+        if self.completion_mode not in ('StartupTask','SetupComplete'):raise ValueError('Invalid machine completion mode')
         if self.guest_agent_sha256:
             if not isinstance(self.guest_agent_sha256,str) or not re.fullmatch(r'[a-fA-F0-9]{64}',self.guest_agent_sha256):
                 raise ValueError('Guest agent approval must be an exact SHA-256')
@@ -305,6 +307,7 @@ class ApplianceProvisioner:
     ) -> dict[str, Any]:
         """Generate Autounattend.xml, agent scripts, and optional qcow2/EFI storage."""
         options = opts or ProvisionOptions()
+        self.hypervisor.validate_tpm_host()
         if create_disk:
             self.hypervisor._assert_offline()
         out_path = output_dir.expanduser().resolve()
@@ -314,7 +317,7 @@ class ApplianceProvisioner:
         autounattend_path = out_path / "Autounattend.xml"
         autounattend_xml = generate_autounattend_xml(self.config, options)
         autounattend_path.write_text(autounattend_xml, encoding="utf-8")
-        (out_path/'provision-media.json').write_text(json.dumps({'revision':1,'guest_agent_sha256':options.guest_agent_sha256})+'\n',encoding='utf-8')
+        (out_path/'provision-media.json').write_text(json.dumps({'revision':1,'guest_agent_sha256':options.guest_agent_sha256,'completion_mode':options.completion_mode})+'\n',encoding='utf-8')
 
         post_install_path = out_path / "post_install.ps1"
         post_install_ps1 = generate_post_install_ps1(self.config, options)

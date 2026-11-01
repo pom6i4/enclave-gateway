@@ -11,6 +11,8 @@ Operation journals, principal grants, isolated qualification and Windows release
 
 Offline VM state, versioned installation and the expanded isolated platform checks: [autonomous qualification](docs/AUTONOMOUS_QUALIFICATION_2026-11-01.md).
 
+Local acceptance, installed-distribution checks and authenticated release ordering: [local acceptance guide](docs/LOCAL_ACCEPTANCE.md).
+
 ## Overview
 
 Connecting modern developer workstations (**macOS on Apple Silicon `M1–M5`**, **modern Linux kernels `6.8+`**, or clean **Windows** hosts) to isolated corporate and government network enclaves protected by proprietary VPN clients (**InfoTeCS ViPNet Client 4/5**, etc.) and locked-down **RDP Jump Hosts (Bastions)** normally requires manual GUI workflows, dedicated laptops, or fragile nested quoting across multiple shells.

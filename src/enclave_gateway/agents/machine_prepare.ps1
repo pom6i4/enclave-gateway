@@ -1,4 +1,5 @@
-param([ValidateSet('arm64','x86_64')][string]$Architecture,[switch]$CompleteSetup)
+param([ValidateSet('arm64','x86_64')][string]$Architecture,[switch]$CompleteSetup,
+      [ValidateSet('StartupTask','SetupComplete')][string]$CompletionMode='StartupTask',[switch]$WaitForSetup)
 $ErrorActionPreference='Stop'
 $install='C:\EnclaveGateway'
 [void][IO.Directory]::CreateDirectory($install)
@@ -30,13 +31,49 @@ function Invoke-AgentMsi([string]$CommandLine){
         return $process.ExitCode
     }finally{$process.Dispose()}
 }
+function Complete-Preparation([string]$QgaMode,[string]$Verification,[string]$ApprovedHash){
+    $removed=$false
+    if($CompletionMode -eq 'StartupTask'){
+        Set-MachinePhase 'completion-task-cleanup'
+        $name='EnclaveGatewayMachinePreparation'
+        $existing=Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+        if($existing){
+            $exe="$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+            $expected="-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$install\machine_prepare.ps1`" -Architecture $Architecture -CompleteSetup -WaitForSetup"
+            if(@($existing.Actions).Count -ne 1 -or $existing.Actions[0].Execute -ne $exe -or $existing.Actions[0].Arguments -ne $expected -or $existing.Principal.UserId -notin @('SYSTEM','S-1-5-18')){throw 'Existing machine preparation task requires explicit integration'}
+            Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction Stop
+            if(Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue){throw 'Machine preparation task was not removed'}
+        }
+        $removed=$true
+    }
+    Remove-Item -LiteralPath (Join-Path $install 'machine-prepare-failed.json') -ErrorAction SilentlyContinue
+    Set-MachinePhase 'complete'
+    # Publish readiness last. A controller may power down as soon as it sees
+    # this record; neither task deletion nor installer work may follow it.
+    @{revision=2;status='machine_ready';architecture=$Architecture;qga_mode=$QgaMode;media_verification=$Verification;approved_sha256=$ApprovedHash;
+      completion_mode=$CompletionMode;completion_task_removed=$removed;automatic_logon='not_configured';provider='not_installed'}|ConvertTo-Json|Set-Content (Join-Path $install 'provision-machine.json') -Encoding UTF8
+}
 try{
+    if($WaitForSetup){
+        if(-not $CompleteSetup){throw 'Setup wait requires completion mode'}
+        $until=[DateTime]::UtcNow.AddHours(2)
+        do{
+            $setup=Get-ItemProperty 'HKLM:\SYSTEM\Setup'
+            if(-not ($setup.SystemSetupInProgress -or $setup.OOBEInProgress -or $setup.SetupType)){break}
+            if([DateTime]::UtcNow -ge $until){throw 'Windows Setup completion deadline expired'}
+            Start-Sleep -Seconds 5
+        }while($true)
+    }
     Set-MachinePhase 'media-policy'
     $approvedHash='';$policy=Join-Path $PSScriptRoot 'provision-media.json'
     if(Test-Path -LiteralPath $policy){
         $approval=Get-Content -LiteralPath $policy -Raw -Encoding UTF8|ConvertFrom-Json
         if($approval.revision -ne 1){throw 'Unsupported provision media policy'}
         $approvedHash=[string]$approval.guest_agent_sha256
+        if($approval.completion_mode){
+            if($approval.completion_mode -notin @('StartupTask','SetupComplete')){throw 'Invalid completion mode policy'}
+            $CompletionMode=[string]$approval.completion_mode
+        }
         if($approvedHash -and $approvedHash -notmatch '^[a-f0-9]{64}$'){throw 'Invalid provision media policy'}
     }
     $setup=Get-ItemProperty 'HKLM:\SYSTEM\Setup'
@@ -44,6 +81,24 @@ try{
         # QGA's VSS COM registration needs the completed OS. Specialize only
         # stages this SYSTEM hook; it never logs a user on or installs MSI.
         Set-MachinePhase 'deferred-until-setup-complete'
+        if($CompletionMode -eq 'StartupTask'){
+            # This SYSTEM task also runs where OEM media disables SetupComplete.
+            # Start now to observe completion in the same boot; startup is the
+            # persistent recovery trigger if Windows Setup reboots first.
+            $name='EnclaveGatewayMachinePreparation'
+            $exe="$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+            $args="-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$install\machine_prepare.ps1`" -Architecture $Architecture -CompleteSetup -WaitForSetup"
+            $existing=Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+            if($existing -and (@($existing.Actions).Count -ne 1 -or $existing.Actions[0].Execute -ne $exe -or $existing.Actions[0].Arguments -ne $args -or $existing.Principal.UserId -notin @('SYSTEM','S-1-5-18'))){throw 'Existing machine preparation task requires explicit integration'}
+            Copy-Item -LiteralPath $PSCommandPath -Destination (Join-Path $install 'machine_prepare.ps1') -Force
+            if(Test-Path -LiteralPath $policy){Copy-Item -LiteralPath $policy -Destination (Join-Path $install 'provision-media.json') -Force}
+            $action=New-ScheduledTaskAction -Execute $exe -Argument $args
+            $principal=New-ScheduledTaskPrincipal -UserId 'S-1-5-18' -LogonType ServiceAccount -RunLevel Highest
+            $settings=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 3) -StartWhenAvailable
+            Register-ScheduledTask -TaskName $name -Action $action -Principal $principal -Trigger (New-ScheduledTaskTrigger -AtStartup) -Settings $settings -Force|Out-Null
+            Start-ScheduledTask -TaskName $name
+            return
+        }
         $scripts=Join-Path $env:SystemRoot 'Setup\Scripts'
         [void][IO.Directory]::CreateDirectory($scripts)
         $hook=Join-Path $scripts 'SetupComplete.cmd'
@@ -53,6 +108,21 @@ try{
         if(Test-Path -LiteralPath $policy){Copy-Item -LiteralPath $policy -Destination (Join-Path $install 'provision-media.json') -Force}
         [IO.File]::WriteAllText($hook,$command,[Text.Encoding]::ASCII)
         return
+    }
+    # Recover a previously completed generation whose one-time cleanup was
+    # interrupted. Missing removable media must not trigger another MSI run.
+    $readyFile=Join-Path $install 'provision-machine.json'
+    if($CompleteSetup -and $CompletionMode -eq 'StartupTask' -and (Test-Path -LiteralPath $readyFile)){
+        $prior=Get-Content -LiteralPath $readyFile -Raw -Encoding UTF8|ConvertFrom-Json
+        if($prior.revision -in @(1,2) -and $prior.status -eq 'machine_ready' -and $prior.architecture -eq $Architecture -and
+           [string]$prior.approved_sha256 -eq $approvedHash -and $prior.qga_mode -in @('msi-native','x64-emulated-vss-not-qualified') -and
+           $prior.media_verification -in @('authenticode','sha256-pin','sha256-and-authenticode')){
+            $service=Get-Service qemu-ga -ErrorAction Stop
+            if($service.Status -eq 'Running'){
+                Complete-Preparation $prior.qga_mode $prior.media_verification $approvedHash
+                return
+            }
+        }
     }
     $roots=@(Get-PSDrive -PSProvider FileSystem|ForEach-Object {$_.Root})
     $driverArch=if($Architecture -eq 'arm64'){'ARM64'}else{'amd64'}
@@ -109,8 +179,7 @@ try{
     Start-Service qemu-ga
     $service=Get-Service qemu-ga
     if($service.Status -ne 'Running'){throw 'QGA service did not start'}
-    @{revision=1;status='machine_ready';architecture=$Architecture;qga_mode=$mode;media_verification=$mediaVerification;approved_sha256=$approvedHash;automatic_logon='not_configured';provider='not_installed'}|ConvertTo-Json|Set-Content (Join-Path $install 'provision-machine.json') -Encoding UTF8
-    Set-MachinePhase 'complete'
+    Complete-Preparation $mode $mediaVerification $approvedHash
 }catch{
     try{@{revision=1;status='failed';phase=$phase;msi_exit_code=$msiExit;error_type=$_.Exception.GetType().FullName;hresult=$_.Exception.HResult}|ConvertTo-Json|Set-Content (Join-Path $install 'machine-prepare-failed.json') -Encoding UTF8}catch{}
     throw

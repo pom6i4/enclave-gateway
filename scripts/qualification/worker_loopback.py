@@ -112,9 +112,10 @@ class EchoServer:
 
 
 class Worker:
-    def __init__(self, powershell: str, directory: Path, runtime=None, allow_unsigned_lab=False, trusted_signer='', *, startup_timeout_sec=15):
+    def __init__(self, powershell: str, directory: Path, runtime=None, allow_unsigned_lab=False, trusted_signer='', *, startup_timeout_sec=15,worker_path=None):
         self.powershell, self.directory = powershell, directory
         self.startup_timeout_sec=startup_timeout_sec
+        self.worker_path=Path(worker_path) if worker_path else ROOT/'src/enclave_gateway/agents/bastion_worker.ps1'
         self.runtime,self.allow_unsigned_lab=runtime,allow_unsigned_lab
         self.trusted_signer=trusted_signer
         self.spool = directory / "spool"
@@ -131,7 +132,7 @@ class Worker:
         self.output = (self.directory / "worker.log").open("ab")
         environment = {key: value for key, value in os.environ.items() if not key.startswith(("ENCLAVE_", "EGW_", "SSH_"))}
         command=[self.powershell, "-NoProfile", "-NonInteractive", "-File",
-            str(ROOT / "src/enclave_gateway/agents/bastion_worker.ps1"), "-SpoolDir", str(self.spool),
+            str(self.worker_path), "-SpoolDir", str(self.spool),
             "-StopFile", str(self.stop_file), "-PollIntervalMs", "2", "-Diagnostics"]
         if self.runtime: command+=['-RuntimeHelper',str(self.runtime)]
         if self.allow_unsigned_lab: command+=['-AllowUnsignedLab']
@@ -167,7 +168,7 @@ def run(powershell: str, transactions: int = 100, runtime=None, allow_unsigned_l
                 "worker_sha256": hashlib.sha256((ROOT / "src/enclave_gateway/agents/bastion_worker.ps1").read_bytes()).hexdigest()}
     with TemporaryDirectory(prefix="egw-worker-") as temporary:
         root = Path(temporary)
-        worker = Worker(powershell, root, runtime, allow_unsigned_lab,trusted_signer)
+        worker = Worker(powershell, root, runtime, allow_unsigned_lab,trusted_signer,startup_timeout_sec=120 if os.name=='nt' else 15)
         fast, slow = EchoServer(), EchoServer(silent=True)
         try:
             worker.start()
