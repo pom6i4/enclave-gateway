@@ -24,11 +24,12 @@ This record covers the local acceptance, signed release metadata, native trust-h
 | Cold redirected RDP worker | 0.505 s | A separate full VM/TPM-process poweroff, new pinned RDP connection, standard SID/session and redirected spool; exactly first nonce, sequence 1, unchanged 10-second deadline |
 | Verified x64 first worker nonce | 4.685 s | New signed worker with current policy; startup reported separately, not a 10-second process-launch guarantee |
 | New Server installation | 4600.9 s; first security request 103.466 s / 120 s | Actual public CLI disk/media/installation flow, SYSTEM startup-task path, no SetupComplete hook or automatic logon; Secure Boot and software TPM present/ready |
+| Subsequent final-source blank-disk installation | PASS on `44a3af1`; 3699.632 s through initial security readback | New disk without backing/guest data; final task deletion/readiness ordering and full power cycle qualified in the [follow-up record](FRESH_INSTALL_ACCEPTANCE_2026-11-02.md) |
 | Final preparation cleanup | PASS | Readiness revision 2 published after actual SYSTEM-task self-deletion; matching completed generation recovered without media/MSI or agent restart; survives reboot |
 | Post-finalization security | 27.571 s / 120 s, one request | Secure Boot and software TPM readback after that reboot |
 | Owned resource cleanup | PASS | Linux, Server x64 and ARM64 VMs stopped; managed TPM backends quiesced; own RDP client exited |
 
-The full fresh Server installation used the startup-task implementation before the readiness-ordering correction. The final correction was then qualified through actual SYSTEM-task execution/self-deletion and reboot on that same installed disposable OS, plus real-PowerShell conflict/deletion-failure tests. The complete installation was not repeated from a blank disk after that correction. This is composed evidence, not a claim that one final-source end-to-end installation transcript covers every change.
+The original full fresh Server installation used the startup-task implementation before the readiness-ordering correction. The correction was initially qualified through actual SYSTEM-task execution/self-deletion and reboot on that same installed disposable OS, plus real-PowerShell conflict/deletion-failure tests. That was composed evidence. The remaining final-source blank-disk requirement was subsequently closed by a new independent installation on `44a3af1`, followed by a complete VM/TPM power cycle and first-request security checks; see the [follow-up record](FRESH_INSTALL_ACCEPTANCE_2026-11-02.md).
 
 ## Trust policy and failed attempts
 
