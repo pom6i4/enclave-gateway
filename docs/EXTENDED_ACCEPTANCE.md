@@ -95,3 +95,16 @@ Managed software TPM on a native Windows QEMU Host remains a separate backend
 capability. Do not remove the existing fail-closed check based on the success of
 a Windows *guest* with a POSIX-hosted software TPM. Hardware trust and production
 provider/signing acceptance remain outside this profile.
+
+## Recorded execution and cleanup observation
+
+See [the 2026-11-02 qualification](EXTENDED_QUALIFICATION_2026-11-02.md) for the
+source identity, final ten-role result, original failed attempts and limitations.
+
+On Windows, querying an absent task by name with `-ErrorAction SilentlyContinue`
+can still leave a failing process exit status. Do not suppress all cleanup errors
+or treat a nonzero exit as success. Enumerate with errors enabled, select the
+exact recorded task name, verify the recorded action before removing an existing
+task, then enumerate again and require absence. Only after that successful
+postcondition should the observer explicitly return exit zero. Keep each check's
+exit/stdout/stderr receipt, including the already-absent case.
