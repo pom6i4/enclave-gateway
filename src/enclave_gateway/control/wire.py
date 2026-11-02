@@ -23,14 +23,14 @@ class SocketLineReader:
                 raise TimeoutError("Control channel deadline expired")
             self.sock.settimeout(min(0.2, budget(remaining, "control.receive")))
             try:
-                chunk = self.sock.recv(65536)
+                # One extra byte distinguishes an oversized frame. Do not
+                # charge coalesced later frames against the first frame.
+                chunk = self.sock.recv(min(65536, max(1, self.max_bytes + 1 - len(self.buffer))))
             except socket.timeout:
                 continue
             if not chunk:
                 raise ConnectionError("EOF on control channel")
             self.buffer.extend(chunk)
-            if len(self.buffer) > self.max_bytes:
-                raise ValueError("Control channel frame exceeds size limit")
             return
 
     def sync_marker(self) -> None:
@@ -40,9 +40,16 @@ class SocketLineReader:
         del self.buffer[:self.buffer.index(255) + 1]
 
     def readline(self, *, sync: bool = False) -> str:
-        while 10 not in self.buffer:
+        while True:
+            marker = self.buffer.find(10)
+            if marker >= 0:
+                if marker + 1 > self.max_bytes:
+                    raise ValueError("Control channel frame exceeds size limit")
+                break
+            if len(self.buffer) > self.max_bytes:
+                raise ValueError("Control channel frame exceeds size limit")
             self._receive()
-        end = self.buffer.index(10) + 1
+        end = marker + 1
         line = bytes(self.buffer[:end])
         del self.buffer[:end]
         if sync:

@@ -121,6 +121,13 @@ crashes cover commit intent, all resource renames and the final commit boundary.
 These fixtures create only small synthetic images and private journals. Process
 crash tests do not establish physical power-loss/storage-controller durability.
 
+Framing cases also vary the limit near the largest valid message and retain
+serialized counterexamples. This exposed valid coalesced QMP/QGA messages being
+charged against one aggregate limit. The reader now applies the unchanged limit
+to each complete line, bounds read-ahead to one detection byte and retains QGA
+delimiter synchronization. A real-socket regression covers CRLF coalescence,
+stale prefix discard and oversized input. See the [QMP framing contract](https://www.qemu.org/docs/master/interop/qmp-spec.html).
+
 Run `scripts/qualification/installed_package.py --output <new-directory>` on each
 OS, with `--pip-wheel <offline-wheel>` when ensurepip is unavailable. It builds
 sdist → extracted sdist → wheel → a clean venv outside the checkout, checks both

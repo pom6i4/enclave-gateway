@@ -21,6 +21,7 @@ from enclave_gateway.hypervisor.state import atomic_json
 from windows_lifecycle import owned_hypervisor,owned_tpm_pid,wait_tpm_exit
 from toolchain import preflight,release
 from compare_installed import compare as compare_installed
+from evidence import report_inventory
 
 
 def cohort_sources():
@@ -182,8 +183,7 @@ def run(manifest_path,output,host_only=False):
                 try:
                     if cohort_sources()!=report['sources']:raise RuntimeError('Source cohort changed during acceptance')
                 except Exception as e:drift=e;report.update(status='failed',error_type=type(e).__name__)
-            files={str(p.relative_to(output)):release.digest(p) for p in output.rglob('*') if p.is_file() and not p.is_symlink() and p.suffix in ('.json','.log')
-                   and p.name not in ('credentials.json','inventory.json','result.json') and not set(p.relative_to(output).parts)&{'seed','driver-media','controller','tpm','source','python-source','unpacked','obj','bin'}}
+            files=report_inventory(output)
             atomic_json(output/'inventory.json',{'files':files});report['inventory_sha256']=release.digest(output/'inventory.json');persist()
             if drift:raise drift
     return report

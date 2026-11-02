@@ -5,6 +5,8 @@ import base64
 import io
 import json
 import os
+import socket
+import time
 from pathlib import Path
 import tarfile
 import tempfile
@@ -20,9 +22,36 @@ def load(name):
 release=load('release/reproducible_build.py');tools=load('qualification/toolchain.py');generated=load('qualification/generated_faults.py')
 full=load('qualification/full_acceptance.py')
 installed=load('qualification/compare_installed.py')
+evidence=load('qualification/evidence.py')
 
 
 class ReproducibleQualificationTests(unittest.TestCase):
+    def test_real_socket_coalescence_and_sync_keep_per_frame_limit(self):
+        from enclave_gateway.control.wire import SocketLineReader
+        frame=b'{"fixture":"value"}\r\n'
+        for data,sync,expected in ((frame+frame,False,2),(b'junk'*100+b'\xff'+frame,True,1),(b'x'*(len(frame)+1),False,0)):
+            left,right=socket.socketpair()
+            try:
+                right.sendall(data);right.shutdown(socket.SHUT_WR)
+                reader=SocketLineReader(left,time.monotonic()+2,max_bytes=len(frame))
+                if sync:reader.sync_marker()
+                if expected:
+                    self.assertEqual([reader.readline(sync=sync) for _ in range(expected)],[frame.decode()]*expected)
+                    with self.assertRaises(ConnectionError):reader.readline()
+                else:
+                    with self.assertRaises(ValueError):reader.readline()
+                self.assertLessEqual(len(reader.buffer),len(frame)+1)
+            finally:left.close();right.close()
+
+    def test_inventory_binds_child_results_and_excludes_root_cycle_and_credentials(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);child=root/'step';child.mkdir();(child/'result.json').write_text('{"status":"passed"}');(child/'inventory.json').write_text('{}')
+            (root/'result.json').write_text('{}');(root/'inventory.json').write_text('{}');(child/'credentials.json').write_text('fixture')
+            before=evidence.report_inventory(root)
+            self.assertEqual(set(before),{'step/result.json','step/inventory.json'})
+            (child/'result.json').write_text('{"status":"failed"}')
+            self.assertNotEqual(before['step/result.json'],evidence.report_inventory(root)['step/result.json'])
+
     def test_source_change_fails_even_if_all_commands_return_success(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d);p=root/'manifest.json';p.write_text(json.dumps({'revision':1,'scope':'isolated-full-acceptance','toolchain':{'python':{'path':'python'}}}))

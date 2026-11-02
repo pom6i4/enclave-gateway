@@ -13,6 +13,8 @@ import time
 
 ROOT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT/'src'))
+sys.path.insert(0,str(Path(__file__).resolve().parent))
+from evidence import report_inventory
 from enclave_gateway.config import EnclaveConfig
 from enclave_gateway.hypervisor.driver import ApplianceHypervisor
 from enclave_gateway.hypervisor.state import atomic_json,private_dir
@@ -89,9 +91,7 @@ def run(plan_path,output):
                     h._stop_tpm();row['status']='stopped'
             except BaseException as error:failed=True;row.update(status='failed',error_type=type(error).__name__)
             report['cleanup'].append(row);persist()
-        evidence={str(item.relative_to(output)):hashlib.sha256(item.read_bytes()).hexdigest() for item in output.rglob('*')
-                  if item.is_file() and not item.is_symlink() and item.suffix in ('.json','.log') and item.name not in ('credentials.json','result.json','inventory.json')
-                  and 'seed' not in item.parts and 'driver-media' not in item.parts and 'controller' not in item.parts}
+        evidence=report_inventory(output)
         atomic_json(output/'inventory.json',{'revision':1,'files':evidence})
         report.update(status='failed' if failed else 'passed',inventory_sha256=hashlib.sha256((output/'inventory.json').read_bytes()).hexdigest());persist()
     return report

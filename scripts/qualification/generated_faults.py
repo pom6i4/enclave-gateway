@@ -40,14 +40,24 @@ def frame_models(seed,count):
     rng=random.Random(seed)
     for case in range(count):
         values=[{'case':case,'value':''.join(rng.choices('abcтест😀\n\\"',k=rng.randrange(1,80)))} for _ in range(rng.randrange(1,6))]
-        data=b''.join(json.dumps(v,ensure_ascii=False).encode()+b'\n' for v in values);chunks=[]
+        frames=[json.dumps(v,ensure_ascii=False).encode()+b'\n' for v in values]
+        data=b''.join(frames);chunks=[]
         while data:
             n=rng.randrange(1,19);chunks.append(data[:n]);data=data[n:]
+        chunk_lengths=[len(c) for c in chunks];limit=max(map(len,frames))+rng.randrange(8)
         class Sock:
             def settimeout(self,*_):pass
-            def recv(self,*_):return chunks.pop(0) if chunks else b''
-        reader=SocketLineReader(Sock(),time.monotonic()+3,max_bytes=8192)
-        assert [json.loads(reader.readline()) for _ in values]==values,(seed,case)
+            def recv(self,n):
+                if not chunks:return b''
+                value=chunks.pop(0);result=value[:n]
+                if len(value)>n:chunks.insert(0,value[n:])
+                return result
+        reader=SocketLineReader(Sock(),time.monotonic()+3,max_bytes=limit)
+        try:assert [json.loads(reader.readline()) for _ in values]==values
+        except Exception as e:
+            failure=AssertionError('Framing model counterexample')
+            failure.sample={'model':'framing','seed':seed,'case':case,'frame_limit_bytes':limit,'frames':values,'chunk_lengths':chunk_lengths}
+            raise failure from e
         try:reader.readline()
         except ConnectionError:pass
         else:raise AssertionError(('EOF accepted',seed,case))
@@ -169,7 +179,10 @@ def run(output,seeds=(17,9173,65537),cases=200,crashes=False):
             report['active_seed']=seed;frame_models(seed,cases);dispatch_models(seed,cases);journal_models(output/('journal-'+str(seed)),seed,cases)
         if crashes:report['crashes']=crash_checks(output)
         report['status']='passed'
-    except BaseException as e:report.update(status='failed',error_type=type(e).__name__);raise
+    except BaseException as e:
+        report.update(status='failed',error_type=type(e).__name__)
+        if getattr(e,'sample',None):report['counterexample']=e.sample
+        raise
     finally:(output/'result.json').write_text(json.dumps(report,indent=2)+'\n')
     return report
 
