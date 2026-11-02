@@ -8,7 +8,7 @@ import tempfile
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, get_type_hints, get_origin, get_args
 
 
 def _default_runtime_dir() -> str:
@@ -46,6 +46,8 @@ class ApplianceSpec:
 
     def __post_init__(self):
         self.runtime_dir=str(Path(self.runtime_dir).expanduser().absolute())
+        if self.arch not in ('auto','arm64','x86_64') or self.hypervisor not in ('auto','hvf','kvm','whpx','tcg','direct'):
+            raise ValueError('Select a supported appliance architecture and hypervisor')
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", self.name):
             raise ValueError("Invalid appliance name")
         if bool(self.profile_base_bundle)!=bool(self.profile_base_manifest_sha256) or (self.profile_base_manifest_sha256 and not re.fullmatch('[a-f0-9]{64}',self.profile_base_manifest_sha256)):
@@ -153,6 +155,7 @@ class TargetNodeSpec:
     password_env: str = ""
     sudo_password_env: str = ""
     ssh_key_path: str = ""
+    ssh_known_hosts_path: str = ""
 
     def __post_init__(self):
         from enclave_gateway.security.quoting import validate_endpoint
@@ -161,6 +164,8 @@ class TargetNodeSpec:
             raise ValueError("Invalid target user")
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", self.name):
             raise ValueError("Invalid target name")
+        if any(char in self.ssh_known_hosts_path for char in '\r\n\0'):
+            raise ValueError('Invalid SSH known_hosts path')
 
 
 @dataclass(slots=True)
@@ -174,24 +179,33 @@ class PortForwardSpec:
 
 @dataclass(slots=True)
 class SecuritySpec:
+    # Custom preserves the defaults of configurations written before named modes.
+    mode: str = 'custom'
+    agent_package_dir: str = ''
+    bootstrap_sha256: str = ''
     askpass_helper_path: str = r"%LOCALAPPDATA%\EnclaveGateway\bin\egw-askpass.exe"
     trusted_signers: list[str] = field(default_factory=list)
     runtime_helper_path: str = r"%LOCALAPPDATA%\EnclaveGateway\bin\egw-runtime.exe"
-    require_signed_helpers: bool = True
-    require_signed_agents: bool = True
+    require_signed_helpers: bool | None = None
+    require_signed_agents: bool | None = None
     worker_sha256: str = ''
     worker_version: str = '0.3.0'
     runtime_sha256: str = ''
     worker_account: str = ''
-    enforce_worker_attestation: bool = False
-    require_process_isolation: bool = False
-    owned_ssh_commands: bool = False
+    enforce_worker_attestation: bool | None = None
+    require_process_isolation: bool | None = None
+    owned_ssh_commands: bool | None = None
 
 
     def __post_init__(self):
+        if self.mode not in ('standard','enterprise','custom'):
+            raise ValueError('security.mode must be standard, enterprise or custom')
+        for name in ('require_signed_helpers','require_signed_agents','enforce_worker_attestation','require_process_isolation','owned_ssh_commands'):
+            if getattr(self,name) is None:
+                setattr(self,name,self.mode=='enterprise' or (self.mode=='custom' and name.startswith('require_signed_')))
         if any(type(getattr(self,name)) is not bool for name in ('require_signed_helpers','require_signed_agents','enforce_worker_attestation','require_process_isolation','owned_ssh_commands')):
             raise ValueError("Security requirements must be boolean")
-        if any(value and not re.fullmatch('[a-fA-F0-9]{64}',value) for value in (self.worker_sha256,self.runtime_sha256)):
+        if any(value and not re.fullmatch('[a-fA-F0-9]{64}',value) for value in (self.worker_sha256,self.runtime_sha256,self.bootstrap_sha256)):
             raise ValueError('Worker SHA-256 must be a release digest')
         if not isinstance(self.worker_version,str) or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?',self.worker_version):
             raise ValueError('Worker version must be explicit')
@@ -201,6 +215,22 @@ class SecuritySpec:
             raise ValueError('Worker identity/runtime path must be strings')
         if not isinstance(self.trusted_signers, list) or any(not isinstance(value, str) or not re.fullmatch(r"[A-Fa-f0-9]{40,64}", value.replace(" ", "")) for value in self.trusted_signers):
             raise ValueError("Trusted signers must be certificate thumbprints")
+        if self.mode=='enterprise':
+            required=('require_signed_helpers','require_signed_agents','enforce_worker_attestation',
+                      'require_process_isolation','owned_ssh_commands','worker_sha256','runtime_sha256',
+                      'worker_account','trusted_signers')
+            missing=[name for name in required if not getattr(self,name)]
+            if missing:raise ValueError('Enterprise mode requires security settings: '+', '.join(missing))
+
+    @classmethod
+    def from_dict(cls, raw):
+        raw=dict(raw)
+        for name in ('require_signed_helpers','require_signed_agents','enforce_worker_attestation','require_process_isolation','owned_ssh_commands'):
+            if name in raw and type(raw[name]) is not bool:raise ValueError('Security requirements must be boolean')
+        if raw.get('mode')=='standard':
+            raw={**{name:False for name in ('require_signed_helpers','require_signed_agents',
+                 'enforce_worker_attestation','require_process_isolation','owned_ssh_commands')},**raw}
+        return cls(**raw)
 
 
 @dataclass(slots=True)
@@ -216,6 +246,22 @@ class EnclaveConfig:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> EnclaveConfig:
+        def known(value, names, section):
+            if not isinstance(value,dict):raise ValueError(section+' must be a mapping')
+            if any(not isinstance(name,str) for name in value):raise ValueError(section+' setting names must be strings')
+            if set(value)-set(names):raise ValueError('Unknown settings in '+section+': '+', '.join(sorted(set(value)-set(names))))
+        def typed(value, model, section):
+            for name,kind in get_type_hints(model).items():
+                if name not in value:continue
+                item=value[name]
+                if kind in (str,int,bool) and type(item) is not kind:
+                    raise ValueError(section+'.'+name+' must be '+kind.__name__)
+                if get_origin(kind) is list and (not isinstance(item,list) or (get_args(kind)==(str,) and any(not isinstance(v,str) for v in item))):
+                    raise ValueError(section+'.'+name+' must be a list of strings')
+        known(raw,cls.__dataclass_fields__,'configuration')
+        for section in ('appliance','provider','bastion','security','targets','forwards','journal_retention'):
+            if section in raw and raw[section] is not None and not isinstance(raw[section],dict):
+                raise ValueError(section+' must be a mapping')
         app_raw = dict(raw.get("appliance") or {})
         prov_raw = dict(raw.get("provider") or {})
         bast_raw = dict(raw.get("bastion") or {})
@@ -224,6 +270,8 @@ class EnclaveConfig:
             raise ValueError('Unknown security setting')
         targets_raw = dict(raw.get("targets") or {})
         forwards_raw = dict(raw.get("forwards") or {})
+        for section,values,model in (('appliance',app_raw,ApplianceSpec),('provider',prov_raw,ProviderSpec),('bastion',bast_raw,BastionSpec)):
+            known(values,model.__dataclass_fields__,section)
 
         for list_field in ("routes", "dns_servers"):
             if list_field in prov_raw:
@@ -234,10 +282,19 @@ class EnclaveConfig:
                     prov_raw[list_field] = [
                         x.strip() for x in val.split(",") if x.strip()
                     ]
+        for section,values,model in (('appliance',app_raw,ApplianceSpec),('provider',prov_raw,ProviderSpec),('bastion',bast_raw,BastionSpec),('security',security_raw,SecuritySpec)):
+            typed(values,model,section)
 
         targets: dict[str, TargetNodeSpec] = {}
         for t_name, t_cfg in targets_raw.items():
+            if not isinstance(t_name,str):raise ValueError('Target names must be strings')
             if isinstance(t_cfg, dict):
+                t_cfg=dict(t_cfg)
+                known(t_cfg,TargetNodeSpec.__dataclass_fields__,'targets.'+t_name)
+                if isinstance(t_cfg.get('port'),str) and t_cfg['port'].isdigit():t_cfg['port']=int(t_cfg['port'])
+                typed(t_cfg,TargetNodeSpec,'targets.'+t_name)
+                if not t_cfg.get('host'):raise ValueError('targets.'+t_name+'.host is required')
+                if 'name' in t_cfg and t_cfg['name']!=t_name:raise ValueError('Target name must match its mapping key')
                 targets[t_name] = TargetNodeSpec(
                     name=t_name,
                     host=str(t_cfg.get("host", "10.0.20.11")),
@@ -248,7 +305,9 @@ class EnclaveConfig:
                     password_env=str(t_cfg.get("password_env", "")),
                     sudo_password_env=str(t_cfg.get("sudo_password_env", "")),
                     ssh_key_path=str(t_cfg.get("ssh_key_path", "")),
+                    ssh_known_hosts_path=str(t_cfg.get('ssh_known_hosts_path','')),
                 )
+            else:raise ValueError('targets.'+t_name+' must be a mapping')
 
         forwards: dict[str, PortForwardSpec] = {}
         for f_name, f_cfg in forwards_raw.items():
@@ -275,7 +334,7 @@ class EnclaveConfig:
         return cls(
             profile=str(raw.get("profile", "default")),
             journal_retention=dict(raw.get("journal_retention") or {}),
-            security=SecuritySpec(**security_raw),
+            security=SecuritySpec.from_dict(security_raw),
             appliance=ApplianceSpec(
                 **{k: v for k, v in app_raw.items() if k in ApplianceSpec.__dataclass_fields__}
             ),
@@ -297,7 +356,6 @@ class EnclaveConfig:
             else [
                 Path("enclave.yaml"),
                 Path("config/enclave.yaml"),
-                Path("config/enclave.example.yaml"),
             ]
         )
         if path is not None and not Path(path).is_file():
@@ -305,9 +363,11 @@ class EnclaveConfig:
         for candidate in candidates:
             if candidate.is_file():
                 text = candidate.read_text(encoding="utf-8-sig")
-                data = parse_yaml_or_json(text)
+                try:data = parse_yaml_or_json(text)
+                except Exception as error:
+                    raise ValueError('Cannot parse configuration; use unique mapping keys and valid YAML/JSON. See docs/GUIDE.md.') from error
                 return cls.from_dict(data)
-        return cls()
+        raise FileNotFoundError('No enclave.yaml found. Run egw config init, or pass --config /path/to/enclave.yaml.')
 
 
 def _parse_scalar(val: str) -> Any:
@@ -360,13 +420,29 @@ def parse_yaml_or_json(text: str) -> dict[str, Any]:
     if not stripped:
         return {}
     if stripped.startswith("{"):
-        return dict(json.loads(stripped))
+        def unique(pairs):
+            result={}
+            for key,value in pairs:
+                if key in result:raise ValueError('Duplicate JSON mapping key')
+                result[key]=value
+            return result
+        return dict(json.loads(stripped,object_pairs_hook=unique))
 
     try:
         import yaml  # type: ignore[import-untyped]
 
-        loaded = yaml.safe_load(stripped)
-        return dict(loaded) if isinstance(loaded, dict) else {}
+        class UniqueLoader(yaml.SafeLoader):pass
+        def mapping(loader,node,deep=False):
+            loader.flatten_mapping(node);result={}
+            for key_node,value_node in node.value:
+                key=loader.construct_object(key_node,deep=deep)
+                if key in result:raise ValueError('Duplicate YAML mapping key')
+                result[key]=loader.construct_object(value_node,deep=deep)
+            return result
+        UniqueLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,mapping)
+        loaded = yaml.load(stripped,Loader=UniqueLoader)
+        if not isinstance(loaded,dict):raise ValueError('Configuration must be a mapping')
+        return dict(loaded)
     except ImportError:
         pass
 
@@ -406,6 +482,7 @@ def parse_yaml_or_json(text: str) -> dict[str, Any]:
                     result[key] = {}
         return result, index
 
+    if not tokens:return {}
     result, end = parse_block(0, tokens[0][0])
     if not isinstance(result, dict) or end != len(tokens):
         raise ValueError("Configuration must be a YAML mapping")

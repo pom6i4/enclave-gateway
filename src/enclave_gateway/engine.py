@@ -109,7 +109,8 @@ class EnclaveEngine:
             self.control: ControlChannel = control_override
         elif self.config.appliance.hypervisor == "direct":
             self.control = DirectHostControlChannel(runtime_helper_path=self.config.security.runtime_helper_path,
-                trusted_signers=self.config.security.trusted_signers,require_signed=self.config.security.require_signed_helpers)
+                trusted_signers=self.config.security.trusted_signers,require_signed=self.config.security.require_signed_helpers,
+                use_native_runtime=self.config.security.mode!='standard' or self.config.security.require_process_isolation)
         else:
             self.control = QgaClient(
                 self.config.appliance.qga_socket,
@@ -131,6 +132,7 @@ class EnclaveEngine:
             runtime_helper_path=self.config.security.runtime_helper_path,
         )
         local_posix=self.config.appliance.hypervisor=='direct' and os.name!='nt' and isinstance(self.control,DirectHostControlChannel)
+        self._direct_posix=local_posix
         if local_posix:
             from enclave_gateway.transports.posix_ssh import PosixSshExecutor
         appliance_executor=PosixSshExecutor if local_posix else SshHopExecutor
@@ -207,6 +209,7 @@ class EnclaveEngine:
         vm_running, pid = self.hypervisor.is_running()
         report: dict[str, Any] = {
             "profile": self.config.profile,
+            "security": {"mode":self.config.security.mode,"attestation_enforced":self.config.security.enforce_worker_attestation,"worker_trust":"not_verified_by_status"},
             "appliance": {
                 "name": self.config.appliance.name,
                 "running": vm_running,
@@ -230,6 +233,16 @@ class EnclaveEngine:
         }
 
         if not vm_running and self.config.appliance.hypervisor != "direct":
+            return report
+
+        if self._direct_posix:
+            import socket
+            try:
+                with socket.create_connection((self.config.provider.probe_host,self.config.provider.probe_port),timeout=3):pass
+                report['provider']['tunnel_up']=True
+                report['provider']['details']='Reachability only; VPN/provider identity was not verified'
+            except OSError:
+                report['provider']['details']='Network probe unreachable; configure provider.probe_host and probe_port'
             return report
 
         provider = self.config.provider
@@ -261,7 +274,7 @@ ConvertTo-Json $out -Compress -Depth 8
             res = self.control.exec_powershell(probe_ps, timeout_sec=20.0)
             if res.exit_code == 0 and res.stdout:
                 data = json.loads(res.stdout.splitlines()[-1])
-                report["provider"]["tunnel_up"] = bool(data.get("tunnel_up"))
+                report["provider"]["tunnel_up"] = bool(data.get("probe_reachable",data.get("tunnel_up"))) if provider.type=="custom" else bool(data.get("tunnel_up"))
                 report["provider"]["evidence"] = data.get("provider_evidence", {})
                 report["provider"]["capabilities"] = adapter.capabilities()
                 report["provider"]["source_ip"] = data.get("source_ip", "")
@@ -286,6 +299,9 @@ ConvertTo-Json $out -Compress -Depth 8
     def heal(self, *, update_credentials: bool = False, actor: str = "cli") -> ExecResult:
         """Self-heal clock drift, MTU, RDP UDP policy, interactive credentials, and Bastion RDP session."""
         tx_id = current().tx_id if current() else generate_tx_id()
+        deployment=None
+        if self.config.bastion.enabled and self.config.security.mode!='custom':
+            deployment=self.stage_agents()
         sync_fn = getattr(self.control, "sync_guest_clock", None)
         if callable(sync_fn):
             sync_fn()
@@ -318,6 +334,8 @@ ConvertTo-Json $out -Compress -Depth 8
 }} -BastionHost {ps_quote(self.config.bastion.host)} -BastionPort {self.config.bastion.port} -SpoolDir {ps_quote(self.config.bastion.appliance_spool_dir)} -ScheduledTaskName {ps_quote(self.config.bastion.scheduled_task_name)} {cred_args} -ForceReconnect
 """
         res = self._scrub_result(self.control.exec_powershell(combined_ps, timeout_sec=60.0))
+        if deployment:
+            res.stdout+='\nBastion worker staged. In the Bastion RDP session run:\n'+deployment['start_command']+'\n'
         self.recorder.record(
             tx_id=tx_id,
             actor=actor,
@@ -328,6 +346,11 @@ ConvertTo-Json $out -Compress -Depth 8
             duration_ms=res.duration_ms,
         )
         return res
+
+    @tracked('stage_agents')
+    def stage_agents(self, *, actor='cli'):
+        from enclave_gateway.onboarding import stage_agents
+        return stage_agents(self.control,self.config)
 
     def _inject_env_into_script(
         self,
@@ -930,119 +953,63 @@ echo "SYNC_PACK_OK"
         nodes: set[str] | None = None,
     ) -> dict[str, Any]:
         """Run end-to-end L1-L7 diagnostic checklist across Host, Appliance, VPN, Bastion, and Targets."""
-        st = self.status()
-        checks: list[dict[str, Any]] = []
-        needs_heal = False
-
-        vm_ok = bool(st["appliance"]["running"]) or st["appliance"]["hypervisor"] == "direct"
-        checks.append(
-            {
-                "check": "appliance_vm",
-                "ok": vm_ok,
-                "detail": f"Hypervisor={st['appliance']['hypervisor']}, PID={st['appliance']['pid']}",
-            }
-        )
-
-        # Check clock skew and UDP policy on Appliance if reachable
-        clock_skew_sec = None
-        udp_disabled = False
-        if vm_ok:
-            diag_ps = """
-$epoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-$udpPol = (Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\Terminal Services\\Client' -Name 'fClientDisableUDP' -ErrorAction SilentlyContinue).fClientDisableUDP
-Write-Output ("DIAG_CLOCK:" + $epoch + ":UDP:" + [int]$udpPol)
-"""
-            diag_res = self.control.exec_powershell(diag_ps, timeout_sec=15.0)
-            if diag_res.exit_code == 0 and "DIAG_CLOCK:" in diag_res.stdout:
-                marker = [
-                    ln.strip()
-                    for ln in diag_res.stdout.splitlines()
-                    if ln.strip().startswith("DIAG_CLOCK:")
-                ][0]
-                parts = marker.split(":")
-                guest_epoch = int(parts[1])
-                clock_skew_sec = abs(int(time.time()) - guest_epoch)
-                udp_disabled = int(parts[3]) == 1
-
-        clock_ok = clock_skew_sec is not None and clock_skew_sec < 120
-        if not clock_ok:
-            needs_heal = True
-        checks.append(
-            {
-                "check": "appliance_clock_sync",
-                "ok": clock_ok,
-                "detail": f"Clock skew={clock_skew_sec}s (Kerberos/NLA limit is 300s)",
-            }
-        )
-
-        checks.append(
-            {
-                "check": "rdp_udp_blackhole_guard",
-                "ok": udp_disabled,
-                "detail": f"fClientDisableUDP={'1 (TCP-only)' if udp_disabled else '0 (vulnerable to UDP drops)'}",
-            }
-        )
-        if not udp_disabled:
-            needs_heal = True
-
-        tun_ok = bool(st["provider"]["tunnel_up"])
-        checks.append(
-            {
-                "check": "vpn_tunnel_probe",
-                "ok": tun_ok,
-                "detail": f"Target={st['provider']['probe_host']}:{st['provider']['probe_port']}",
-            }
-        )
-
-        wrk_ok = bool(st["bastion"]["worker_healthy"])
-        vfs_rtt_ms: int | None = None
-        if wrk_ok:
-            ping_res = self.rdp_vfs.exec_bastion(
-                "Write-Output 'VFS_PONG'", timeout_sec=10.0
-            )
-            if ping_res.exit_code == 0 and "VFS_PONG" in ping_res.stdout:
-                vfs_rtt_ms = ping_res.duration_ms
-            else:
-                wrk_ok = False
-
-        if not wrk_ok:
-            needs_heal = True
-        checks.append(
-            {
-                "check": "bastion_rdp_vfs_ipc",
-                "ok": wrk_ok,
-                "detail": f"Worker healthy={wrk_ok}, RTT={vfs_rtt_ms if vfs_rtt_ms is not None else '-'}ms",
-            }
-        )
-
-        if probe_targets and wrk_ok:
-            for t_name in self.config.targets:
-                if nodes is not None and t_name not in nodes:
-                    continue
-                t_res = self.exec_node(t_name, "echo TARGET_SSH_OK", timeout_sec=20.0, actor=actor)
-                checks.append(
-                    {
-                        "check": f"target_ssh:{t_name}",
-                        "ok": t_res.exit_code == 0 and "TARGET_SSH_OK" in t_res.stdout,
-                        "detail": t_res.stdout or t_res.stderr,
-                    }
-                )
-
-        healed = False
-        if fix and needs_heal and vm_ok:
-            heal_result = self.heal(actor=actor)
-            healed = heal_result.exit_code == 0
-            if healed:
-                refreshed = self.doctor(fix=False, probe_targets=probe_targets, actor=actor, nodes=nodes)
-                refreshed["auto_healed"] = True
-                return refreshed
-
-        all_ok = all(bool(c["ok"]) for c in checks)
-        return {
-            "healthy": all_ok,
-            "auto_healed": healed,
-            "checks": checks,
-        }
+        from enclave_gateway.diagnostics import remediation
+        st=self.status();checks=[];needs_heal=False
+        def add(name,ok,detail,applicable=True):
+            row={'check':name,'ok':bool(ok),'detail':self.vault.scrubber.scrub(str(detail)),'applicable':applicable}
+            if not ok:row['remediation']=remediation(detail)
+            checks.append(row)
+        vm_ok=bool(st['appliance']['running']) or st['appliance']['hypervisor']=='direct'
+        add('appliance_vm',vm_ok,'Hypervisor='+st['appliance']['hypervisor'])
+        clock_skew=None;udp_disabled=False
+        if vm_ok and not self._direct_posix:
+            try:
+                result=self.control.exec_powershell(r"""
+$epoch=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+$udp=(Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services\Client' -Name fClientDisableUDP -ErrorAction SilentlyContinue).fClientDisableUDP
+Write-Output ("DIAG_CLOCK:"+$epoch+":UDP:"+[int]$udp)
+""",timeout_sec=15)
+                markers=[line for line in result.stdout.splitlines() if line.startswith('DIAG_CLOCK:')]
+                if result.exit_code==0 and markers:
+                    parts=markers[0].split(':');clock_skew=abs(int(time.time())-int(parts[1]));udp_disabled=int(parts[3])==1
+            except Exception as error:add('appliance_control_channel',False,str(error))
+        clock_ok=self._direct_posix or (clock_skew is not None and clock_skew<120)
+        add('appliance_clock_sync',clock_ok,'Local Host clock' if self._direct_posix else 'Clock skew='+str(clock_skew)+'s',not self._direct_posix)
+        udp_applicable=self.config.bastion.enabled and not self._direct_posix
+        add('rdp_udp_blackhole_guard',udp_disabled or not udp_applicable,'RDP UDP disabled='+str(udp_disabled) if udp_applicable else 'No Windows RDP client in this route',udp_applicable)
+        needs_heal=not clock_ok or (udp_applicable and not udp_disabled)
+        add('vpn_tunnel_probe',st['provider']['tunnel_up'],'Target='+st['provider']['probe_host']+':'+str(st['provider']['probe_port'])+'; '+st['provider'].get('details',''))
+        wrk_ok=False
+        if self.config.bastion.enabled:
+            wrk_ok=bool(st['bastion']['worker_healthy']);detail='No fresh worker heartbeat; spool or worker unavailable'
+            if wrk_ok:
+                try:
+                    if self.config.security.enforce_worker_attestation:
+                        self.attest_worker();add('worker_attestation',True,'Fresh signed worker/runtime/SID evidence verified')
+                    ping=self.rdp_vfs.exec_bastion("Write-Output 'VFS_PONG'",timeout_sec=10)
+                    wrk_ok=ping.exit_code==0 and 'VFS_PONG' in ping.stdout
+                    detail='VFS round trip='+str(ping.duration_ms)+'ms' if wrk_ok else ping.stderr
+                except Exception as error:wrk_ok=False;detail=str(error)
+            add('bastion_rdp_vfs_ipc',wrk_ok,detail);needs_heal=needs_heal or not wrk_ok
+        else:add('bastion_rdp_vfs_ipc',True,'Bastion disabled; no RDP worker needed',False)
+        if probe_targets and vm_ok:
+            for name,target in self.config.targets.items():
+                if nodes is not None and name not in nodes:continue
+                hop,_=self._resolve_hop_and_jump(target)
+                if hop is self.bastion_ssh and not wrk_ok:
+                    add('target_ssh:'+name,False,'Bastion worker unavailable; provision verified known_hosts and keys on Bastion first');continue
+                try:
+                    result=self.exec_node(name,'echo TARGET_SSH_OK',timeout_sec=20,actor=actor)
+                    add('target_ssh:'+name,result.exit_code==0 and 'TARGET_SSH_OK' in result.stdout,result.stdout or result.stderr)
+                except Exception as error:add('target_ssh:'+name,False,str(error))
+        if fix and needs_heal and vm_ok and not self._direct_posix:
+            try:
+                result=self.heal(actor=actor)
+                if result.exit_code==0:
+                    refreshed=self.doctor(fix=False,probe_targets=probe_targets,actor=actor,nodes=nodes);refreshed['auto_healed']=True;return refreshed
+                add('self_heal',False,result.stderr or result.stdout)
+            except Exception as error:add('self_heal',False,str(error))
+        return {'healthy':all(c['ok'] for c in checks),'auto_healed':False,'security_mode':self.config.security.mode,'checks':checks}
 
     @tracked("clean_session")
     def clean_session(self, *, actor: str = "cli") -> dict[str, Any]:

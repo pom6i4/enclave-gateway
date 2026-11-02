@@ -1,6 +1,6 @@
 # Operation safety and isolated qualification
 
-The [functional follow-up](FUNCTIONAL_HARDENING_2026-10-31.md) extends scoped sync, lifecycle management, retention, process isolation and worker verification. This guide describes the baseline hardening implementation and its acceptance boundaries. The earlier [security audit](SECURITY_AUDIT_2026-10-31.md) remains a historical record. Hosted Actions are unchanged. No customer enclave, VPN credentials, key container, signing certificate or live RDP session is needed for the local checks below.
+The [functional follow-up](https://github.com/pom6i4/enclave-gateway/blob/551590cfc68049261a948a9072a141ebfebb4343/docs/FUNCTIONAL_HARDENING_2026-10-31.md) extends scoped sync, lifecycle management, retention, process isolation and worker verification. This guide describes the baseline hardening implementation and its acceptance boundaries. The earlier [security audit](https://github.com/pom6i4/enclave-gateway/blob/551590cfc68049261a948a9072a141ebfebb4343/docs/SECURITY_AUDIT_2026-10-31.md) remains a historical record. Hosted Actions are unchanged. No customer enclave, VPN credentials, key container, signing certificate or live RDP session is needed for the local checks below.
 
 ## Implemented contracts
 
@@ -46,7 +46,7 @@ The worker flushes metadata/response temporary files before publication and leav
 
 ## Principal grants
 
-Start from [the deny-by-default example](../config/access-policy.example.json):
+Start from [the deny-by-default example](../../config/access-policy.example.json):
 
 ```sh
 egw mcp --policy config/access-policy.example.json --principal local
@@ -172,7 +172,7 @@ The Windows runner records only the Windows-local test scope. QGA/RDPdr/driver q
 
 ## Validation recorded locally
 
-The committed procedure is independent of machine-specific executable paths and runtime reports, which stay under ignored `build/qualification`. See the [local qualification record](LOCAL_QUALIFICATION_2026-10-31.md) for exact versions and metrics. That earlier session used disposable local files and loopback. Its Windows status is historical; subsequent isolated Windows evidence is recorded separately below. Linux execution remains outside these records.
+The committed procedure is independent of machine-specific executable paths and runtime reports, which stay under ignored `build/qualification`. See the [local qualification record](https://github.com/pom6i4/enclave-gateway/blob/551590cfc68049261a948a9072a141ebfebb4343/docs/LOCAL_QUALIFICATION_2026-10-31.md) for exact versions and metrics. That earlier session used disposable local files and loopback. Its Windows status is historical; subsequent isolated Windows evidence is recorded separately below. Linux execution remains outside these records.
 
 ## Primary references
 
@@ -183,7 +183,7 @@ The committed procedure is independent of machine-specific executable paths and 
 
 ## Signed disposable Windows checks
 
-The [Windows lab record](WINDOWS_LAB_QUALIFICATION_2026-11-01.md) supersedes the earlier session's Windows status. It records each actual OS, architecture and acceptance boundary separately.
+The [Windows lab record](https://github.com/pom6i4/enclave-gateway/blob/551590cfc68049261a948a9072a141ebfebb4343/docs/WINDOWS_LAB_QUALIFICATION_2026-11-01.md) supersedes the earlier session's Windows status. It records each actual OS, architecture and acceptance boundary separately.
 
 Use an isolated guest with synthetic accounts and a newly created lab code-signing certificate. Keep its private key inside that guest. Install the public certificate in that guest's trusted stores and sign the runtime and worker copies. Supply their exact hashes and signer to qualification; production signing and enterprise execution policy require their own evidence.
 
@@ -239,6 +239,6 @@ The public lab entry points consume explicitly identified disposable resources:
 - `rdp_transfer_fault.py` observes consumption of its own blocks through an already connected RDPDR share. Run `before`, disconnect only the disposable client after `ready_for_disconnect`, reconnect/restart its owned worker, then run `after`. A lost reply can follow a complete commit: acceptance permits a complete old or complete new destination, rejects a partial file and blocks replay. `expect_previous_target: true` additionally requires an observed early interruption to preserve the old generation. It opens no login and consumes no credentials.
 - `long_soak.py` runs a finite 180..7200-second mixed workload with up to 128 fast and 32 silent streams, periodic file transfers/native commands and post-warmup resource bounds. A partial, stopped or failed run is not a qualifying pass.
 
-These checks leave workflow configuration and hosted Actions unchanged. The separate [expanded qualification record](AUTONOMOUS_QUALIFICATION_2026-11-01.md) lists actual outcomes, source/evidence identities and remaining acceptance boundaries.
+These checks leave workflow configuration and hosted Actions unchanged. The separate [expanded qualification record](https://github.com/pom6i4/enclave-gateway/blob/551590cfc68049261a948a9072a141ebfebb4343/docs/AUTONOMOUS_QUALIFICATION_2026-11-01.md) lists actual outcomes, source/evidence identities and remaining acceptance boundaries.
 
 The subsequent [local acceptance and signed metadata guide](LOCAL_ACCEPTANCE.md) documents the installed-distribution check, plan runner, native trust readback, startup-task preparation and Windows TPM backend limitation.

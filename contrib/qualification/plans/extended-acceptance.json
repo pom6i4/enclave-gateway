@@ -1,7 +1,7 @@
 {
   "revision": 1,
   "scope": "isolated-extended-acceptance",
-  "expected_source_tests": 170,
+  "expected_source_tests": 0,
   "inputs_sha256": {
     "/path/to/private/disposable-controller.py": "0000000000000000000000000000000000000000000000000000000000000000"
   },

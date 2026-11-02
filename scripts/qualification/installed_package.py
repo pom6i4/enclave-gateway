@@ -77,6 +77,15 @@ def run(output: Path,pip_wheel: Path|None=None):
             command('install',[str(python),'-m','pip','install','--no-index','--no-deps',str(wheel)],clean)
             for entry in ('egw','enclave-gateway'):
                 command(entry+'-help',[str(binary/(entry+('.exe' if os.name=='nt' else ''))),'--help'],clean)
+            entry=binary/('egw.exe' if os.name=='nt' else 'egw')
+            starter=clean/'first-run.yaml'
+            command('installed-config-init',[str(entry),'config','init','--output',str(starter)],clean)
+            summary=json.loads(command('installed-config-check',[str(entry),'-c',str(starter),'config','check'],clean))
+            if summary['security_mode']!='standard' or summary['signed_agents'] or summary['worker_attestation']:
+                raise ValueError('Incorrect installed first-run profile')
+            startup=command('installed-agents-command',[str(entry),'-c',str(starter),'agents','command'],clean)
+            if '-Mode Standard' not in startup or '-ProcessIsolation:$false' not in startup:
+                raise ValueError('Installed worker startup resources are unavailable')
             probe='''import hashlib,importlib.metadata,json,pathlib
 import enclave_gateway
 from enclave_gateway.config import EnclaveConfig

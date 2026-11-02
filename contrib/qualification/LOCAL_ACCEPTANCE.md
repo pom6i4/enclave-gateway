@@ -7,7 +7,7 @@ crash models and a complete disposable Windows PKI/migration/preparation suite.
 Run a complete local plan without hosted workflows:
 
 ```sh
-python scripts/qualification/local_acceptance.py --plan examples/local-acceptance.json --output build/acceptance/run-001
+python scripts/qualification/local_acceptance.py --plan contrib/qualification/plans/local-acceptance.json --output build/acceptance/run-001
 ```
 
 Use a new output directory for every attempt. The runner preserves failed reports, hashes the source inventory and logs, enforces step deadlines, stops on the first failure and writes an evidence inventory. It does not infer a broader platform pass from a partial plan. Plan commands are explicitly supplied trusted local commands, executed as argument arrays without a shell. Keep plans and logs private when they contain installer locations or account metadata. The runner does not publish artifacts or invoke hosted workflows.
@@ -75,8 +75,8 @@ MigrateRollback atomically withdraws `installation.json` into `migration-withdra
 
 The upstream [QEMU build configuration](https://github.com/qemu/qemu/blob/master/meson.build) explicitly excludes TPM emulation on Windows. The tested native Windows QEMU also rejects `-tpmdev` as an invalid option. Managed TPM remains available on POSIX virtualization hosts; it is not implemented for the Windows QEMU backend. Capabilities expose the limitation and provisioning rejects it before seed or disk mutation. Native Windows support requires an alternative backend or an upstream port, including its state, cancellation and ownership semantics. Software-emulation evidence does not establish physical TPM attestation.
 
-The [isolated acceptance record](AUTONOMOUS_ACCEPTANCE_2026-11-01.md) lists observed results, failed observers, provenance and remaining boundaries.
+The [isolated acceptance record](https://github.com/pom6i4/enclave-gateway/blob/551590cfc68049261a948a9072a141ebfebb4343/docs/AUTONOMOUS_ACCEPTANCE_2026-11-01.md) lists observed results, failed observers, provenance and remaining boundaries.
 
-The [final-source blank-disk acceptance](FRESH_INSTALL_ACCEPTANCE_2026-11-02.md) closes the subsequent full-installation check for the final readiness ordering, including actual task absence on first boot, full VM/TPM poweroff, unchanged preparation records on the next boot and one security request per boot at the existing deadline.
+The [final-source blank-disk acceptance](https://github.com/pom6i4/enclave-gateway/blob/551590cfc68049261a948a9072a141ebfebb4343/docs/FRESH_INSTALL_ACCEPTANCE_2026-11-02.md) closes the subsequent full-installation check for the final readiness ordering, including actual task absence on first boot, full VM/TPM poweroff, unchanged preparation records on the next boot and one security request per boot at the existing deadline.
 
-The [four-item autonomous closure](AUTONOMOUS_CLOSURE_2026-11-02.md) records crash-safe preparation recovery, disposable issued PKI, v1 migration and the final whole-command blank-disk lifecycle with cleanup, including retained failures and qualification limits.
+The [four-item autonomous closure](https://github.com/pom6i4/enclave-gateway/blob/551590cfc68049261a948a9072a141ebfebb4343/docs/AUTONOMOUS_CLOSURE_2026-11-02.md) records crash-safe preparation recovery, disposable issued PKI, v1 migration and the final whole-command blank-disk lifecycle with cleanup, including retained failures and qualification limits.

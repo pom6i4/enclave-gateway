@@ -56,6 +56,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     sub = parser.add_subparsers(dest="command", required=True)
+    config=sub.add_parser('config',help='Create or validate a configuration without opening a connection.')
+    config_actions=config.add_subparsers(dest='config_action',required=True)
+    create=config_actions.add_parser('init',help='Write a starter configuration; never overwrite a file.')
+    create.add_argument('--mode',choices=['standard','enterprise'],default='standard')
+    create.add_argument('--output',type=Path,default=Path('enclave.yaml'))
+    config_actions.add_parser('check',help='Validate configuration and show effective security settings.')
+    agents=sub.add_parser('agents',help='Stage an immutable worker bundle or print its Bastion startup command.')
+    agents.add_argument('agents_action',choices=['stage','command'])
 
     p_init = sub.add_parser(
         "init",
@@ -128,6 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Also test SSH connectivity to all configured TargetNodes.",
     )
+    p_doc.add_argument('--preflight',action='store_true',help='Check Host prerequisites only; no connections, journal or changes.')
 
     p_top = sub.add_parser(
         "top",
@@ -374,7 +383,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_sec.add_argument("action", choices=["set", "get"])
     p_sec.add_argument("key", help="Environment variable / secret identifier.")
-    p_sec.add_argument("value", nargs="?", default="", help="Secret value (for 'set').")
+    p_sec.add_argument("value", nargs="?", default=None, help="Legacy argv value; omit to use a hidden prompt.")
+    p_sec.add_argument('--stdin',action='store_true',help='Read a secret from stdin instead of command arguments/history.')
 
     p_rep = sub.add_parser(
         "report", help="Export Markdown session audit report from the Flight Recorder."
@@ -476,7 +486,58 @@ def _main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    cfg = EnclaveConfig.load(args.config)
+    if args.command=='mcp-config':
+        configs=generate_client_configs(config_path=args.config)
+        value=configs if args.client=='all' else configs[args.client]
+        print(value if isinstance(value,str) else json.dumps(value,indent=2,ensure_ascii=False));return 0
+    if args.command=='mcp' and (args.export_openai_tools or args.export_openapi):
+        print(json.dumps(export_openai_tools() if args.export_openai_tools else export_openapi_spec(),indent=2));return 0
+    if args.command=='secret':
+        from enclave_gateway.security.secrets import SecretVault
+        if args.state_dir:
+            from enclave_gateway.operations.retention import private_directory
+            private_directory(args.state_dir)
+        vault=SecretVault(env_file=args.state_dir/'.env' if args.state_dir else None)
+        if args.action=='get':
+            if args.stdin or args.value is not None:parser.error('secret get accepts no value')
+            print(f"{args.key}: {'[SET]' if vault.get(args.key) else '[NOT SET]'}");return 0
+        if args.stdin and args.value is not None:parser.error('Select --stdin or an argv value')
+        if args.stdin:
+            value=sys.stdin.read(65537)
+            if len(value)>65536:raise ValueError('Secret input exceeds 64 KiB')
+            if value.endswith('\n'):value=value[:-1].removesuffix('\r')
+        elif args.value is None:
+            if not sys.stdin.isatty():raise ValueError('Use secret set NAME --stdin for noninteractive input')
+            import getpass
+            value=getpass.getpass('Secret value: ')
+        else:value=args.value
+        if not value:raise ValueError('Secret value must not be empty')
+        if not vault.set_in_keychain(args.key,value):raise OSError('Failed to store secret in the OS credential store')
+        print(f"Secret '{args.key}' stored in OS credential store.");return 0
+
+    if args.command=='config' and args.config_action=='init':
+        from enclave_gateway.onboarding import starter_configuration
+        data=(json.dumps(starter_configuration(args.mode),indent=2)+'\n').encode()
+        descriptor=os.open(args.output,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+        with os.fdopen(descriptor,'wb') as output:output.write(data)
+        print(json.dumps({'created':str(args.output),'mode':args.mode,'next_step':'Edit topology, then run egw config check. Enterprise placeholders must be replaced with approved release pins.'}))
+        return 0
+
+    try:cfg = EnclaveConfig.load(args.config)
+    except TypeError as error:raise ValueError('Invalid configuration value type; run egw config check and see docs/GUIDE.md.') from error
+    if args.command=='config':
+        from enclave_gateway.onboarding import configuration_summary
+        print(json.dumps(configuration_summary(cfg),indent=2));return 0
+    if args.command=='doctor' and args.preflight:
+        if args.fix or args.probe_targets:parser.error('--preflight cannot be combined with --fix or --probe-targets')
+        from enclave_gateway.diagnostics import preflight
+        result=preflight(cfg);print(json.dumps(result,indent=2));return 0 if result['healthy'] else 1
+    if args.command=='agents' and args.agents_action=='command':
+        from enclave_gateway.onboarding import agent_bundle
+        print(agent_bundle(cfg)[3]);return 0
+    if args.command=='mcp' and cfg.security.mode=='enterprise':
+        if not args.policy or (not args.read_only and not args.isolation_map and not args.worker_identity_handshake):
+            raise ValueError('Enterprise MCP requires --policy and, for mutable service, --isolation-map. See docs/SECURITY.md.')
     if args.command=='mcp' and args.worker_identity_handshake:
         from enclave_gateway.security.secrets import SecretVault
         from enclave_gateway.operations.retention import private_directory
@@ -493,25 +554,7 @@ def _main(argv: list[str] | None = None) -> int:
     else:
         engine = EnclaveEngine(config=cfg)
 
-    if args.command == "mcp-config":
-        configs = generate_client_configs(config_path=args.config)
-        if args.client == "all":
-            print(json.dumps(configs, indent=2, ensure_ascii=False))
-        else:
-            entry = configs[args.client]
-            if isinstance(entry, str):
-                print(entry)
-            else:
-                print(json.dumps(entry, indent=2, ensure_ascii=False))
-        return 0
-
     if args.command == "mcp":
-        if args.export_openai_tools:
-            print(json.dumps(export_openai_tools(), indent=2, ensure_ascii=False))
-            return 0
-        if args.export_openapi:
-            print(json.dumps(export_openapi_spec(), indent=2, ensure_ascii=False))
-            return 0
         policy = AccessPolicy.load(args.policy) if args.policy else None
         router=None
         if args.isolation_map:
@@ -673,6 +716,9 @@ def _main(argv: list[str] | None = None) -> int:
         print(json.dumps(st, indent=2, ensure_ascii=False))
         return 0
 
+    if args.command=='agents':
+        print(json.dumps(engine.stage_agents(),indent=2));return 0
+
     if args.command == "doctor":
         diag = engine.doctor(
             fix=args.fix, probe_targets=args.probe_targets, actor="cli"
@@ -691,6 +737,9 @@ def _main(argv: list[str] | None = None) -> int:
             print(res.stdout)
         if res.stderr:
             print(res.stderr, file=sys.stderr)
+        if res.exit_code:
+            from enclave_gateway.diagnostics import remediation
+            print(remediation(res.stderr or res.stdout),file=sys.stderr)
         return res.exit_code
 
     if args.command == "clean":
@@ -748,6 +797,9 @@ def _main(argv: list[str] | None = None) -> int:
             print(res.stdout)
         if res.stderr:
             print(res.stderr, file=sys.stderr)
+        if res.exit_code:
+            from enclave_gateway.diagnostics import remediation
+            print(remediation(res.stderr or res.stdout),file=sys.stderr)
         return res.exit_code
 
     if args.command == "cp":
@@ -963,18 +1015,6 @@ def _main(argv: list[str] | None = None) -> int:
             print(json.dumps(manifest, indent=2, ensure_ascii=False))
             return 0
 
-    if args.command == "secret":
-        if args.action == "set":
-            ok = engine.vault.set_in_keychain(args.key, args.value)
-            if not ok:
-                print("Failed to store secret in OS Keychain.", file=sys.stderr)
-                return 1
-            print(f"Secret '{args.key}' stored in OS Keychain.")
-            return 0
-        val = engine.vault.get(args.key)
-        print(f"{args.key}: {'[SET]' if val else '[NOT SET]'}")
-        return 0
-
     if args.command == "report":
         print(engine.recorder.export_markdown_report(limit=args.limit))
         return 0
@@ -996,8 +1036,15 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         error = exc if isinstance(exc, OperationError) else getattr(exc, "operation_error", None)
         if error is None:
+            if isinstance(exc,(ValueError,OSError)):
+                from enclave_gateway.diagnostics import remediation
+                detail=str(exc)
+                print(json.dumps({'error':{'code':'setup_error','message':detail,'remediation':remediation(detail)}},ensure_ascii=False),file=sys.stderr)
+                return 1
             raise
-        print(json.dumps({"error": error.as_dict()}, ensure_ascii=False), file=sys.stderr)
+        from enclave_gateway.diagnostics import remediation
+        data=error.as_dict();data['remediation']=remediation(str(error))
+        print(json.dumps({"error": data}, ensure_ascii=False), file=sys.stderr)
         return 1
 
 

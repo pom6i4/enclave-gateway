@@ -1,4 +1,5 @@
 param(
+    [ValidateSet('Standard','Enterprise','Custom')][string]$Mode = 'Custom',
     [string]$SpoolDir = "\\tsclient\C\EnclaveGateway\spool",
     [int]$PollIntervalMs = 20,
     [int]$ParallelStreams = 4,
@@ -12,6 +13,17 @@ param(
     [switch]$Diagnostics,
     [switch]$AllowUnsignedLab
 )
+
+if ($Mode -eq 'Standard' -and -not $PSBoundParameters.ContainsKey('ProcessIsolation')) {$ProcessIsolation=$false}
+if ($Mode -eq 'Enterprise') {
+    if ($AllowUnsignedLab -or -not $ProcessIsolation -or -not $TrustedSignerThumbprints.Count) {
+        throw 'Enterprise worker requires signed native process isolation and explicit trusted publishers'
+    }
+    $signature=Get-AuthenticodeSignature -LiteralPath $PSCommandPath
+    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Thumbprint -notin $TrustedSignerThumbprints) {
+        throw 'Enterprise worker signature is not trusted'
+    }
+}
 
 if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
     throw 'BastionWorker requires a policy-approved FullLanguage script; constrained execution is unsupported'
@@ -460,7 +472,7 @@ if($ProcessIsolation){
                         spool_kind=if ($SpoolDir.StartsWith('\\tsclient\',[StringComparison]::OrdinalIgnoreCase)) {'redirected'} else {'local'}; loaded_sha256=$loadedWorkerHash; current_sha256='';
                         signature_status='NotSupported'; signer=''; loaded_signature_status=$workerSignatureStatus; loaded_signer=$workerSigner;
                         os_user=[Environment]::UserName; sid=$workerSid;
-                        execution_model=if ($ProcessIsolation) {'owned-process-job'} else {'runspace-lab'} }
+                        execution_model=if ($ProcessIsolation) {'owned-process-job'} else {'runspace'} }
                     $query=@{ evidence=$evidence; worker_path=$PSCommandPath; runtime_path=$RuntimeHelper; process_isolation=$ProcessIsolation } | ConvertTo-Json -Compress -Depth 5
                     $query64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($query))
                     # OS trust/revocation providers can block and retain native
@@ -570,7 +582,7 @@ $e | ConvertTo-Json -Compress -Depth 5
             foreach($job in $activeTxJobs.ToArray()) {if($job.Native) {$stage=[string]$job.NativeState.Stage; $nativeStages[$stage]=1+[int]$nativeStages[$stage]}}
             $self=[Diagnostics.Process]::GetCurrentProcess()
             $state=@{ trust_initialization_ms=$trustState.InitializationMs; read_retry_count=$readRetryCount; native_stages=$nativeStages; working_set_bytes=$self.WorkingSet64; handles=$self.HandleCount; threads=$self.Threads.Count; pid=$PID; language_mode=[string]$ExecutionContext.SessionState.LanguageMode; powershell_edition=[string]$PSVersionTable.PSEdition; uptime_sec=[int]$clock.Elapsed.TotalSeconds;
-                execution_model=if ($ProcessIsolation) {"owned-process-job"} else {"runspace-lab"}; parallel_streams=$ParallelStreams; active_mux_streams=$Global:EnclaveMuxSockets.Count; active_tx_jobs=$activeTxJobs.Count;
+                security_mode=$Mode.ToLowerInvariant(); execution_model=if ($ProcessIsolation) {"owned-process-job"} else {"runspace"}; parallel_streams=$ParallelStreams; active_mux_streams=$Global:EnclaveMuxSockets.Count; active_tx_jobs=$activeTxJobs.Count;
                 pending_mux=$pendingMux.Count; completed_transactions=$completedCount; native_cleanup_cycles=$nativeCleanupCycles; transaction_records=$transactionCount; transaction_capacity=$MaxTransactionRecords; last_heartbeat_utc=(Get-Date).ToUniversalTime().ToString('o') }
             $self.Dispose()
             if ($Diagnostics) {

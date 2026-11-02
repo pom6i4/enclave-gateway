@@ -18,7 +18,7 @@ The complete source inventory must stay unchanged until cleanup finishes.
 
 ## Manifest contract
 
-Start from [the manifest example](../examples/extended-acceptance.json). Its
+Start from [the manifest example](plans/extended-acceptance.json). Its
 placeholder controller and zero digest deliberately cannot pass. Replace them
 with the approved fixture controller, actual input hashes and current test count.
 
@@ -98,7 +98,7 @@ provider/signing acceptance remain outside this profile.
 
 ## Recorded execution and cleanup observation
 
-See [the 2026-11-02 qualification](EXTENDED_QUALIFICATION_2026-11-02.md) for the
+See [the 2026-11-02 qualification](https://github.com/pom6i4/enclave-gateway/blob/551590cfc68049261a948a9072a141ebfebb4343/docs/EXTENDED_QUALIFICATION_2026-11-02.md) for the
 source identity, final ten-role result, original failed attempts and limitations.
 
 On Windows, querying an absent task by name with `-ErrorAction SilentlyContinue`

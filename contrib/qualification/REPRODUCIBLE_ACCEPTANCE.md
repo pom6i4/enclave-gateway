@@ -10,7 +10,7 @@ python scripts/qualification/full_acceptance.py \
   --output build/acceptance/full-001
 ```
 
-Start with [the manifest example](../examples/full-acceptance.json). Its zero
+Start with [the manifest example](plans/full-acceptance.json). Its zero
 digests are deliberately unusable. Supply approved local tool/media paths,
 actual SHA-256 values, exact tool/build-package versions, an explicit .NET
 runtime patch and a fixed source epoch. The example versions identify one
@@ -148,7 +148,7 @@ The passing sample does not establish indefinite leak freedom, physical TPM
 attestation, Windows-host TPM support, production PKI/TSA/HSM trust or proprietary
 licensed provider interoperability. Those boundaries remain separate.
 
-The [2026-11-02 qualification report](REPRODUCIBLE_QUALIFICATION_2026-11-02.md)
+The [2026-11-02 qualification report](https://github.com/pom6i4/enclave-gateway/blob/551590cfc68049261a948a9072a141ebfebb4343/docs/REPRODUCIBLE_QUALIFICATION_2026-11-02.md)
 records a completed full run, the four-platform installed matrix, retained
 counterexamples, exact unsigned SBOM and acceptance boundaries.
 

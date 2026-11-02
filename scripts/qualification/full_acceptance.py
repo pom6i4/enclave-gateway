@@ -29,6 +29,7 @@ def cohort_sources():
     for top in ('src','scripts','native','tests'):
         files += [p for p in (ROOT/top).rglob('*') if p.is_file() and p.suffix in ('.py','.ps1','.cs','.csproj') and not set(p.relative_to(ROOT).parts)&{'obj','bin','__pycache__'}]
     files += [ROOT/n for n in ('README.md','LICENSE','pyproject.toml')]
+    files += [p for p in (ROOT/'config').glob('*') if p.is_file() and (p.suffix in ('.yaml','.json') or p.name=='.env.example')]
     if any(p.is_symlink() for p in files):raise ValueError('Source links rejected')
     return {p.relative_to(ROOT).as_posix():release.digest(p) for p in sorted(files)}
 

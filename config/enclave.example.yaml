@@ -1,71 +1,40 @@
-# Enclave Gateway Topology Configuration
-# Copy this file to enclave.yaml and adjust hostnames/ports for your environment.
-
+# Standard: one trusted operator, approved RDP session and key-based SSH.
+# Existing configs without security.mode keep their previous custom defaults.
+# For signed isolation use enclave.enterprise.example.yaml and docs/SECURITY.md.
 profile: default
+security:
+  mode: standard
 
 appliance:
   name: enclave-appliance
-  hypervisor: auto                      # auto | hvf (macOS) | kvm (Linux) | whpx (Windows) | direct (Windows host)
-  arch: auto                            # auto | arm64 | x86_64
-  cpus: 4
-  memory_mb: 4096
+  hypervisor: auto                # Existing managed Windows VM; direct for Windows Host
+  arch: auto                      # Guest and accelerator architectures must match
   disk_path: ~/.local/share/enclave-gateway/disk.qcow2
   efi_vars_path: ~/.local/share/enclave-gateway/efi_vars.fd
-  golden_snapshot: golden_ready
-  mtu: 1350                             # Prevents PMTUD blackholes over WinTun / IPsec tunnels
-  socks5_port: 1080                     # Local SOCKS5 listener on 127.0.0.1
-  rdp_forward_port: 13389               # Local forwarded port to Bastion RDP (127.0.0.1:13389)
-  vnc_display: 1                        # Local VNC display for Appliance console (127.0.0.1:5901)
 
+# Use the existing approved VPN connection. No installer or key import by default.
 provider:
-  type: vipnet                          # vipnet | wireguard | anyconnect | openvpn | kontinent | custom
-  binary_path: ''                       # Optional version-specific CLI; never infer Linux CLI commands on Windows
-  installer_path: ./vendor/ViPNet_Client.msi
-  dst_key_path: ./secrets/client.dst
-  dst_password_env: ENCLAVE_VPN_KEY_PASSWORD
-  adapter_name: Infotecs
+  type: custom
+  installer_path: ''
+  dst_key_path: ''
   probe_host: 10.0.1.10
   probe_port: 3389
-  # Optional static routes and internal DNS servers injected on VPN adapter
-  # routes: ["10.0.20.0/24"]
-  # dns_servers: ["10.0.1.53"]
 
 bastion:
   enabled: true
   host: 10.0.1.10
   port: 3389
-  domain_env: ENCLAVE_BASTION_DOMAIN
-  user_env: ENCLAVE_BASTION_USER
-  password_env: ENCLAVE_BASTION_PASSWORD
-  transport: rdp_vfs                    # rdp_vfs ([MS-RDPEFS] \\tsclient\C) | direct_ssh
   appliance_spool_dir: 'C:\EnclaveGateway\spool'
   bastion_spool_dir: '\\tsclient\C\EnclaveGateway\spool'
-  parallel_streams: 4
-  compress: true
-  block_size_bytes: 4194304
 
 targets:
   app01:
     host: 10.0.20.11
-    port: 22
     user: deploy
-    via: bastion                        # bastion (via Bastion OpenSSH) | appliance (direct from Appliance)
-    password_env: ENCLAVE_APP01_SSH_PASSWORD
-    sudo_password_env: ENCLAVE_APP01_SUDO_PASSWORD
-    ssh_key_path: '~/.ssh/id_ed25519'
+    via: bastion                  # Or appliance; a TargetNode alias supports further hops
+    os: linux
+    ssh_key_path: '~/.ssh/id_ed25519'  # Private key ON THE HOP, not on your Host
+    # ssh_known_hosts_path: 'C:\Users\operator\.ssh\known_hosts'
 
-  auth01:
-    host: 10.0.20.12
-    port: 22
-    user: admin
-    via: bastion
-    password_env: ENCLAVE_AUTH01_SSH_PASSWORD
-    sudo_password_env: ENCLAVE_AUTH01_SUDO_PASSWORD
-
-# Declarative multi-port TCP forwards (`egw forward [--with-socks5]`)
 forwards:
-  postgres_app: "15432:app01:5432"
-  keycloak_https:
-    local_port: 18443
-    target_host: auth01
-    target_port: 8443
+  app_https: '18443:app01:443'      # Loopback listener

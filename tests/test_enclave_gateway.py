@@ -894,7 +894,7 @@ targets:
             cfg = EnclaveConfig.from_dict(
                 {
                     "appliance": {"hypervisor": "direct"},
-                    "bastion": {"user": "CORP\\operator"},
+                    "bastion": {"user_env": "ENCLAVE_BASTION_USER"},
                     "targets": {
                         "app01": {
                             "host": "10.0.20.11",

@@ -367,11 +367,12 @@ class QgaClient:
 class DirectHostControlChannel:
     """Control channel for Windows Direct Mode or local loopback simulation."""
 
-    def __init__(self, root_dir: Path | None = None, *, runtime_helper_path=r'%LOCALAPPDATA%\EnclaveGateway\bin\egw-runtime.exe', trusted_signers=(), require_signed=True) -> None:
+    def __init__(self, root_dir: Path | None = None, *, runtime_helper_path=r'%LOCALAPPDATA%\EnclaveGateway\bin\egw-runtime.exe', trusted_signers=(), require_signed=True, use_native_runtime=True) -> None:
         self.root_dir = root_dir
         self.runtime_helper_path=runtime_helper_path
         self.trusted_signers=trusted_signers
         self.require_signed=require_signed
+        self.use_native_runtime=use_native_runtime
 
     def _map_path(self, guest_path: str) -> Path:
         if self.root_dir is None:
@@ -394,11 +395,13 @@ class DirectHostControlChannel:
         )
         request_input=script if os.name!='nt' else None
         if os.name=='nt':
+            bootstrap='[Console]::InputEncoding=New-Object Text.UTF8Encoding($false); & ([scriptblock]::Create([Console]::In.ReadToEnd()))'
+            shell_cmd=shell_cmd[:-2]+['-Command',bootstrap]
+            request_input=script
+        if os.name=='nt' and self.use_native_runtime:
             from enclave_gateway.security.native import verified_runtime
             helper=verified_runtime(self.runtime_helper_path,self.trusted_signers,self.require_signed)
             shell_cmd[0]=str(Path(os.environ['SystemRoot'])/'System32/WindowsPowerShell/v1.0/powershell.exe')
-            bootstrap='[Console]::InputEncoding=New-Object Text.UTF8Encoding($false); & ([scriptblock]::Create([Console]::In.ReadToEnd()))'
-            shell_cmd=shell_cmd[:-2]+['-Command',bootstrap]
             request_input=json.dumps({'command':shell_cmd,'stdin_b64':base64.b64encode(script.encode()).decode(),'timeout_ms':max(1,int(budget(timeout_sec)*1000))})
             shell_cmd=[helper,'run']
         timeout_sec = budget(timeout_sec, "direct.exec")

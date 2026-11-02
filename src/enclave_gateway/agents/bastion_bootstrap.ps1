@@ -1,7 +1,11 @@
 param(
+    [ValidateSet('Standard','Enterprise','Custom')][string]$Mode = 'Custom',
+    [bool]$ProcessIsolation = ($env:OS -eq 'Windows_NT'),
+    [bool]$RequireSignedAgents = $true,
     [string]$SourceSpool = "\\tsclient\C\EnclaveGateway\spool",
     [string]$InstallDir = "$env:LOCALAPPDATA\EnclaveGateway",
     [string]$WorkerPath = '',
+    [string]$StopFile = '',
     [string]$RuntimeHelper = '',
     [string[]]$TrustedSignerThumbprints = @(),
     [string]$TrustedSignerThumbprintsCsv = '',
@@ -10,10 +14,21 @@ param(
     [switch]$UseStartupConfiguration
 )
 $ErrorActionPreference='Stop'
+if ($Mode -eq 'Standard') {
+    if (-not $PSBoundParameters.ContainsKey('ProcessIsolation')) {$ProcessIsolation=$false}
+    if (-not $PSBoundParameters.ContainsKey('RequireSignedAgents')) {$RequireSignedAgents=$false}
+    if ($AllowUnsignedLab -or $RegisterStartup) {throw 'Standard mode is foreground only; use Enterprise for managed persistent startup'}
+}
+if ($Mode -eq 'Enterprise' -and ($AllowUnsignedLab -or -not $ProcessIsolation -or -not $RequireSignedAgents)) {
+    throw 'Enterprise bootstrap cannot disable signatures or native process isolation'
+}
 if ($UseStartupConfiguration) {
     if ($RegisterStartup -or $AllowUnsignedLab) {throw 'Invalid persistent startup mode'}
     $settings=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'bastion_startup.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ($settings.revision -ne 1 -or -not $settings.source_spool -or -not $settings.runtime_helper -or -not $settings.trusted_signers.Count) {throw 'Invalid startup configuration'}
+    if ($settings.revision -notin @(1,2) -or -not $settings.source_spool -or -not $settings.runtime_helper -or -not $settings.trusted_signers.Count) {throw 'Invalid startup configuration'}
+    $Mode=if($settings.revision -eq 2){[string]$settings.mode}else{'Custom'}
+    if($Mode -notin @('Enterprise','Custom')){throw 'Persistent startup requires a signed mode'}
+    $ProcessIsolation=$true;$RequireSignedAgents=$true
     $SourceSpool=[string]$settings.source_spool
     $WorkerPath=Join-Path $PSScriptRoot 'bastion_worker.ps1'
     $RuntimeHelper=[string]$settings.runtime_helper
@@ -37,8 +52,13 @@ function Assert-TrustedScript([string]$Path) {
         throw 'Runtime requires a valid signature from an explicitly trusted publisher'
     }
 }
-if (-not $AllowUnsignedLab) { Assert-TrustedScript $workerSrc; Assert-TrustedScript $RuntimeHelper }
+if ($RequireSignedAgents -and -not $AllowUnsignedLab) {
+    Assert-TrustedScript $workerSrc
+    if($Mode -ne 'Custom'){Assert-TrustedScript $PSCommandPath}
+}
+if ($ProcessIsolation -and -not $AllowUnsignedLab) {Assert-TrustedScript $RuntimeHelper}
 if ($RegisterStartup) {
+    if(-not $ProcessIsolation -or -not $RequireSignedAgents){throw 'Managed startup requires signed native process isolation'}
     Assert-TrustedScript $PSCommandPath
     foreach ($value in @($SourceSpool,$InstallDir,$RuntimeHelper)) {
         if ($value.IndexOfAny([char[]]@('"',"`r","`n")) -ge 0) { throw 'Invalid startup path' }
@@ -55,7 +75,7 @@ if ($RegisterStartup) {
     Copy-Item -LiteralPath $PSCommandPath -Destination $bootstrapDst -Force
     Assert-TrustedScript $workerDst
     Assert-TrustedScript $bootstrapDst
-    $settings=@{revision=1;source_spool=$SourceSpool;runtime_helper=$RuntimeHelper;trusted_signers=$trusted}|ConvertTo-Json -Compress
+    $settings=@{revision=2;mode=$Mode;source_spool=$SourceSpool;runtime_helper=$RuntimeHelper;trusted_signers=$trusted}|ConvertTo-Json -Compress
     [IO.File]::WriteAllText((Join-Path $InstallDir 'bastion_startup.json'),$settings,(New-Object Text.UTF8Encoding($false)))
     $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
     try {$sid=$identity.User.Value;$accountName=$identity.Name} finally {$identity.Dispose()}
@@ -89,4 +109,4 @@ if ($UseStartupConfiguration -and $SourceSpool.StartsWith('\\tsclient\',[StringC
         Start-Sleep -Milliseconds 200
     }
 }
-& $workerSrc -SpoolDir $SourceSpool -RuntimeHelper $RuntimeHelper -TrustedSignerThumbprints $trusted -AllowUnsignedLab:$AllowUnsignedLab
+& $workerSrc -Mode $Mode -ProcessIsolation:$ProcessIsolation -SpoolDir $SourceSpool -StopFile $StopFile -RuntimeHelper $RuntimeHelper -TrustedSignerThumbprints $trusted -AllowUnsignedLab:$AllowUnsignedLab

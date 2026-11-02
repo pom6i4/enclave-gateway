@@ -55,12 +55,15 @@ def _ssh_args(node, *, scp=False, has_ssh_password=False, connect_timeout_sec=15
     args = ["-o", f"BatchMode={'no' if has_ssh_password else 'yes'}", "-o", "StrictHostKeyChecking=yes",
             "-o", f"ConnectTimeout={int(connect_timeout_sec)}", "-o", "ServerAliveInterval=15",
             "-o", "ServerAliveCountMax=3", "-P" if scp else "-p", str(node.port)]
+    if node.ssh_known_hosts_path:
+        from enclave_gateway.security.quoting import ssh_config_quote
+        args.extend(['-o','UserKnownHostsFile='+ssh_config_quote(node.ssh_known_hosts_path)])
     jumps = jump_node if isinstance(jump_node, list) else ([jump_node] if jump_node else [])
     if jumps:
         if any(j.password_env for j in jumps):
             raise ValueError("Per-hop password authentication requires independently configured OpenSSH host entries")
         spec = ",".join(f"{_node_uri(j)}:{j.port}" for j in jumps)
-        if any(j.ssh_key_path for j in jumps):
+        if any(j.ssh_key_path or j.ssh_known_hosts_path for j in jumps):
             def channel(host, port, index):
                 jump = jumps[index]
                 command = ["ssh.exe" if windows else "ssh"] + _ssh_args(jump,windows=windows)
@@ -123,7 +126,8 @@ try {{
 
 def build_powershell_ssh_hop_script(node, bash_script, *, as_root=False, ssh_password="", sudo_password="",
                                    connect_timeout_sec=15, stage_dir=r"%LOCALAPPDATA%\EnclaveGateway\stage", jump_node=None,
-                                   helper_path=r"%LOCALAPPDATA%\EnclaveGateway\bin\egw-askpass.exe", trusted_signers=(), require_signed=True):
+                                   helper_path=r"%LOCALAPPDATA%\EnclaveGateway\bin\egw-askpass.exe", trusted_signers=(), require_signed=True,
+                                   capture_streams=False):
     if node.os in ('windows','win','powershell'):
         if as_root: raise ValueError('sudo is unsupported for Windows targets')
         bootstrap='[Console]::InputEncoding=New-Object Text.UTF8Encoding($false); [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false); & ([scriptblock]::Create([Console]::In.ReadToEnd()))'
@@ -136,6 +140,10 @@ def build_powershell_ssh_hop_script(node, bash_script, *, as_root=False, ssh_pas
         payload=(sudo_password+'\n' if as_root else '')+'unset HISTFILE\n'+bash_script.replace('\r','')+'\n'
     arguments=['-T']+_ssh_args(node,has_ssh_password=bool(ssh_password),connect_timeout_sec=connect_timeout_sec,jump_node=jump_node)+[_node_uri(node),remote]
     encoded=base64.b64encode(payload.encode()).decode()
+    # A resident worker captures PowerShell objects; standalone callers retain
+    # the original byte-for-byte console behavior.
+    output_statement='Write-Output ($outText.TrimEnd([char[]]"`r`n"))' if capture_streams else '[Console]::Out.Write($outText)'
+    error_statement='Write-Error -Message $errText -ErrorAction Continue' if capture_streams else '[Console]::Error.Write($errText)'
     script=f"""
 $psi=New-Object Diagnostics.ProcessStartInfo
 $psi.FileName='ssh.exe'
@@ -152,9 +160,9 @@ try {{
     [void]$copy.GetAwaiter().GetResult(); $proc.StandardInput.Close()
     $proc.WaitForExit()
     $outText=$output.GetAwaiter().GetResult(); $errText=$errorOutput.GetAwaiter().GetResult()
-    if ($outText) {{[Console]::Out.Write($outText)}}
-    if ($errText) {{[Console]::Error.Write($errText)}}
-    if ($proc.ExitCode -ne 0) {{throw "SSH failed with exit code $($proc.ExitCode)"}}
+    if ($outText) {{{output_statement}}}
+    if ($proc.ExitCode -ne 0) {{throw "SSH failed with exit code $($proc.ExitCode): $errText"}}
+    if ($errText) {{{error_statement}}}
 }} finally {{try {{if (-not $proc.HasExited) {{$proc.Kill()}}}} catch {{}}; $proc.Dispose()}}
 """
     return _wrap_with_askpass_ps(script, ssh_password, secrets.token_hex(12), stage_dir=stage_dir, helper_path=helper_path, trusted_signers=trusted_signers, require_signed=require_signed)
@@ -230,7 +238,7 @@ class SshHopExecutor:
 
     def _exec_plain(self, node, bash_script, *, as_root=False, ssh_password="", sudo_password="", timeout_sec=120.0, jump_node=None):
         script = build_powershell_ssh_hop_script(node, bash_script, as_root=as_root, ssh_password=ssh_password,
-                                                sudo_password=sudo_password, stage_dir=self.stage_dir, jump_node=jump_node, **self.helper_options)
+                                                sudo_password=sudo_password, stage_dir=self.stage_dir, jump_node=jump_node, capture_streams=True, **self.helper_options)
         mark_dispatched()
         with timed("ssh.exec"):
             return self._exec_hop(script, budget(timeout_sec, "ssh.exec"))

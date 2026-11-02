@@ -1,0 +1,29 @@
+# Deliberately incomplete: config check fails until approved release pins are supplied.
+# Build/sign on a release workstation; never install an SDK on the Bastion.
+profile: enterprise
+security:
+  mode: enterprise
+  agent_package_dir: './approved-package'
+  trusted_signers: []
+  worker_sha256: ''
+  bootstrap_sha256: ''
+  runtime_sha256: ''
+  worker_account: ''              # Immutable Windows SID, not a display name
+  runtime_helper_path: '%LOCALAPPDATA%\EnclaveGateway\bin\egw-runtime.exe'
+  askpass_helper_path: '%LOCALAPPDATA%\EnclaveGateway\bin\egw-askpass.exe'
+
+appliance:
+  hypervisor: auto
+provider:
+  type: custom
+  installer_path: ''
+  dst_key_path: ''
+bastion:
+  enabled: true
+  host: 10.0.1.10
+targets:
+  app01:
+    host: 10.0.20.11
+    user: deploy
+    via: bastion
+    ssh_key_path: '~/.ssh/id_ed25519'
