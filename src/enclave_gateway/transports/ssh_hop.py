@@ -188,7 +188,7 @@ else
 fi"""
 
 
-def _stream_ps(node, stage, remote_path, *, pulling, password, jump_node, timeout_sec):
+def _stream_ps(node, stage, remote_path, *, pulling, password, jump_node, timeout_sec, remove_source=False):
     windows = node.os in ("windows", "win", "powershell")
     if windows:
         operation = (f"$s=[IO.File]::OpenRead([Environment]::ExpandEnvironmentVariables({ps_quote(remote_path)})); try {{$s.CopyTo([Console]::OpenStandardOutput())}} finally {{$s.Dispose()}}" if pulling
@@ -196,6 +196,8 @@ def _stream_ps(node, stage, remote_path, *, pulling, password, jump_node, timeou
         remote = build_remote_bash_invocation(operation, target_os="windows")
     else:
         remote = f"cat {'-- ' + shlex.quote(remote_path) if pulling else '> ' + shlex.quote(remote_path)}"
+        if pulling and remove_source:
+            remote='trap '+shlex.quote('rm -f -- '+shlex.quote(remote_path))+' 0; '+remote
     args = ["-T"] + _ssh_args(node, has_ssh_password=bool(password), jump_node=jump_node) + [_node_uri(node), remote]
     arguments = ps_quote(subprocess.list2cmdline(args))
     redirect = "$psi.RedirectStandardOutput = $true" if pulling else "$psi.RedirectStandardInput = $true"
@@ -228,12 +230,13 @@ try {{
 class SshHopExecutor:
     def __init__(self, exec_hop_fn: Callable[[str, float], ExecResult], push_hop_fn: Callable[[Path, str, float], str],
                  pull_hop_fn: Callable[[str, Path, float], str], *, stage_dir=r"%LOCALAPPDATA%\EnclaveGateway\stage",
-                 helper_path=r"%LOCALAPPDATA%\EnclaveGateway\bin\egw-askpass.exe", trusted_signers=(), require_signed=True, owned_commands=False, runtime_helper_path=r"%LOCALAPPDATA%\EnclaveGateway\bin\egw-runtime.exe"):
+                 helper_path=r"%LOCALAPPDATA%\EnclaveGateway\bin\egw-askpass.exe", trusted_signers=(), require_signed=True, owned_commands=False, runtime_helper_path=r"%LOCALAPPDATA%\EnclaveGateway\bin\egw-runtime.exe", cleanup_hop_fn=None):
         self.runtime_helper_path=runtime_helper_path
         self.owned_commands=owned_commands
         self._exec_hop = exec_hop_fn
         self._push_hop = push_hop_fn
         self._pull_hop = pull_hop_fn
+        self._cleanup_hop=cleanup_hop_fn
         self.stage_dir = stage_dir.rstrip("\\/")
         self.helper_options = dict(helper_path=helper_path, trusted_signers=tuple(trusted_signers), require_signed=require_signed)
 
@@ -285,7 +288,7 @@ try {{
 {fallback}
         $global:LASTEXITCODE = 0
     }}
-}} finally {{ Remove-Item -LiteralPath $stage -Force -ErrorAction SilentlyContinue }}
+}} finally {{ [IO.File]::Delete($stage) }}
 """
         try:
             result = self._exec_hop(_wrap_with_askpass_ps(script, ssh_password, token, stage_dir=self.stage_dir, **self.helper_options), budget(timeout_sec, "ssh.transfer"))
@@ -294,6 +297,7 @@ try {{
             if windows:
                 verify = f"""
 $tmp={ps_quote(temporary)}
+try {{
 $dst=[Environment]::ExpandEnvironmentVariables({ps_quote(remote_path)})
 $sha=(Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash.ToLower()
 if ($sha -ne '{expected}') {{ throw 'Target checksum mismatch' }}
@@ -301,10 +305,12 @@ $parent=Split-Path -Parent $dst
 if ($parent) {{ [void][IO.Directory]::CreateDirectory($parent) }}
 Move-Item -LiteralPath $tmp -Destination $dst -Force -ErrorAction Stop
 Write-Output "VERIFIED:$sha"
+}} finally {{[IO.File]::Delete($tmp)}}
 """
             else:
                 tmp, dst = shlex.quote(temporary), shlex.quote(remote_path)
                 verify = f"""set -e
+trap {shlex.quote("rm -f -- "+shlex.quote(temporary))} 0
 {_hash_sh(temporary)}
 if [ "$sha" != '{expected}' ]; then
     rm -f {tmp}
@@ -319,14 +325,9 @@ echo "VERIFIED:$sha"
             if result.exit_code or f"VERIFIED:{expected}" not in result.stdout:
                 raise RuntimeError(f"Target verification failed: {result.stderr or result.stdout}")
             return expected
-        finally:
+        except BaseException:
             self._cleanup_hop_stage(stage)
-            cleanup = f"Remove-Item -LiteralPath {ps_quote(temporary)} -Force -ErrorAction SilentlyContinue" if windows else f"rm -f -- {shlex.quote(temporary)}"
-            try:
-                with owned_cleanup():
-                    self.exec_node(node, cleanup, ssh_password=ssh_password, timeout_sec=2, jump_node=jump_node)
-            except Exception:
-                pass
+            raise
 
     def pull_file_from_node(self, node, remote_path, local_path, *, as_root=False, ssh_password="", sudo_password="", timeout_sec=600.0, jump_node=None):
         token = secrets.token_hex(12)
@@ -352,7 +353,7 @@ echo "VERIFIED:$sha"
                 raise RuntimeError("Failed to hash target file")
             expected = match.group(1)
             # Binary streams preserve NUL bytes and avoid text transcoding in PS5.
-            stream = _stream_ps(node, stage, source, pulling=True, password=ssh_password, jump_node=jump_node, timeout_sec=timeout_sec)
+            stream = _stream_ps(node, stage, source, pulling=True, password=ssh_password, jump_node=jump_node, timeout_sec=timeout_sec,remove_source=as_root)
             script = f"$stage=[Environment]::ExpandEnvironmentVariables({ps_quote(stage)})\n[void][IO.Directory]::CreateDirectory((Split-Path -Parent $stage))\n" + stream
             result = self._exec_hop(_wrap_with_askpass_ps(script, ssh_password, token, stage_dir=self.stage_dir, **self.helper_options), budget(timeout_sec, "ssh.transfer"))
             if result.exit_code:
@@ -372,17 +373,14 @@ echo "VERIFIED:$sha"
             return expected
         finally:
             self._cleanup_hop_stage(stage)
-            if as_root:
-                try:
-                    with owned_cleanup():
-                        self.exec_node(node, f"rm -f -- {shlex.quote(source)}", as_root=True, ssh_password=ssh_password, sudo_password=sudo_password, timeout_sec=2, jump_node=jump_node)
-                except Exception:
-                    pass
 
     def _cleanup_hop_stage(self, stage):
+        # A cleanup callback uses the controller directly. Never enqueue a new
+        # short-lived VFS transaction after the original operation has expired.
+        if self._cleanup_hop is None:return
         try:
-            with owned_cleanup():
-                self._exec_hop(f"Remove-Item -LiteralPath ([Environment]::ExpandEnvironmentVariables({ps_quote(stage)})) -Force -ErrorAction SilentlyContinue", 2.0)
+            with owned_cleanup(10):
+                self._cleanup_hop(stage)
         except Exception:
             pass
 

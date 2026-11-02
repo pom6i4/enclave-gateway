@@ -45,6 +45,8 @@ class FileChannel:
         temporary = target.with_suffix(target.suffix + ".tmp")
         temporary.write_bytes(data)
         temporary.replace(target)
+        from enclave_gateway.control.published import publish_queue_hint
+        publish_queue_hint(target)
 
     def write_bytes(self, data, path): self.path(path).write_bytes(data)
     def read_bytes(self, path): return self.path(path).read_bytes()

@@ -89,7 +89,9 @@ _ADAPTERS = {
         r"%ProgramFiles(x86)%\Cisco\Cisco Secure Client\vpncli.exe",
         r"%ProgramFiles(x86)%\Cisco\Cisco AnyConnect Secure Mobility Client\vpncli.exe"), ("state",), "vpnagent"),
     "openvpn": ProviderAdapter("openvpn", 1, (r"%ProgramFiles%\OpenVPN\bin\openvpn.exe",), (), "OpenVPNService*"),
-    "vipnet": ProviderAdapter("vipnet", 1),
+    "vipnet": ProviderAdapter("vipnet", 2, (
+        r"%ProgramFiles%\Mobile\bin\vipnetclient.exe",
+        r"%ProgramFiles(x86)%\Mobile\bin\vipnetclient.exe"), ("info",)),
     "kontinent": ProviderAdapter("kontinent", 1),
     "custom": ProviderAdapter("custom", 1),
 }

@@ -79,6 +79,8 @@ class LoopbackControlChannel:
         with self._lock:
             self.powershell_calls += 1
             self.last_script = script
+            if 'EGW_WORKER_READINESS' in script:
+                return ExecResult(0,json.dumps({'running':True,'age_sec':0}),'',1)
             if "[Convert]::FromBase64String('" in script and "req_" in script:
                 b64_part = script.split("[Convert]::FromBase64String('", 1)[1].split("')", 1)[0]
                 env_json = json.loads(base64.b64decode(b64_part).decode("utf-8"))
@@ -300,6 +302,8 @@ class LoopbackControlChannel:
     def try_read_bytes(
         self, guest_path: str, *, truncate_after_read: bool = False
     ) -> bytes | None:
+        if guest_path.endswith('worker_state.json'):
+            return json.dumps({'status':'running','last_heartbeat_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())}).encode()
         with self._lock:
             raw = self.files.get(guest_path)
             if not raw:

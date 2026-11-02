@@ -108,9 +108,9 @@ class OperationalTests(unittest.TestCase):
 
 
 class LocalPowerShellControl:
-    def __init__(self,shell):self.shell=shell
+    def __init__(self,shell,translate_paths=True):self.shell=shell;self.translate_paths=translate_paths
     def exec_powershell(self,script,timeout_sec=60):
-        if os.name!='nt':script=script.replace('\\','/')
+        if os.name!='nt' and self.translate_paths:script=script.replace('\\','/')
         started=time.monotonic()
         bootstrap='[Console]::InputEncoding=New-Object Text.UTF8Encoding($false); & ([scriptblock]::Create([Console]::In.ReadToEnd()))'
         result=subprocess.run([self.shell,'-NoProfile','-NonInteractive','-Command',bootstrap],input=script,
@@ -175,10 +175,10 @@ function netsh.exe {if(($args -join ' ') -notlike 'interface ipv4 set subinterfa
             worker=old_dir/'bastion_worker.ps1';original=worker.read_bytes();worker.write_bytes(original+b'\n# changed after staging\n')
             with self.assertRaises(RuntimeError):prune_agent_bundles(control,current,apply=True,remove=[second['bundle_sha256']])
             self.assertTrue(old_dir.exists());worker.write_bytes(original)
-            command=second['start_command']
+            command="& '"+str(old_dir/'bastion_bootstrap.ps1').replace("'","''")+"' -Mode Standard -SourceSpool '"+str(spool).replace("'","''")+"' -WorkerPath '"+str(old_dir/'bastion_worker.ps1').replace("'","''")+"'"
             if os.name!='nt':command=command.replace('\\','/')
             quote=lambda v:"'"+str(v).replace("'","''")+"'"
-            process=subprocess.Popen([shell,'-NoProfile','-NonInteractive','-Command',command+' -StopFile '+quote(stop)],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+            process=subprocess.Popen([shell,'-NoProfile','-NonInteractive','-Command',command+' -StopFile '+quote(stop)],stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,env={**os.environ,'LOCALAPPDATA':str(root/'local')})
             try:
                 deadline=time.monotonic()+30
                 while not (spool/'worker_state.json').exists():

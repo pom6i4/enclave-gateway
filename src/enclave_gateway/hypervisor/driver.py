@@ -166,7 +166,11 @@ class ApplianceHypervisor:
                 return False, None
             identity=self.qmp.execute('query-name')
             if identity.get('return',{}).get('name')!=self.spec.name:
-                raise RuntimeError('Control endpoint belongs to a different VM')
+                from enclave_gateway.operations.context import OperationError
+                raise OperationError('vm_identity_mismatch','hypervisor.identity',
+                    message='Control endpoint belongs to a different VM: expected '+repr(self.spec.name)+
+                    ', actual '+repr(identity.get('return',{}).get('name'))+
+                    '. Set appliance.name to the verified QMP name and configure qga_socket_path, qmp_socket_path and pid_file_path separately.')
             return True, pid
         except (ValueError, OSError):
             return False, None
@@ -315,6 +319,8 @@ class ApplianceHypervisor:
                         '--flags','not-need-init','--daemon'],check=True,capture_output=True,timeout=10)
 
     def start(self) -> int:
+        if any((self.spec.qga_socket_path,self.spec.qmp_socket_path,self.spec.pid_file_path)):
+            return self._start()
         store=self.state_store()
         with store.locked():
             if store.pending.exists():
@@ -325,6 +331,8 @@ class ApplianceHypervisor:
         running, pid = self.is_running()
         if running and pid is not None:
             return pid
+        if any((self.spec.qga_socket_path,self.spec.qmp_socket_path,self.spec.pid_file_path)):
+            raise ValueError('Explicit control paths attach to an existing VM; start it with its owner launcher or omit the overrides for managed creation')
 
         if self.spec.pid_file.exists():
             raise RuntimeError("Unresponsive VM PID file exists; verify process ownership before removing stale state")
@@ -375,6 +383,8 @@ class ApplianceHypervisor:
         return new_pid
 
     def stop(self, timeout_sec: float = 120.0) -> None:
+        if any((self.spec.qga_socket_path,self.spec.qmp_socket_path,self.spec.pid_file_path)):
+            self._stop(timeout_sec);return
         with self.state_store().locked():self._stop(timeout_sec)
 
     def _stop(self, timeout_sec: float) -> None:
@@ -399,8 +409,9 @@ class ApplianceHypervisor:
             raise TimeoutError("Appliance did not stop; runtime state is preserved")
 
         self._stop_tpm()
-        for stale in (self.spec.qmp_socket, self.spec.qga_socket, self.spec.pid_file):
-            stale.unlink(missing_ok=True)
+        if not any((self.spec.qga_socket_path,self.spec.qmp_socket_path,self.spec.pid_file_path)):
+            for stale in (self.spec.qmp_socket, self.spec.qga_socket, self.spec.pid_file):
+                stale.unlink(missing_ok=True)
 
     def create_snapshot(self, snapshot_name: str | None = None) -> None:
         store=self.state_store()

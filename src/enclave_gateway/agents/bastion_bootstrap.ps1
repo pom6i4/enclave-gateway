@@ -6,6 +6,9 @@ param(
     [string]$InstallDir = "$env:LOCALAPPDATA\EnclaveGateway",
     [string]$WorkerPath = '',
     [string]$StopFile = '',
+    [string]$StateRoot = '',
+    [ValidateRange(250,30000)][int]$HeartbeatIntervalMs = 5000,
+    [switch]$MigrateLegacyState,
     [string]$RuntimeHelper = '',
     [string[]]$TrustedSignerThumbprints = @(),
     [string]$TrustedSignerThumbprintsCsv = '',
@@ -14,6 +17,7 @@ param(
     [switch]$UseStartupConfiguration
 )
 $ErrorActionPreference='Stop'
+if(($RegisterStartup -or $UseStartupConfiguration) -and $MigrateLegacyState){throw 'Migrate legacy state in foreground before configuring persistent startup'}
 if ($Mode -eq 'Standard') {
     if (-not $PSBoundParameters.ContainsKey('ProcessIsolation')) {$ProcessIsolation=$false}
     if (-not $PSBoundParameters.ContainsKey('RequireSignedAgents')) {$RequireSignedAgents=$false}
@@ -25,8 +29,9 @@ if ($Mode -eq 'Enterprise' -and ($AllowUnsignedLab -or -not $ProcessIsolation -o
 if ($UseStartupConfiguration) {
     if ($RegisterStartup -or $AllowUnsignedLab) {throw 'Invalid persistent startup mode'}
     $settings=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'bastion_startup.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ($settings.revision -notin @(1,2) -or -not $settings.source_spool -or -not $settings.runtime_helper -or -not $settings.trusted_signers.Count) {throw 'Invalid startup configuration'}
-    $Mode=if($settings.revision -eq 2){[string]$settings.mode}else{'Custom'}
+    if ($settings.revision -notin @(1,2,3) -or -not $settings.source_spool -or -not $settings.runtime_helper -or -not $settings.trusted_signers.Count) {throw 'Invalid startup configuration'}
+    $Mode=if($settings.revision -ge 2){[string]$settings.mode}else{'Custom'}
+    if($settings.revision -eq 3){$StateRoot=[string]$settings.state_root;if($settings.heartbeat_interval_ms){$HeartbeatIntervalMs=[int]$settings.heartbeat_interval_ms}}
     if($Mode -notin @('Enterprise','Custom')){throw 'Persistent startup requires a signed mode'}
     $ProcessIsolation=$true;$RequireSignedAgents=$true
     $SourceSpool=[string]$settings.source_spool
@@ -75,7 +80,7 @@ if ($RegisterStartup) {
     Copy-Item -LiteralPath $PSCommandPath -Destination $bootstrapDst -Force
     Assert-TrustedScript $workerDst
     Assert-TrustedScript $bootstrapDst
-    $settings=@{revision=2;mode=$Mode;source_spool=$SourceSpool;runtime_helper=$RuntimeHelper;trusted_signers=$trusted}|ConvertTo-Json -Compress
+    $settings=@{revision=3;mode=$Mode;state_root=$StateRoot;heartbeat_interval_ms=$HeartbeatIntervalMs;source_spool=$SourceSpool;runtime_helper=$RuntimeHelper;trusted_signers=$trusted}|ConvertTo-Json -Compress
     [IO.File]::WriteAllText((Join-Path $InstallDir 'bastion_startup.json'),$settings,(New-Object Text.UTF8Encoding($false)))
     $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
     try {$sid=$identity.User.Value;$accountName=$identity.Name} finally {$identity.Dispose()}
@@ -109,4 +114,4 @@ if ($UseStartupConfiguration -and $SourceSpool.StartsWith('\\tsclient\',[StringC
         Start-Sleep -Milliseconds 200
     }
 }
-& $workerSrc -Mode $Mode -ProcessIsolation:$ProcessIsolation -SpoolDir $SourceSpool -StopFile $StopFile -RuntimeHelper $RuntimeHelper -TrustedSignerThumbprints $trusted -AllowUnsignedLab:$AllowUnsignedLab
+& $workerSrc -Mode $Mode -ProcessIsolation:$ProcessIsolation -SpoolDir $SourceSpool -StopFile $StopFile -StateRoot $StateRoot -HeartbeatIntervalMs $HeartbeatIntervalMs -MigrateLegacyState:$MigrateLegacyState -RuntimeHelper $RuntimeHelper -TrustedSignerThumbprints $trusted -AllowUnsignedLab:$AllowUnsignedLab

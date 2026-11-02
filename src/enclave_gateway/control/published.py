@@ -38,3 +38,33 @@ def try_read_published(path: Path) -> bytes | None:
         if os.name == 'nt' and getattr(error, 'winerror', None) in (32, 33):
             return None
         raise
+
+
+def publish_queue_hint(target: Path):
+    """Best-effort bounded index; request files remain authoritative."""
+    import json
+    import re
+    import tempfile
+    import uuid
+    if not re.fullmatch(r'(req|cancel)_[A-Za-z0-9_-]{1,128}\.json',target.name):return
+    from enclave_gateway.control.qga_client import _file_lock
+    index=target.parent/'request_index.json';temporary=None
+    try:
+        with _file_lock(target.parent/'.request-index.lock',timeout_sec=.5):
+            try:
+                raw=read_shared(index)
+                data=json.loads(raw) if len(raw)<=65536 else {}
+                names=data.get('files',[]) if isinstance(data,dict) else []
+                if not isinstance(names,list):names=[]
+            except (OSError,ValueError,TypeError):names=[]
+            names=[name for name in names if isinstance(name,str) and re.fullmatch(r'(req|cancel)_[A-Za-z0-9_-]{1,128}\.json',name) and name!=target.name][-127:]
+            names.append(target.name)
+            with tempfile.NamedTemporaryFile(dir=target.parent,delete=False) as stream:
+                temporary=Path(stream.name)
+                stream.write(json.dumps({'revision':1,'token':uuid.uuid4().hex,'files':names}).encode())
+            temporary.replace(index)
+    except (OSError,ValueError,TimeoutError):pass
+    finally:
+        if temporary:
+            try:temporary.unlink(missing_ok=True)
+            except OSError:pass

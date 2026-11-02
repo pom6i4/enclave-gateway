@@ -40,6 +40,9 @@ class OperationTests(unittest.TestCase):
         with TemporaryDirectory() as root:
             control=Mock();control.supports_direct_spool_ipc=True
             def corrupt(path,**_):
+                if path.endswith('worker_state.json'):
+                    import datetime
+                    return json.dumps({'status':'running','last_heartbeat_utc':datetime.datetime.now(datetime.timezone.utc).isoformat()}).encode()
                 tx=path.replace('\\','/').rsplit('/',1)[-1][4:-5]
                 return json.dumps({'tx_id':tx,'exit_code':'invalid','stdout_b64':'','stderr_b64':''}).encode()
             control.try_read_bytes.side_effect=corrupt

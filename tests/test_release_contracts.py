@@ -59,9 +59,12 @@ class ReleaseContracts(unittest.TestCase):
             script=adapter.probe_script(ProviderSpec(type=name))
             self.assertIn("$configurationMatched",script)
             self.assertIn("driver_qualification='not_verified'",script)
-            if name in ("vipnet","kontinent"):
+            if name == "kontinent":
                 self.assertEqual(adapter.status_arguments,())
                 self.assertEqual(adapter.binary_candidates,())
+            if name == 'vipnet':
+                self.assertEqual(adapter.status_arguments,('info',))
+                self.assertIn(r'%ProgramFiles%\Mobile\bin\vipnetclient.exe',adapter.binary_candidates)
         with self.assertRaises(ValueError): provider_adapter("unknown")
 
     @unittest.skipUnless(os.environ.get("EGW_TEST_POWERSHELL"),"PowerShell parser is opt-in")

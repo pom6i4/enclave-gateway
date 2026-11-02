@@ -202,6 +202,7 @@ class StandardWorkerTests(unittest.TestCase):
             command=[os.environ['EGW_TEST_POWERSHELL'],'-NoProfile','-NonInteractive','-Command',
                      start+' -RuntimeHelper '+quote(missing)+' -StopFile '+quote(stop)]
             environment=dict(os.environ)
+            environment['LOCALAPPDATA']=str(root.resolve()/'local')
             if os.name!='nt':
                 fake=root/'ssh.exe'
                 fake.write_text('#!'+sys.executable+"\nimport sys;sys.stdin.buffer.read();print('ssh-тест');print('ssh-warning',file=sys.stderr)\n")

@@ -11,7 +11,7 @@ def diagnostic_code(detail, exit_code=None):
     if exit_code is not None and exit_code not in (0,255):return 'remote_command_failed'
     if any(s in value for s in ('host key verification failed','remote host identification has changed','no ed25519 host key','no rsa host key')):return 'ssh_host_key'
     if 'permission denied' in value or 'publickey' in value:return 'ssh_authentication'
-    if any(s in value for s in ('constrained','fulllanguage','applocker','wdac')):return 'endpoint_policy'
+    if any(s in value for s in ('constrained','fulllanguage','applocker','wdac','pssecurityexception','running scripts is disabled','execution policy')):return 'endpoint_policy'
     if any(s in value for s in ('authenticode','untrusted runtime','managed runtime','credential helper')):return 'runtime_trust'
     if any(s in value for s in ('worker','spool','session_pending','vfs')):return 'worker_channel'
     if exit_code==255:return 'ssh_connection_or_remote_exit'
@@ -25,7 +25,7 @@ def support_preview(config):
     import platform
     from enclave_gateway import __version__
     result=preflight(config)
-    allowed={'qemu','appliance_disk','appliance_firmware','uefi_code','powershell','agent_package'}
+    allowed={'qemu','appliance_disk','appliance_firmware','uefi_code','powershell','agent_package','qga_endpoint','qmp_endpoint','pid_file'}
     payload={'schema':'egw.support.v1','version':__version__,
              'platform':{'os':platform.system(),'architecture':platform.machine(),'python':platform.python_version()},
              'security':{name:getattr(config.security,name) for name in ('mode','require_signed_helpers','require_signed_agents','require_process_isolation','enforce_worker_attestation','owned_ssh_commands')},
@@ -63,8 +63,8 @@ def remediation(detail):
         return 'Check the target user, authorized_keys and the private key on the executing SSH hop. Host keys and login keys are separate. Password bootstrap via egw ssh-copy-id requires an approved native askpass helper. See docs/GUIDE.md#ssh-trust.'
     if any(s in value for s in ('managed runtime','native runtime','credential helper','untrusted runtime','untrusted process','authenticode')):
         return 'Standard mode supports key-based SSH and an in-process worker without helpers. Explicit isolation/signing requirements need an approved native package and trusted publishers; they never fall back. See docs/SECURITY.md.'
-    if any(s in value for s in ('constrained','fulllanguage','applocker','wdac')):
-        return 'Ask the endpoint administrator to approve the worker under the existing application-control policy. No mode bypasses WDAC, AppLocker or ConstrainedLanguage. See docs/SECURITY.md.'
+    if any(s in value for s in ('constrained','fulllanguage','applocker','wdac','pssecurityexception','running scripts is disabled','execution policy')):
+        return 'Review Get-ExecutionPolicy -List and endpoint policy with the administrator. Approve signed agents, or explicitly request agents command --execution-policy RemoteSigned in Standard mode when permitted. AllSigned, Group Policy, WDAC and AppLocker are not weakened. See docs/SECURITY.md.'
     if any(s in value for s in ('worker','spool','session_pending','vfs')):
         return 'Run egw agents stage (or egw heal), enable approved RDP drive redirection, then run the printed bootstrap command inside the Bastion RDP session. See docs/GUIDE.md#first-connection.'
     return 'Run egw config check and egw doctor --preflight; see docs/GUIDE.md#troubleshooting.'
@@ -74,7 +74,12 @@ def preflight(config):
     from enclave_gateway.onboarding import configuration_summary,agent_bundle
     checks=[]
     def add(name,ok,detail,fix):checks.append({'check':name,'ok':bool(ok),'code':'ok' if ok else name+'_unavailable','detail':detail,'remediation':fix})
-    if config.appliance.hypervisor!='direct':
+    external=any((config.appliance.qga_socket_path,config.appliance.qmp_socket_path,config.appliance.pid_file_path))
+    if config.appliance.hypervisor!='direct' and external:
+        for name,path in (('qga_endpoint',config.appliance.qga_socket),('qmp_endpoint',config.appliance.qmp_socket),('pid_file',config.appliance.pid_file)):
+            add(name,path.exists(),'Configured attachment endpoint exists' if path.exists() else 'Configured attachment endpoint is missing',
+                'Use the verified owner launcher and set all matching control paths; preflight does not query VM identity.')
+    elif config.appliance.hypervisor!='direct':
         from enclave_gateway.hypervisor.driver import detect_host_arch,resolve_qemu_binary,resolve_efi_code_path
         arch=detect_host_arch(config.appliance.arch)
         binary=resolve_qemu_binary(arch);present=shutil.which(binary) or Path(binary).is_file()

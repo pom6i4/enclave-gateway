@@ -263,6 +263,7 @@ class QgaClient:
             sock.sendall((json.dumps({'execute':'guest-shutdown','arguments':{'mode':'powerdown'}})+'\n').encode())
 
     def exec_powershell(self, script: str, timeout_sec: float = 120.0) -> ExecResult:
+        script="$ProgressPreference='SilentlyContinue';\n"+script
         encoded_cmd=base64.b64encode(script.encode('utf-16le')).decode('ascii')
         return self.exec_guest('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',encoded_cmd],timeout_sec=timeout_sec)
 
@@ -315,9 +316,31 @@ class QgaClient:
         from enclave_gateway.security.quoting import ps_quote
         tmp_path = guest_path + ".tmp"
         self.write_bytes(data, tmp_path)
-        result = self.exec_powershell(
-            f"$ErrorActionPreference='Stop'; Move-Item -LiteralPath {ps_quote(tmp_path)} -Destination {ps_quote(guest_path)} -Force"
-        )
+        script=f"$ErrorActionPreference='Stop'; Move-Item -LiteralPath {ps_quote(tmp_path)} -Destination {ps_quote(guest_path)} -Force\n"
+        # Failure of this advisory index must never replay an already published request.
+        script+="$hintTarget="+ps_quote(guest_path)+r'''
+$name=[IO.Path]::GetFileName($hintTarget)
+if($name -match '^(req|cancel)_[A-Za-z0-9_-]{1,128}\.json$'){
+ $hintLock=$null;$hintTmp=$null
+ try{
+  $root=[IO.Path]::GetDirectoryName($hintTarget);$index=Join-Path $root 'request_index.json'
+  $timer=[Diagnostics.Stopwatch]::StartNew()
+  while(-not $hintLock -and $timer.ElapsedMilliseconds -lt 500){
+   try{$hintLock=[IO.File]::Open((Join-Path $root '.request-index.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)}catch{Start-Sleep -Milliseconds 5}
+  }
+  if($hintLock){
+   $files=@()
+   if([IO.File]::Exists($index) -and ([IO.FileInfo]$index).Length -le 65536){
+    try{$old=[IO.File]::ReadAllText($index)|ConvertFrom-Json;$files=@($old.files|Where-Object {$_ -is [string] -and $_ -match '^(req|cancel)_[A-Za-z0-9_-]{1,128}\.json$' -and $_ -cne $name}|Select-Object -Last 127)}catch{}
+   }
+   $files+=,$name;$token=[Guid]::NewGuid().ToString('N');$hintTmp=$index+'.'+$token+'.tmp'
+   [IO.File]::WriteAllText($hintTmp,(@{revision=1;token=$token;files=@($files)}|ConvertTo-Json -Compress),(New-Object Text.UTF8Encoding($false)))
+   if([IO.File]::Exists($index)){[IO.File]::Replace($hintTmp,$index,[NullString]::Value)}else{[IO.File]::Move($hintTmp,$index)}
+  }
+ }catch{}finally{if($hintLock){$hintLock.Dispose()};if($hintTmp -and [IO.File]::Exists($hintTmp)){try{[IO.File]::Delete($hintTmp)}catch{}}}
+}
+'''
+        result = self.exec_powershell(script)
         if result.exit_code:
             raise OSError("Failed to publish guest file atomically")
 
@@ -457,6 +480,8 @@ class DirectHostControlChannel:
             tmp.replace(target)
         finally:
             tmp.unlink(missing_ok=True)
+        from enclave_gateway.control.published import publish_queue_hint
+        publish_queue_hint(target)
 
     def read_bytes(self, guest_path: str) -> bytes:
         from enclave_gateway.control.published import read_shared

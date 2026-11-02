@@ -144,3 +144,18 @@ drive and the protected spool owner. Legacy workers are not certified by a stale
 heartbeat and their generations are never automatically adopted for deletion.
 Support snapshots use an allow-list rather than copying and attempting to redact
 arbitrary logs; review their digest before saving and sharing them.
+
+Redirected workers execute a verified local copy and retain durable request
+identities on Bastion, with a spool binding to the original local journal owner.
+Migration preserves legacy tombstones; loss of the bound local journal fails
+closed. Backup freshness, coordinated snapshot rollback and remote effect
+reconciliation remain operator responsibilities. Do not return a legacy worker
+to a migrated spool. Queue hints and heartbeat timestamps confer no authorization
+and cannot replace fresh Enterprise release/runtime/SID attestation.
+
+An explicit process RemoteSigned startup option exists only for unsigned Standard
+profiles and refuses effective AllSigned. It does not change Group Policy or
+application-control rules, and local copies retain Internet zone markers. Signed
+profiles require the approved signing workflow. Staged source generations may be
+pruned after a verified local copy is running because the local copy is independent;
+source leases protect the copy itself, and current/rollback retention still applies.

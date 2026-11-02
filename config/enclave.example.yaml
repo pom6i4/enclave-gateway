@@ -11,19 +11,25 @@ appliance:
   arch: auto                      # Guest and accelerator architectures must match
   disk_path: ~/.local/share/enclave-gateway/disk.qcow2
   efi_vars_path: ~/.local/share/enclave-gateway/efi_vars.fd
+  # Optional attach paths; appliance.name remains the verified QMP VM name.
+  qga_socket_path: ''
+  qmp_socket_path: ''
+  pid_file_path: ''
+  # runtime_dir: /tmp/enclave-gateway-run  # Private directory; short UNIX socket paths
 
 # Use the existing approved VPN connection. No installer or key import by default.
 provider:
   type: custom
   installer_path: ''
   dst_key_path: ''
-  probe_host: 10.0.1.10
-  probe_port: 3389
+  probe_host: ''                  # Follows bastion.host; explicit for a different probe
+  probe_port: 0                   # Follows bastion.port
 
 bastion:
   enabled: true
   host: 10.0.1.10
   port: 3389
+  heartbeat_max_age_sec: 45       # Liveness hint, separate from Enterprise attestation
   appliance_spool_dir: 'C:\EnclaveGateway\spool'
   bastion_spool_dir: '\\tsclient\C\EnclaveGateway\spool'
 

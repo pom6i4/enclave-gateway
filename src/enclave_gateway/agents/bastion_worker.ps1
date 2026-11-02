@@ -2,11 +2,15 @@ param(
     [ValidateSet('Standard','Enterprise','Custom')][string]$Mode = 'Custom',
     [string]$SpoolDir = "\\tsclient\C\EnclaveGateway\spool",
     [int]$PollIntervalMs = 20,
+    [ValidateRange(250,30000)][int]$HeartbeatIntervalMs = 5000,
+    [ValidateRange(100,60000)][int]$RecoveryScanIntervalMs = 5000,
     [int]$ParallelStreams = 4,
     [int]$MaxMuxSessions = 256,
     [int]$MaxRequestsPerTick = 32,
     [int]$MaxTransactionRecords = 100000,
     [string]$StopFile = "",
+    [string]$StateRoot = "",
+    [switch]$MigrateLegacyState,
     [bool]$ProcessIsolation = ($env:OS -eq 'Windows_NT'),
     [string]$RuntimeHelper = "$env:LOCALAPPDATA\EnclaveGateway\bin\egw-runtime.exe",
     [string[]]$TrustedSignerThumbprints = @(),
@@ -32,11 +36,97 @@ if ($ParallelStreams -lt 1 -or $ParallelStreams -gt 64 -or $MaxMuxSessions -lt 1
     throw 'Invalid worker resource limits'
 }
 $ErrorActionPreference = 'Stop'
+
+$ProgressPreference='SilentlyContinue'
+function Move-WorkerFile([string]$Source,[string]$Destination) {
+    if([IO.File]::Exists($Destination)){[IO.File]::Replace($Source,$Destination,[NullString]::Value)}else{[IO.File]::Move($Source,$Destination)}
+}
+function Write-DurableText([string]$Path, [string]$Text) {
+    $bytes=[Text.Encoding]::UTF8.GetBytes($Text)
+    $stream=[IO.File]::Open($Path,[IO.FileMode]::Create,[IO.FileAccess]::Write,[IO.FileShare]::None)
+    try { $stream.Write($bytes,0,$bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
+}
+
+function Get-TextHash([string]$Value){
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try{return [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Value))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+}
+$instanceLease=$null;$workerMutex=$null;$mutexHeld=$false
+try {
+[void][IO.Directory]::CreateDirectory($SpoolDir)
+$spoolIdentity=Get-TextHash ([IO.Path]::GetFullPath($SpoolDir).TrimEnd([char[]]'\/').ToLowerInvariant())
+$workerMutex=New-Object Threading.Mutex($false,('EnclaveGateway.Worker.'+$spoolIdentity))
+try{$mutexHeld=$workerMutex.WaitOne(0)}catch [Threading.AbandonedMutexException]{$mutexHeld=$true}
+if(-not $mutexHeld){throw 'WORKER_ALREADY_RUNNING: one worker per spool is allowed'}
+try{$instanceLease=[IO.File]::Open(([IO.Path]::Combine($SpoolDir,'.worker-session')),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)}
+catch{throw 'WORKER_ALREADY_RUNNING: spool session lease is busy'}
+$stateDir=[IO.Path]::Combine($SpoolDir,'.transactions')
+$journalLocation='spool-local'
+if($StateRoot -or $SpoolDir.StartsWith('\\')){
+    $journalLocation='bastion-local'
+    if(-not $StateRoot){
+        if(-not $env:LOCALAPPDATA){throw 'A local StateRoot is required for a redirected spool'}
+        $StateRoot=[IO.Path]::Combine($env:LOCALAPPDATA,'EnclaveGateway\state')
+    }
+    $StateRoot=[IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($StateRoot))
+    if($StateRoot.StartsWith('\\')){throw 'The durable worker journal must be local to Bastion'}
+    if($env:OS -eq 'Windows_NT' -and (New-Object IO.DriveInfo([IO.Path]::GetPathRoot($StateRoot))).DriveType -eq [IO.DriveType]::Network){throw 'The durable worker journal cannot use a mapped network drive'}
+    $parent=New-Object IO.DirectoryInfo($StateRoot)
+    while($parent){if($parent.Exists -and ($parent.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Linked journal root rejected'};$parent=$parent.Parent}
+    $sid=if($env:OS -eq 'Windows_NT'){
+        $identity=[Security.Principal.WindowsIdentity]::GetCurrent();try{$identity.User.Value}finally{$identity.Dispose()}
+    }else{[Environment]::UserName}
+    $owner=Get-TextHash ([Environment]::MachineName+"`n"+$sid)
+    $binding=[IO.Path]::Combine($SpoolDir,'worker_storage.json')
+    if(-not [IO.File]::Exists($binding)){
+        $legacy=@()
+        if([IO.Directory]::Exists($stateDir)){$legacy=@([IO.Directory]::EnumerateFiles($stateDir))}
+        if(($legacy.Count -or [IO.File]::Exists(([IO.Path]::Combine($SpoolDir,'worker_state.json')))) -and -not $MigrateLegacyState){throw 'LEGACY_STATE_MIGRATION_REQUIRED: stop the old worker and explicitly approve MigrateLegacyState'}
+        if($legacy.Count -gt 2*$MaxTransactionRecords){throw 'Legacy journal exceeds migration capacity'}
+        $storage=[Guid]::NewGuid().ToString('N');$local=[IO.Path]::Combine($StateRoot,$storage)
+        [void][IO.Directory]::CreateDirectory($local)
+        if($env:OS -eq 'Windows_NT'){
+            $acl=New-Object Security.AccessControl.DirectorySecurity
+            $acl.SetAccessRuleProtection($true,$false)
+            foreach($principal in @($sid,'S-1-5-18')){
+                $rule=New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier($principal)),'FullControl','ContainerInherit,ObjectInherit','None','Allow')
+                $acl.AddAccessRule($rule)
+            }
+            Set-Acl -LiteralPath $local -AclObject $acl
+        }
+        foreach($file in $legacy){
+            $name=[IO.Path]::GetFileName($file)
+            if($name -notmatch '^[A-Za-z0-9_-]{1,128}\.(json|cancel)$' -or (([IO.File]::GetAttributes($file)) -band [IO.FileAttributes]::ReparsePoint)){throw 'Unrecognized legacy journal entry; preserve it for manual reconciliation'}
+            $text=[IO.File]::ReadAllText($file)
+            if($name.EndsWith('.json')){
+                $record=$text|ConvertFrom-Json
+                if([string]$record.tx_id -ne [IO.Path]::GetFileNameWithoutExtension($file) -or $record.state -notin @('running','completed','failed','indeterminate','cancelled')){throw 'Invalid legacy journal record'}
+            }
+            Write-DurableText ([IO.Path]::Combine($local,$name)) $text
+        }
+        $metadata=@{protocol=2;storage_id=$storage;owner_sha256=$owner}|ConvertTo-Json -Compress
+        Write-DurableText ([IO.Path]::Combine($local,'storage.json')) $metadata
+        $temporary=$binding+'.'+[Guid]::NewGuid().ToString('N')+'.tmp'
+        try{Write-DurableText $temporary $metadata;[IO.File]::Move($temporary,$binding)}finally{if([IO.File]::Exists($temporary)){[IO.File]::Delete($temporary)}}
+    }
+    $record=[IO.File]::ReadAllText($binding)|ConvertFrom-Json
+    if($record.protocol -ne 2 -or $record.storage_id -notmatch '^[a-f0-9]{32}$' -or $record.owner_sha256 -cne $owner){throw 'WORKER_JOURNAL_IDENTITY_MISMATCH: restore the original Bastion account and journal'}
+    $stateDir=[IO.Path]::Combine($StateRoot,$record.storage_id)
+    if([IO.Directory]::Exists($stateDir) -and ([IO.File]::GetAttributes($stateDir) -band [IO.FileAttributes]::ReparsePoint)){throw 'Linked journal directory rejected'}
+    $localMetadata=[IO.Path]::Combine($stateDir,'storage.json')
+    if(-not [IO.File]::Exists($localMetadata)){throw 'WORKER_JOURNAL_MISSING: restore local durable state; an empty replacement is forbidden'}
+    $localRecord=[IO.File]::ReadAllText($localMetadata)|ConvertFrom-Json
+    if($localRecord.protocol -ne 2 -or $localRecord.storage_id -cne $record.storage_id -or $localRecord.owner_sha256 -cne $owner){throw 'WORKER_JOURNAL_IDENTITY_MISMATCH'}
+}
+[void][IO.Directory]::CreateDirectory($stateDir)
+$pendingHints=@{};$knownHints=@{};$hintToken='';$hintSeen=$false;$lastRecovery=-60000
+$heartbeatState=$null;$lastHeartbeatMs=0;$lastHintMs=0;$lastDirectoryMs=0;$lastJournalMs=0;$lastResponseMs=0;$lastClaimMs=0;$lastReadMs=0
+$stopRequested=$false;$lastMaintenance=-60000;$scanCount=0;$lastScanMs=0;$lastLoopMs=0
+
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 Set-PSReadLineOption -HistorySaveStyle SaveNothing -ErrorAction SilentlyContinue
 [void][IO.Directory]::CreateDirectory($SpoolDir)
-$stateDir = Join-Path $SpoolDir '.transactions'
-[void][IO.Directory]::CreateDirectory($stateDir)
+# The selected durable journal has already been opened before allocating runspaces.
 $Global:EnclaveMuxSockets = @{}
 $pendingMux = New-Object Collections.Generic.List[object]
 $activeTxJobs = New-Object Collections.Generic.List[object]
@@ -56,7 +146,7 @@ if ($ProcessIsolation) {
     try {$powerShellPath=$self.MainModule.FileName} finally {$self.Dispose()}
 }
 $clock = [Diagnostics.Stopwatch]::StartNew()
-$lastHeartbeat = -2000
+$lastHeartbeat = -30000
 $completedCount = 0
 $nativeCompletedSinceCleanup = 0
 $nativeCleanupCycles = 0
@@ -145,37 +235,36 @@ function Stop-Execution($Job) {
     }
     else { $Job.StopHandle=$Job.Pipe.BeginStop($null,$null) }
 }
-$transactionCount = @(Get-ChildItem -LiteralPath $stateDir -Filter '*.json' -File).Count
+$transactionCount = @([IO.Directory]::EnumerateFiles($stateDir,'*.json') | Where-Object {[IO.Path]::GetFileName($_) -ne 'storage.json'}).Count
 
-function Write-DurableText([string]$Path, [string]$Text) {
-    $bytes=[Text.Encoding]::UTF8.GetBytes($Text)
-    $stream=[IO.File]::Open($Path,[IO.FileMode]::Create,[IO.FileAccess]::Write,[IO.FileShare]::None)
-    try { $stream.Write($bytes,0,$bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
-}
 
 function Write-State {
     param([string]$TxId, [string]$State)
-    $path = Join-Path $stateDir "$TxId.json"
+    $journalStarted=$clock.ElapsedMilliseconds
+    $path = [IO.Path]::Combine($stateDir,"$TxId.json")
     $temporary = "$path.tmp"
-    $newRecord = -not (Test-Path -LiteralPath $path)
+    $newRecord = -not [IO.File]::Exists($path)
     $json = @{ tx_id=$TxId; state=$State; updated_utc=(Get-Date).ToUniversalTime().ToString('o') } | ConvertTo-Json -Compress
     Write-DurableText $temporary $json
-    Move-Item -LiteralPath $temporary -Destination $path -Force
+    Move-WorkerFile $temporary $path
     if ($newRecord) { $script:transactionCount++ }
+    $script:lastJournalMs=$clock.ElapsedMilliseconds-$journalStarted
 }
 
 function Write-Response {
     param([string]$TxId, [int]$ExitCode=0, [string]$Stdout='', [string]$Stderr='', [int]$DurationMs=0, [string]$State='completed', [bool]$StoreState=$true)
+    $responseStarted=$clock.ElapsedMilliseconds
     $result = @{ tx_id=$TxId; exit_code=$ExitCode; state=$State; worker_instance=$workerInstance; worker_sha256=$loadedWorkerHash;
         stdout_b64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Stdout));
         stderr_b64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Stderr)); duration_ms=$DurationMs }
-    $temporary = Join-Path $SpoolDir "res_$TxId.tmp"
-    $path = Join-Path $SpoolDir "res_$TxId.json"
-    Write-DurableText $temporary ($result | ConvertTo-Json -Compress)
+    $temporary = [IO.Path]::Combine($SpoolDir,"res_$TxId.tmp")
+    $path = [IO.Path]::Combine($SpoolDir,"res_$TxId.json")
+    [IO.File]::WriteAllText($temporary,($result | ConvertTo-Json -Compress),(New-Object Text.UTF8Encoding($false)))
     if ($StoreState) { Write-State $TxId $State }
     # A failed rename is retried by maintenance; execution is never replayed.
-    try { Move-Item -LiteralPath $temporary -Destination $path -Force -ErrorAction Stop } catch {}
+    try { Move-WorkerFile $temporary $path } catch {}
     $script:completedCount++
+    $script:lastResponseMs=$clock.ElapsedMilliseconds-$responseStarted
 }
 
 function Close-Mux {
@@ -252,12 +341,43 @@ $nativeExecute={
     }
 }
 
+
+function Complete-WorkerJobs {
+        # Reap shell pipelines without waiting for incomplete work.
+        foreach ($job in @($activeTxJobs.ToArray())) {
+            if (-not $job.Handle.IsCompleted -and $job.Timer.ElapsedMilliseconds -ge $job.TimeoutMs -and -not $job.Cancelled) {
+                Stop-Execution $job
+            }
+            if (-not $job.Handle.IsCompleted) { continue }
+            $activeTxJobs.Remove($job) | Out-Null
+            $values=$null
+            try {
+                [void]$job.Pipe.EndInvoke($job.Handle)
+                $values=$job.Output
+                if ($values.Count -eq 1 -and $values[0].Indeterminate) {$job.Cancelled=$true}
+                if ($job.Cancelled) { throw 'Execution interrupted; external effects may continue' }
+                if ($values.Count -ne 1) { throw 'Execution ended without a result' }
+                $value=$values[0]
+                $state=if ($value.ExitCode -eq 0) { 'completed' } else { 'failed' }
+                Write-Response $job.TxId $value.ExitCode $value.Stdout $value.Stderr ([int]$job.Timer.ElapsedMilliseconds) $state
+            } catch {
+                $state=if ($job.Cancelled) { 'indeterminate' } else { 'failed' }
+                $code=if ($job.Cancelled) { 125 } else { 1 }
+                Write-Response $job.TxId $code '' ($_ | Out-String) ([int]$job.Timer.ElapsedMilliseconds) $state
+            } finally {
+                if ($job.StopHandle -and $job.StopHandle.IsCompleted) { try { $job.Pipe.EndStop($job.StopHandle) } catch {} }
+                Close-WorkerPipeline $job
+                if ($job.Native) {$script:nativeCompletedSinceCleanup++}
+            }
+        }
+
+}
 # EGW_BUNDLE_LEASE_V1: retain a shared lease for this managed generation's lifetime.
 $bundleLease=$null
 try {
     $generation=Get-Item -LiteralPath (Split-Path -Parent $PSCommandPath)
     if ($generation.Name -cmatch '^[a-f0-9]{64}$' -and $generation.Parent.Name -eq 'agents') {
-        $leasePath=Join-Path $generation.Parent.FullName '.bundle-lease'
+        $leasePath=[IO.Path]::Combine($generation.Parent.FullName,'.bundle-lease')
         if((Get-Item -LiteralPath $leasePath -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Linked bundle lease rejected'}
         $bundleLease=[IO.File]::Open($leasePath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
         if((Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $loadedWorkerHash){throw 'Worker bundle changed during startup'}
@@ -285,50 +405,53 @@ if($ProcessIsolation){
         $trustProcess.Dispose();throw
     }
 }
-    while (-not $StopFile -or -not (Test-Path -LiteralPath $StopFile)) {
+    while (-not $stopRequested -and (-not $StopFile -or -not [IO.File]::Exists($StopFile))) {
+        $loopStart=$clock.ElapsedMilliseconds
+        Complete-WorkerJobs
+        $scanStart=$clock.ElapsedMilliseconds
+        try{
+            $hfile=[IO.File]::Open(([IO.Path]::Combine($SpoolDir,'request_index.json')),[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+            try{
+                if($hfile.Length -gt 65536){throw 'Oversized queue hint'}
+                $hreader=New-Object IO.StreamReader($hfile)
+                try{$hint=$hreader.ReadToEnd()|ConvertFrom-Json}finally{$hreader.Dispose()}
+            }finally{$hfile.Dispose()}
+            if($hint.revision -eq 1 -and $hint.token -match '^[a-f0-9]{32}$' -and @($hint.files).Count -le 128 -and $hint.token -cne $hintToken){
+                $next=@{}
+                foreach($name in @($hint.files)){
+                    if($name -isnot [string] -or $name -notmatch '^(req|cancel)_[A-Za-z0-9_-]{1,128}\.json$'){continue}
+                    $next[$name]=$true
+                    if(-not $knownHints.ContainsKey($name)){$pendingHints[([IO.Path]::Combine($SpoolDir,$name))]=$true}
+                }
+                $knownHints=$next;$hintToken=$hint.token;$hintSeen=$true
+            }
+        }catch{}
+        $lastHintMs=$clock.ElapsedMilliseconds-$scanStart
+        $spoolFiles=@($pendingHints.Keys)
+        if(-not $hintSeen -or $clock.ElapsedMilliseconds-$lastRecovery -ge $RecoveryScanIntervalMs){
+            $directoryStart=$clock.ElapsedMilliseconds
+            $spoolFiles=@([IO.Directory]::EnumerateFiles($SpoolDir))
+            $lastDirectoryMs=$clock.ElapsedMilliseconds-$directoryStart
+            $scanCount++;$lastRecovery=$clock.ElapsedMilliseconds
+        }
+        $lastScanMs=$clock.ElapsedMilliseconds-$scanStart
         # Cancellation files have priority over new work. They contain no code.
-        foreach ($cancelFile in @(Get-ChildItem -LiteralPath $SpoolDir -Filter 'cancel_*.json' -File | Select-Object -First $MaxRequestsPerTick)) {
+        foreach ($cancelFile in @($spoolFiles | Where-Object {[IO.Path]::GetFileName($_) -like 'cancel_*.json'} | Select-Object -First $MaxRequestsPerTick)) {
             try {
-                $cancel = Get-Content -LiteralPath $cancelFile.FullName -Raw | ConvertFrom-Json
+                $cancel = [IO.File]::ReadAllText($cancelFile) | ConvertFrom-Json
                 $cancelId = [string]$cancel.tx_id
-                if ($cancelId -notmatch '^[A-Za-z0-9_-]{1,128}$' -or $cancelFile.Name -ne "cancel_$cancelId.json") { continue }
-                [IO.File]::WriteAllText((Join-Path $stateDir "$cancelId.cancel"), '')
+                if ($cancelId -notmatch '^[A-Za-z0-9_-]{1,128}$' -or ([IO.Path]::GetFileName($cancelFile)) -ne "cancel_$cancelId.json") { continue }
+                [IO.File]::WriteAllText(([IO.Path]::Combine($stateDir,"$cancelId.cancel")), '')
                 foreach ($job in @($activeTxJobs.ToArray())) {
                     if ($job.TxId -eq $cancelId -and -not $job.Cancelled) {
                         Stop-Execution $job
                     }
                 }
                 foreach ($job in @($pendingMux.ToArray())) { if ($job.TxId -eq $cancelId) { $job.Cancelled=$true } }
-            } finally { Remove-Item -LiteralPath $cancelFile.FullName -Force -ErrorAction SilentlyContinue }
+            } catch {} finally { try{[IO.File]::Delete($cancelFile)}catch{};$pendingHints.Remove($cancelFile) }
         }
 
-        # Reap shell pipelines without waiting for incomplete work.
-        foreach ($job in @($activeTxJobs.ToArray())) {
-            if (-not $job.Handle.IsCompleted -and $job.Timer.ElapsedMilliseconds -ge $job.TimeoutMs -and -not $job.Cancelled) {
-                Stop-Execution $job
-            }
-            if (-not $job.Handle.IsCompleted) { continue }
-            $activeTxJobs.Remove($job) | Out-Null
-            $values=$null
-            try {
-                [void]$job.Pipe.EndInvoke($job.Handle)
-                $values=$job.Output
-                if ($values.Count -eq 1 -and $values[0].Indeterminate) {$job.Cancelled=$true}
-                if ($job.Cancelled) { throw 'Execution interrupted; external effects may continue' }
-                if ($values.Count -ne 1) { throw 'Execution ended without a result' }
-                $value=$values[0]
-                $state=if ($value.ExitCode -eq 0) { 'completed' } else { 'failed' }
-                Write-Response $job.TxId $value.ExitCode $value.Stdout $value.Stderr ([int]$job.Timer.ElapsedMilliseconds) $state
-            } catch {
-                $state=if ($job.Cancelled) { 'indeterminate' } else { 'failed' }
-                $code=if ($job.Cancelled) { 125 } else { 1 }
-                Write-Response $job.TxId $code '' ($_ | Out-String) ([int]$job.Timer.ElapsedMilliseconds) $state
-            } finally {
-                if ($job.StopHandle -and $job.StopHandle.IsCompleted) { try { $job.Pipe.EndStop($job.StopHandle) } catch {} }
-                Close-WorkerPipeline $job
-                if ($job.Native) {$nativeCompletedSinceCleanup++}
-            }
-        }
+        Complete-WorkerJobs
 
         if ($PSVersionTable.PSEdition -eq 'Desktop' -and $nativeCompletedSinceCleanup -ge 32) {
             # Windows PowerShell/.NET Framework retains internal async-pipe
@@ -402,29 +525,32 @@ if($ProcessIsolation){
             }
         }
 
-        foreach ($file in @(Get-ChildItem -LiteralPath $SpoolDir -Filter 'req_*.json' -File | Sort-Object Name | Select-Object -First $MaxRequestsPerTick)) {
+        foreach ($file in @($spoolFiles | Where-Object {[IO.Path]::GetFileName($_) -like 'req_*.json'} | Sort-Object | Select-Object -First $MaxRequestsPerTick)) {
             # Capture identity before rename; FileInfo metadata can be refreshed
             # against the now-missing original pathname on Windows PowerShell.
-            $requestPath=$file.FullName
-            $txId=$file.Name.Substring(4,$file.Name.Length-9)
-            $claim="$requestPath.processing"
-            try { Move-Item -LiteralPath $requestPath -Destination $claim -ErrorAction Stop } catch { continue }
+            $requestPath=$file
+            $filename=[IO.Path]::GetFileName($file)
+            $txId=$filename.Substring(4,$filename.Length-9)
+            $claim="$requestPath.processing";$requeued=$false
+            $claimStart=$clock.ElapsedMilliseconds
+            try { [IO.File]::Move($requestPath,$claim);$lastClaimMs=$clock.ElapsedMilliseconds-$claimStart } catch [IO.FileNotFoundException] {$pendingHints.Remove($requestPath);continue} catch {continue}
             try {
                 if ($txId -notmatch '^[A-Za-z0-9_-]{1,128}$') {throw 'Invalid transaction filename'}
                 try {
+                    $readStart=$clock.ElapsedMilliseconds
                     $stream=[IO.File]::Open($claim,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
                     try {
                         if ($stream.Length -gt 8388608) {throw 'Envelope exceeds size limit'}
                         $reader=[IO.StreamReader]::new($stream,[Text.UTF8Encoding]::new($false,$true),$true,4096,$true)
                         try {$request=$reader.ReadToEnd() | ConvertFrom-Json} finally {$reader.Dispose()}
-                    } finally {$stream.Dispose()}
+                    } finally {$stream.Dispose();$lastReadMs=$clock.ElapsedMilliseconds-$readStart}
                 } catch {
                     $cause=$_.Exception
                     while($cause.InnerException) {$cause=$cause.InnerException}
                     if (($cause.HResult -band 65535) -in @(32,33)) {
                         # Only reading is retried, before any journal dispatch or
                         # payload execution. ACL denial and malformed data fail.
-                        Move-Item -LiteralPath $claim -Destination $requestPath -ErrorAction Stop
+                        [IO.File]::Move($claim,$requestPath);$requeued=$true
                         $readRetryCount++
                         continue
                     }
@@ -435,14 +561,14 @@ if($ProcessIsolation){
                     Write-Response $txId 125 '' 'Worker instance/release changed before dispatch' 0 'cancelled'
                     continue
                 }
-                if (Test-Path -LiteralPath (Join-Path $stateDir "$txId.cancel")) {
+                if ([IO.File]::Exists(([IO.Path]::Combine($stateDir,"$txId.cancel")))) {
                     Write-Response $txId 125 '' 'Cancelled before dispatch' 0 'cancelled'
                     continue
                 }
-                $stateFile=Join-Path $stateDir "$txId.json"
-                if (Test-Path -LiteralPath $stateFile) {
+                $stateFile=[IO.Path]::Combine($stateDir,"$txId.json")
+                if ([IO.File]::Exists($stateFile)) {
                     # Never execute a reused request id, including after a restart.
-                    if (-not (Test-Path -LiteralPath (Join-Path $SpoolDir "res_$txId.json"))) {
+                    if (-not ([IO.File]::Exists(([IO.Path]::Combine($SpoolDir,"res_$txId.json"))))) {
                         Write-Response $txId 125 '' 'Existing transaction; query the Host journal' 0 'indeterminate'
                     }
                     continue
@@ -458,6 +584,11 @@ if($ProcessIsolation){
                     if ($remaining -le 0) { Write-Response $txId 125 '' 'Deadline expired before dispatch' 0 'cancelled'; continue }
                     $timeout=[int][Math]::Max(1,[Math]::Min($timeout,$remaining))
                 } elseif ($ProcessIsolation) { throw 'Isolated execution requires a request deadline' }
+                if($request.op -eq 'stop'){
+                    if($activeTxJobs.Count -or $pendingMux.Count -or $Global:EnclaveMuxSockets.Count){Write-Response $txId 75 '' 'WORKER_BUSY: close active streams and wait for jobs before stopping' 0 'failed';continue}
+                    Write-Response $txId 0 'WORKER_STOP_ACCEPTED' '' 0 'completed'
+                    $stopRequested=$true;break
+                }
                 $action=[string]$request.mux_action
                 $slot=$null
                 if($request.op -eq 'attest') {
@@ -468,7 +599,7 @@ if($ProcessIsolation){
                 if ((-not $action -or $request.op -eq 'attest') -and $null -eq $slot) {
                     # Leave queued requests unexecuted until a slot is free;
                     # their original absolute deadline remains authoritative.
-                    Move-Item -LiteralPath $claim -Destination $file.FullName
+                    [IO.File]::Move($claim,$requestPath);$requeued=$true
                     continue
                 }
                 Write-State $txId 'running'
@@ -576,32 +707,40 @@ $e | ConvertTo-Json -Compress -Depth 5
                 }
             } catch {
                 if ($txId -match '^[A-Za-z0-9_-]{1,128}$') { Write-Response $txId 1 '' ($_ | Out-String) 0 'failed' }
-            } finally { Remove-Item -LiteralPath $claim -Force -ErrorAction SilentlyContinue }
+            } finally { try{[IO.File]::Delete($claim)}catch{};if(-not $requeued){$pendingHints.Remove($requestPath)};Complete-WorkerJobs }
         }
 
-        if ($clock.ElapsedMilliseconds-$lastHeartbeat -ge 2000) {
-            foreach ($file in @(Get-ChildItem -LiteralPath $SpoolDir -Filter 'res_*.tmp' -File)) {
-                try { Move-Item -LiteralPath $file.FullName -Destination ($file.FullName -replace '\.tmp$', '.json') -Force } catch {}
+        if ($clock.ElapsedMilliseconds-$lastHeartbeat -ge $HeartbeatIntervalMs) {
+            foreach ($file in @($spoolFiles | Where-Object {[IO.Path]::GetFileName($_) -like 'res_*.tmp'})) {
+                try {Move-WorkerFile $file ([IO.Path]::ChangeExtension($file,'json'))} catch {}
             }
             foreach ($id in @($Global:EnclaveMuxSockets.Keys)) {
-                if (-not $Global:EnclaveMuxSockets[$id].Busy -and $clock.ElapsedMilliseconds-$Global:EnclaveMuxSockets[$id].LastActive -gt 300000) { Close-Mux $id }
+                if (-not $Global:EnclaveMuxSockets[$id].Busy -and $clock.ElapsedMilliseconds-$Global:EnclaveMuxSockets[$id].LastActive -gt 300000) {Close-Mux $id}
             }
-            Get-ChildItem -LiteralPath $SpoolDir -Filter 'res_*.json' -File | Where-Object { ((Get-Date)-$_.LastWriteTime).TotalSeconds -gt 300 } | Remove-Item -Force -ErrorAction SilentlyContinue
+            if($clock.ElapsedMilliseconds-$lastMaintenance -ge 60000){
+                foreach($file in @($spoolFiles | Where-Object {[IO.Path]::GetFileName($_) -like 'res_*.json'} | Select-Object -First 4)){
+                    try{if(([DateTime]::UtcNow-[IO.File]::GetLastWriteTimeUtc($file)).TotalSeconds -gt 300){[IO.File]::Delete($file)}}catch{}
+                }
+                $lastMaintenance=$clock.ElapsedMilliseconds
+            }
             $nativeStages=@{}
             foreach($job in $activeTxJobs.ToArray()) {if($job.Native) {$stage=[string]$job.NativeState.Stage; $nativeStages[$stage]=1+[int]$nativeStages[$stage]}}
             $self=[Diagnostics.Process]::GetCurrentProcess()
-            $state=@{ trust_initialization_ms=$trustState.InitializationMs; read_retry_count=$readRetryCount; native_stages=$nativeStages; working_set_bytes=$self.WorkingSet64; handles=$self.HandleCount; threads=$self.Threads.Count; pid=$PID; language_mode=[string]$ExecutionContext.SessionState.LanguageMode; powershell_edition=[string]$PSVersionTable.PSEdition; uptime_sec=[int]$clock.Elapsed.TotalSeconds;
+            $heartbeatState=@{ status='running';protocol_revision=2;heartbeat_interval_ms=$HeartbeatIntervalMs;last_heartbeat_ms=$lastHeartbeatMs;last_hint_ms=$lastHintMs;last_directory_ms=$lastDirectoryMs;last_journal_ms=$lastJournalMs;last_response_ms=$lastResponseMs;last_claim_ms=$lastClaimMs;last_read_ms=$lastReadMs;journal_location=$journalLocation;directory_scans=$scanCount;last_scan_ms=$lastScanMs;last_loop_ms=$lastLoopMs;trust_initialization_ms=$trustState.InitializationMs; read_retry_count=$readRetryCount; native_stages=$nativeStages; working_set_bytes=$self.WorkingSet64; handles=$self.HandleCount; threads=$self.Threads.Count; pid=$PID; language_mode=[string]$ExecutionContext.SessionState.LanguageMode; powershell_edition=[string]$PSVersionTable.PSEdition; uptime_sec=[int]$clock.Elapsed.TotalSeconds;
                 security_mode=$Mode.ToLowerInvariant(); execution_model=if ($ProcessIsolation) {"owned-process-job"} else {"runspace"}; parallel_streams=$ParallelStreams; active_mux_streams=$Global:EnclaveMuxSockets.Count; active_tx_jobs=$activeTxJobs.Count;
                 pending_mux=$pendingMux.Count; completed_transactions=$completedCount; native_cleanup_cycles=$nativeCleanupCycles; transaction_records=$transactionCount; transaction_capacity=$MaxTransactionRecords; last_heartbeat_utc=(Get-Date).ToUniversalTime().ToString('o') }
             $self.Dispose()
             if ($Diagnostics) {
-                $state.pending_mux_details=@($pendingMux.ToArray() | ForEach-Object {@{tx_id=$_.TxId;action=$_.Action;elapsed_ms=$_.Timer.ElapsedMilliseconds;offset=$_.Offset;bytes=$_.Bytes.Length;read_started=$_.ReadStarted;wait_ms=$_.WaitMs;received=$_.Receive.Length}})
+                $heartbeatState.pending_mux_details=@($pendingMux.ToArray() | ForEach-Object {@{tx_id=$_.TxId;action=$_.Action;elapsed_ms=$_.Timer.ElapsedMilliseconds;offset=$_.Offset;bytes=$_.Bytes.Length;read_started=$_.ReadStarted;wait_ms=$_.WaitMs;received=$_.Receive.Length}})
             }
-            $temporary=Join-Path $SpoolDir 'worker_state.tmp'
-            [IO.File]::WriteAllText($temporary, ($state | ConvertTo-Json -Compress -Depth 5), (New-Object Text.UTF8Encoding($false)))
-            Move-Item -LiteralPath $temporary -Destination (Join-Path $SpoolDir 'worker_state.json') -Force -ErrorAction SilentlyContinue
+            $heartbeatStart=$clock.ElapsedMilliseconds
+            $temporary=[IO.Path]::Combine($SpoolDir,'worker_state.tmp')
+            [IO.File]::WriteAllText($temporary, ($heartbeatState | ConvertTo-Json -Compress -Depth 5), (New-Object Text.UTF8Encoding($false)))
+            try{Move-WorkerFile $temporary ([IO.Path]::Combine($SpoolDir,'worker_state.json'))}catch{}
             $lastHeartbeat=$clock.ElapsedMilliseconds
+            $lastHeartbeatMs=$lastHeartbeat-$heartbeatStart
         }
+        $lastLoopMs=$clock.ElapsedMilliseconds-$loopStart
         Start-Sleep -Milliseconds ([Math]::Max(1, [Math]::Min($PollIntervalMs, 50)))
     }
 } finally {
@@ -627,4 +766,20 @@ $e | ConvertTo-Json -Compress -Depth 5
     $attestationSlot.Runspace.Close()
     $attestationSlot.Runspace.Dispose()
     } finally {if($bundleLease){$bundleLease.Dispose()}}
+}
+
+} finally {
+    try {
+        if($instanceLease){
+            if($heartbeatState -isnot [hashtable]){$heartbeatState=@{}}
+            $heartbeatState.status='stopped';$heartbeatState.protocol_revision=2;$heartbeatState.last_heartbeat_utc=[DateTime]::UtcNow.ToString('o');$heartbeatState.instance_id=$workerInstance
+            $stoppedJson=$heartbeatState|ConvertTo-Json -Compress -Depth 5
+            $temporary=[IO.Path]::Combine($SpoolDir,('worker_state.'+[Guid]::NewGuid().ToString('N')+'.tmp'))
+            try{[IO.File]::WriteAllText($temporary,$stoppedJson,(New-Object Text.UTF8Encoding($false)));Move-WorkerFile $temporary ([IO.Path]::Combine($SpoolDir,'worker_state.json'))}catch{}
+        }
+    }finally{
+        if($instanceLease){$instanceLease.Dispose()}
+        if($mutexHeld){$workerMutex.ReleaseMutex()}
+        if($workerMutex){$workerMutex.Dispose()}
+    }
 }

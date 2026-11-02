@@ -118,6 +118,8 @@ class EnclaveEngine:
             )
 
         self.rdp_vfs = RdpVfsTransport(self.control, self.config.bastion)
+        self._worker_ready_at=0.0
+        self.rdp_vfs.readiness_guard=self._assert_worker_ready
         if self.config.security.enforce_worker_attestation:
             self.rdp_vfs.attestation_guard=lambda:self.attest_worker(timeout_sec=budget(10))
         self.bastion_ssh = SshHopExecutor(
@@ -125,6 +127,7 @@ class EnclaveEngine:
             push_hop_fn=self._push_bastion_vfs_stage,
             pull_hop_fn=self._pull_bastion_vfs_stage,
             stage_dir=self.config.bastion.bastion_spool_dir,
+            cleanup_hop_fn=self._cleanup_bastion_vfs_stage,
             helper_path=self.config.security.askpass_helper_path,
             trusted_signers=self.config.security.trusted_signers,
             require_signed=self.config.security.require_signed_helpers,
@@ -175,6 +178,15 @@ class EnclaveEngine:
             )
         return self.rdp_vfs.pull_file(hop_stage, local_path, timeout_sec=timeout)
 
+    def _cleanup_bastion_vfs_stage(self,stage):
+        root=self.config.bastion.bastion_spool_dir.rstrip('\\/')
+        normalized=stage.replace('/','\\')
+        if not normalized.startswith(root+'\\'):raise ValueError('Stage is outside the managed spool')
+        name=normalized[len(root)+1:]
+        if not re.fullmatch(r'egw_(?:stage|pull)_[a-f0-9]{24}',name):raise ValueError('Unowned stage name')
+        path=self.config.bastion.appliance_spool_dir.rstrip('\\/')+'\\'+name
+        self.control.exec_powershell('[IO.File]::Delete('+ps_quote(path)+')',timeout_sec=budget(10,'appliance.stage_cleanup'))
+
     def _push_to_appliance_with_sha(
         self, local_path: Path, guest_path: str, _timeout: float
     ) -> str:
@@ -203,6 +215,21 @@ class EnclaveEngine:
             duration_ms=res.duration_ms,
             tx_id=res.tx_id, timings_ms=dict(res.timings_ms),
         )
+
+    def _assert_worker_ready(self):
+        from enclave_gateway.worker_channel import require_running_worker
+        if time.monotonic()-self._worker_ready_at<1:return
+        require_running_worker(self.control,self.config.bastion)
+        self._worker_ready_at=time.monotonic()
+
+    @tracked('stop_worker')
+    def stop_worker(self, *, actor='cli', timeout_sec=45):
+        if not self.config.bastion.enabled:raise ValueError('Bastion is disabled')
+        result=self._scrub_result(self.rdp_vfs.exec_bastion('',op='stop',timeout_sec=timeout_sec))
+        self._worker_ready_at=0
+        if result.exit_code==0 and result.stdout!='WORKER_STOP_ACCEPTED':
+            raise OperationError('worker_stop_unsupported','worker.stop',message='Worker did not acknowledge stop. Upgrade to a stop-aware worker; no process was killed.')
+        return result
 
     def status(self) -> dict[str, Any]:
         """Collect health telemetry across Appliance, VPN provider, and Bastion."""
@@ -256,13 +283,13 @@ $stateJson = ""
 $statePath = Join-Path $spool 'worker_state.json'
 if (Test-Path -LiteralPath $statePath) {{
     $age = ((Get-Date) - (Get-Item -LiteralPath $statePath).LastWriteTime).TotalSeconds
-    if ($age -ge 0 -and $age -lt 10) {{ $stateJson = (Get-Content -LiteralPath $statePath -Raw -Encoding UTF8).Trim() }}
+    if ($age -ge 0 -and $age -lt {self.config.bastion.heartbeat_max_age_sec}) {{ $stateJson = [IO.File]::ReadAllText($statePath).Trim() }}
 }}
 $vpnRoute = @($adapter | Where-Object {{ $_.Status -eq 'Up' -and $_.Name -eq $tcp.InterfaceAlias }}).Count -gt 0
 $out = @{{
     tunnel_up = [bool]($tcp.TcpTestSucceeded -and $vpnRoute)
     probe_reachable = [bool]$tcp.TcpTestSucceeded
-    source_ip = [string]$tcp.SourceAddress
+    source_ip = if($tcp.SourceAddress -is [Net.IPAddress]){{$tcp.SourceAddress.ToString()}}else{{[string]$tcp.SourceAddress.IPAddress}}
     source_interface = [string]$tcp.InterfaceAlias
     vpn_info = $info
     provider_evidence = $providerEvidence
@@ -287,7 +314,7 @@ ConvertTo-Json $out -Compress -Depth 8
                 if worker_raw:
                     try:
                         report["bastion"]["worker_state"] = json.loads(worker_raw)
-                        report["bastion"]["worker_healthy"] = True
+                        report["bastion"]["worker_healthy"] = report["bastion"]["worker_state"].get('status','running')=='running'
                     except json.JSONDecodeError:
                         pass
         except Exception as exc:
@@ -335,7 +362,7 @@ ConvertTo-Json $out -Compress -Depth 8
             combined_ps+=f"""
 & {{
 {sup_script}
-}} -BastionHost {ps_quote(self.config.bastion.host)} -BastionPort {self.config.bastion.port} -SpoolDir {ps_quote(self.config.bastion.appliance_spool_dir)} -ScheduledTaskName {ps_quote(self.config.bastion.scheduled_task_name)} {cred_args} -ForceReconnect
+}} -BastionHost {ps_quote(self.config.bastion.host)} -BastionPort {self.config.bastion.port} -SpoolDir {ps_quote(self.config.bastion.appliance_spool_dir)} -ScheduledTaskName {ps_quote(self.config.bastion.scheduled_task_name)} -HeartbeatMaxAgeSec {self.config.bastion.heartbeat_max_age_sec} {cred_args} -ForceReconnect
 """
         res = self._scrub_result(self.control.exec_powershell(combined_ps, timeout_sec=60.0))
         if deployment:
@@ -352,9 +379,9 @@ ConvertTo-Json $out -Compress -Depth 8
         return res
 
     @tracked('stage_agents')
-    def stage_agents(self, *, actor='cli'):
+    def stage_agents(self, *, actor='cli', **options):
         from enclave_gateway.onboarding import stage_agents
-        return stage_agents(self.control,self.config)
+        return stage_agents(self.control,self.config,**options)
 
     @tracked('prune_agents')
     def prune_agents(self, *, actor='cli', **options):
@@ -1026,43 +1053,41 @@ Write-Output ("DIAG_CLOCK:"+$epoch+":UDP:"+[int]$udp)
         tx_id = current().tx_id if current() else generate_tx_id()
         started = time.monotonic()
 
-        self.rdp_vfs.close_mux_sessions()
-        bastion_clean_ps = """
-$stageDir = Join-Path $env:LOCALAPPDATA 'EnclaveGateway\\stage'
-if (Test-Path $stageDir) {
-    Get-ChildItem -Path $stageDir -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        from enclave_gateway.spool_cleanup import cleanup_script
+        errors=[];app_ok=False;bastion_ok=not self.config.bastion.enabled;details={}
+        # The controller can clean expired unclaimed requests even when the
+        # Bastion queue or the redirected drive is unavailable.
+        try:
+            app=self.control.exec_powershell(cleanup_script(self.config.bastion.appliance_spool_dir),timeout_sec=budget(15,'clean.appliance'))
+            app_ok=app.exit_code==0
+            if app.stdout.startswith('APPLIANCE_CLEAN_OK:'):
+                details=json.loads(app.stdout.split(':',1)[1])
+            if not app_ok:errors.append('appliance_cleanup_failed')
+        except Exception:
+            errors.append('appliance_cleanup_unavailable')
+        if self.config.bastion.enabled:
+            try:
+                self.rdp_vfs.close_mux_sessions(timeout_sec=15)
+                result=self.rdp_vfs.exec_bastion("""
+$stage=Join-Path $env:LOCALAPPDATA 'EnclaveGateway\\stage'
+if([IO.Directory]::Exists($stage)){
+ foreach($file in [IO.Directory]::EnumerateFiles($stage)){
+  $name=[IO.Path]::GetFileName($file)
+  if($name -match '^egw_(stage|pull)_[a-f0-9]{24}$' -and ([DateTime]::UtcNow-[IO.File]::GetLastWriteTimeUtc($file)).TotalHours -gt 24){[IO.File]::Delete($file)}
+ }
 }
 Write-Output 'BASTION_CLEAN_OK'
-"""
-        bastion_res = self.rdp_vfs.exec_bastion(bastion_clean_ps, timeout_sec=20.0)
-
-        spool = self.config.bastion.appliance_spool_dir
-        appliance_clean_ps = f"""
-$spool = '{spool}'
-if (Test-Path $spool) {{
-    Get-ChildItem -Path $spool -Include '*.tmp', 'req_*.json', 'res_*.json', 'chunk_*.bin', 'pull_*.bin', 'egw_stage_*', 'egw_pull_*' -File -ErrorAction SilentlyContinue |
-        Remove-Item -Force -ErrorAction SilentlyContinue
-}}
-Write-Output 'APPLIANCE_CLEAN_OK'
-"""
-        app_res = self.control.exec_powershell(appliance_clean_ps, timeout_sec=15.0)
-
-        duration_ms = int((time.monotonic() - started) * 1000)
-        self.recorder.record(
-            tx_id=tx_id,
-            actor=actor,
-            operation="clean",
-            node="@all",
-            summary="Purge transient spool and staging files across Appliance and Bastion",
-            exit_code=0 if (bastion_res.exit_code == 0 and app_res.exit_code == 0) else 1,
-            duration_ms=duration_ms,
-        )
-        return {
-            "tx_id": tx_id,
-            "appliance_cleaned": app_res.exit_code == 0,
-            "bastion_cleaned": bastion_res.exit_code == 0,
-            "duration_ms": duration_ms,
-        }
+""",timeout_sec=20)
+                bastion_ok=result.exit_code==0
+                if not bastion_ok:errors.append('bastion_cleanup_failed')
+            except Exception:
+                errors.append('bastion_cleanup_unavailable')
+        duration_ms=int((time.monotonic()-started)*1000)
+        self.recorder.record(tx_id=tx_id,actor=actor,operation='clean',node='@all',
+            summary='Clean expired unclaimed files; preserve durable outcomes and active processing',
+            exit_code=0 if app_ok and bastion_ok else 1,duration_ms=duration_ms)
+        return {'tx_id':tx_id,'appliance_cleaned':app_ok,'bastion_cleaned':bastion_ok,
+                'duration_ms':duration_ms,'details':details,'errors':errors}
 
     def generate_ssh_config(
         self,

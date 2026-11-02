@@ -43,9 +43,16 @@ class ApplianceSpec:
     vm_rdp_forward_port: int = 13390
     vnc_display: int = 1
     runtime_dir: str = field(default_factory=_default_runtime_dir)
+    qga_socket_path: str = ""
+    qmp_socket_path: str = ""
+    pid_file_path: str = ""
 
     def __post_init__(self):
         self.runtime_dir=str(Path(self.runtime_dir).expanduser().absolute())
+        for name in ('qga_socket_path','qmp_socket_path','pid_file_path'):
+            value=getattr(self,name)
+            if not isinstance(value,str) or any(c in value for c in '\r\n\0'):raise ValueError('Invalid appliance control path: '+name)
+            if value:setattr(self,name,str(Path(value).expanduser().absolute()))
         if self.arch not in ('auto','arm64','x86_64') or self.hypervisor not in ('auto','hvf','kvm','whpx','tcg','direct'):
             raise ValueError('Select a supported appliance architecture and hypervisor')
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", self.name):
@@ -69,15 +76,15 @@ class ApplianceSpec:
 
     @property
     def pid_file(self) -> Path:
-        return Path(self.runtime_dir) / f"{self.name}-qemu.pid"
+        return Path(self.pid_file_path) if self.pid_file_path else Path(self.runtime_dir) / f"{self.name}-qemu.pid"
 
     @property
     def qmp_socket(self) -> Path:
-        return Path(self.runtime_dir) / f"{self.name}-qmp.sock"
+        return Path(self.qmp_socket_path) if self.qmp_socket_path else Path(self.runtime_dir) / f"{self.name}-qmp.sock"
 
     @property
     def qga_socket(self) -> Path:
-        return Path(self.runtime_dir) / f"{self.name}-qga.sock"
+        return Path(self.qga_socket_path) if self.qga_socket_path else Path(self.runtime_dir) / f"{self.name}-qga.sock"
 
     @property
     def tpm_socket(self) -> Path:
@@ -85,7 +92,7 @@ class ApplianceSpec:
 
     @property
     def qga_lock_file(self) -> Path:
-        return Path(self.runtime_dir) / f"{self.name}-qga.lock"
+        return self.qga_socket.with_suffix('.lock') if self.qga_socket_path else Path(self.runtime_dir) / f"{self.name}-qga.lock"
 
 
 @dataclass(slots=True)
@@ -112,6 +119,8 @@ class ProviderSpec:
 
 
     def __post_init__(self):
+        from enclave_gateway.security.quoting import validate_endpoint
+        validate_endpoint(self.probe_host,self.probe_port)
         for entries in (self.qualified_versions, self.qualified_architectures):
             if not isinstance(entries, list) or any(not isinstance(value, str) for value in entries):
                 raise ValueError("Qualified provider versions/architectures must be string lists")
@@ -134,8 +143,11 @@ class BastionSpec:
     parallel_streams: int = 4
     compress: bool = True
     block_size_bytes: int = 4 * 1024 * 1024
+    heartbeat_max_age_sec: int = 45
 
     def __post_init__(self):
+        if type(self.heartbeat_max_age_sec) is not int or not 5<=self.heartbeat_max_age_sec<=300:
+            raise ValueError('heartbeat_max_age_sec must be in 5..300')
         # A binary block is embedded in a script, then in the 8 MiB envelope.
         # Four MiB also fits the native worker's bounded stdin after encoding.
         if type(self.block_size_bytes) is not int or not 1 <= self.block_size_bytes <= 4 * 1024 * 1024:
@@ -265,6 +277,12 @@ class EnclaveConfig:
         app_raw = dict(raw.get("appliance") or {})
         prov_raw = dict(raw.get("provider") or {})
         bast_raw = dict(raw.get("bastion") or {})
+        if ('probe_host' not in prov_raw or prov_raw['probe_host']=='') and bast_raw.get('enabled',True):
+            prov_raw['probe_host']=bast_raw.get('host','10.0.1.10')
+        if ('probe_port' not in prov_raw or (type(prov_raw['probe_port']) is int and prov_raw['probe_port']==0)) and bast_raw.get('enabled',True):
+            prov_raw['probe_port']=bast_raw.get('port',3389)
+        if 'probe_host' in prov_raw and not prov_raw['probe_host']:
+            raise ValueError('Set provider.probe_host explicitly when Bastion is disabled')
         security_raw=dict(raw.get('security') or {})
         if set(security_raw)-set(SecuritySpec.__dataclass_fields__):
             raise ValueError('Unknown security setting')

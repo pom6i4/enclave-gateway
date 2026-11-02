@@ -34,7 +34,8 @@ python3 -m venv .venv
 
 Connect the Appliance's approved RDP session to the Bastion with drive redirection.
 **Run the command printed by `agents stage` inside that Bastion session.**
-It starts a foreground in-process worker in Standard mode: no C# compiler,
+It copies the verified scripts locally on Bastion and starts a foreground
+in-process worker in Standard mode: no C# compiler,
 additional `.exe` or code-signing certificate is needed. The existing execution
 policy must permit the scripts; WDAC/AppLocker/ConstrainedLanguage are respected.
 

@@ -394,6 +394,9 @@ class RdpVfsTransport:
         self, envelope: dict[str, Any], timeout_sec: float = 120.0
     ) -> ExecResult:
         context=current()
+        ready=getattr(self,'readiness_guard',None)
+        if ready:
+            with timed('vfs.preflight'):ready()
         evidence=self._verify_dispatch(envelope.get('op'))
         timeout_sec = budget(timeout_sec, "vfs.dispatch")
         deadline = time.monotonic() + timeout_sec
@@ -748,8 +751,8 @@ Write-Output 'MISS'
     def _cleanup_stage(self, path):
         from enclave_gateway.operations.context import owned_cleanup
         try:
-            with owned_cleanup():
-                self.control.exec_powershell(f"Remove-Item -LiteralPath '{path.replace(chr(39), chr(39)*2)}' -Force -ErrorAction SilentlyContinue", timeout_sec=2)
+            with owned_cleanup(10):
+                self.control.exec_powershell("[IO.File]::Delete("+ps_quote(path)+")", timeout_sec=10)
         except Exception:
             # An expired transport must not replace the original operation error.
             # The tx-specific spool filename remains available for later cleanup.
@@ -902,8 +905,8 @@ Write-Output 'MUX_SHUTDOWN_OK'
         if result.exit_code:
             raise ConnectionError("Failed to half-close multiplexed stream")
 
-    def close_mux_sessions(self) -> None:
-        result = self.exec_bastion("Write-Output 'MUX_CLOSED_ALL'", op="mux", extra_fields={"mux_action": "close_all"})
+    def close_mux_sessions(self, timeout_sec: float = 15) -> None:
+        result = self.exec_bastion("Write-Output 'MUX_CLOSED_ALL'", timeout_sec=timeout_sec, op="mux", extra_fields={"mux_action": "close_all"})
         if result.exit_code:
             raise ConnectionError("Failed to close worker mux sessions")
 

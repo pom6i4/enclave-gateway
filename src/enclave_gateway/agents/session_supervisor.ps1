@@ -1,6 +1,7 @@
 param(
     [string]$BastionHost = "10.0.1.10",
     [int]$BastionPort = 3389,
+    [ValidateRange(5,300)][int]$HeartbeatMaxAgeSec = 45,
     [string]$SpoolDir = "C:\EnclaveGateway\spool",
     [string]$ScheduledTaskName = "StartEnclaveBastionRDP",
     [string]$InteractiveUser = "Admin",
@@ -49,9 +50,9 @@ $conn = Get-NetTCPConnection -RemoteAddress $BastionHost -RemotePort $BastionPor
 
 $hbFresh = $false
 if (Test-Path $stateFile) {
-    $hbFresh = (((Get-Date) - (Get-Item $stateFile).LastWriteTime).TotalSeconds -lt 6)
+    $hbFresh = (((Get-Date) - (Get-Item $stateFile).LastWriteTime).TotalSeconds -lt $HeartbeatMaxAgeSec)
 } elseif (Test-Path $legacyHb) {
-    $hbFresh = (((Get-Date) - (Get-Item $legacyHb).LastWriteTime).TotalSeconds -lt 6)
+    $hbFresh = (((Get-Date) - (Get-Item $legacyHb).LastWriteTime).TotalSeconds -lt $HeartbeatMaxAgeSec)
 }
 
 if (-not $ForceReconnect -and $conn -and $hbFresh) {
@@ -71,12 +72,12 @@ for ($i = 0; $i -lt 30; $i++) {
     Start-Sleep -Seconds 1
     $conn = Get-NetTCPConnection -RemoteAddress $BastionHost -RemotePort $BastionPort -State Established -ErrorAction SilentlyContinue
     if (Test-Path $stateFile) {
-        if ($conn -and (((Get-Date) - (Get-Item $stateFile).LastWriteTime).TotalSeconds -lt 6)) {
+        if ($conn -and (((Get-Date) - (Get-Item $stateFile).LastWriteTime).TotalSeconds -lt $HeartbeatMaxAgeSec)) {
             Write-Output "SESSION_RECONNECTED"
             exit 0
         }
     } elseif (Test-Path $legacyHb) {
-        if ($conn -and (((Get-Date) - (Get-Item $legacyHb).LastWriteTime).TotalSeconds -lt 6)) {
+        if ($conn -and (((Get-Date) - (Get-Item $legacyHb).LastWriteTime).TotalSeconds -lt $HeartbeatMaxAgeSec)) {
             Write-Output "SESSION_RECONNECTED"
             exit 0
         }

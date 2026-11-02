@@ -206,8 +206,8 @@ egw agents prune --apply --remove <retired-bundle-sha256> --keep <rollback-bundl
 
 Repeat `--remove` or `--keep` for multiple generations. Keep the same age/retention
 options between preview and apply. Apply checks the complete requested set again
-under an exclusive lease before deleting. A running lease-aware worker, another
-maintenance operation, or changed eligibility makes it refuse the operation. It
+under an exclusive lease before deleting. A worker executing directly from that source generation, another
+maintenance operation, an active local copy, or changed eligibility makes it refuse the operation. It
 never stops a worker automatically. Staging and new managed workers take shared
 leases, so they cannot race an active cleanup. Older packages without this
 protocol are not adopted for automatic cleanup, even when staged again. Re-sign
@@ -245,3 +245,125 @@ and remote stderr. A Windows-hop SSH result retains its own exit code, including
 nonzero command results. SSH status 255 is ambiguous: OpenSSH uses it for client
 failures, but a remote command can also return 255. Use the diagnostic text as a
 hint, verify the channel, and reconcile indeterminate outcomes before retrying.
+
+## Existing VM control paths
+
+`appliance.name` is the identity returned by QMP `query-name`. Existing launchers
+can use unrelated control filenames; set `qga_socket_path`, `qmp_socket_path` and
+`pid_file_path` explicitly instead of making symlinks or changing the expected VM
+identity. A mismatch reports expected and actual names and fails closed. Protect
+the endpoint parents and verify that all three paths belong to that VM.
+Overrides are for attachment: `up` does not create a new VM using external endpoint
+paths, and `down` leaves their cleanup to the owner launcher.
+
+`config init` produces commented YAML with the VM identity, runtime/disk/firmware
+paths and optional endpoint overrides. An empty `provider.probe_host` follows
+`bastion.host`, and probe port zero follows `bastion.port`; an explicit probe keeps
+its configured destination. A deployment without Bastion needs an explicit probe
+when using the empty starter value. `status` reports the source address itself,
+not the string representation of a network-management object.
+
+## Start, migrate and stop a worker
+
+The printed start command copies the exact hashed bootstrap/worker pair into
+`%LOCALAPPDATA%\EnclaveGateway\agents\<digest>` on Bastion, verifies the local
+bytes and starts the local bootstrap. It holds the source bundle lease only while
+copying; the resident script does not remain loaded from the redirected drive.
+Normal endpoint policy still applies, and Windows file copy retains the source's
+alternate streams, including an Internet zone marker when present.
+
+Check `Get-ExecutionPolicy -List` on Bastion first. Undefined scopes can resolve
+to Restricted on Windows clients. For an approved Standard development session,
+`egw agents command --execution-policy RemoteSigned` prints a command with an
+explicit **process-only** setting. It refuses to weaken an effective AllSigned
+policy; Group Policy remains authoritative. This option is unavailable for signed
+profiles. There is no automatic Bypass or Unblock-File step. Use an approved signed
+package when signing or application-control policy requires one.
+
+For redirected spools, durable transaction identities live under
+`%LOCALAPPDATA%\EnclaveGateway\state\<storage-id>` on Bastion. `worker_storage.json`
+in the spool binds that local journal to its original machine/account. Keep both
+sides and include the journal in the operational backup plan. A missing or foreign
+journal prevents startup; deleting it is not a reset procedure.
+
+To upgrade a legacy redirected deployment, stop its old worker first, preserve its
+`.transactions` directory, then generate the startup command with:
+
+```sh
+egw agents stage --migrate-legacy-state
+```
+
+Review and run the printed command once in the approved Bastion session. Migration
+copies and flushes the legacy identities locally before publishing the binding,
+leaves the originals intact and does not replay old requests. Unknown/incomplete
+legacy files require reconciliation. Do not run the legacy worker again against
+that spool after migration. An older backup or a snapshot rollback also requires
+outcome reconciliation; journal identity alone does not establish backup freshness.
+Perform migration in foreground before registering persistent startup.
+
+`egw agents stop --timeout 45` requests an acknowledged graceful stop. It refuses
+while jobs or mux connections remain active, and never kills an unrelated process.
+Close those connections, let jobs finish and retry with a new operation. Its
+`WORKER_STOP_ACCEPTED` receipt is an acknowledgement; observe stopped status before
+starting the printed command again. A mutex and an exclusive spool session lease
+reject duplicate workers. Reinstall/re-sign changed Enterprise scripts and update
+approved pins before using them.
+
+## WAN RDP behavior and cleanup
+
+The worker uses direct .NET file operations on the redirected spool. It scans the
+directory once per recovery pass and uses a bounded advisory `request_index.json`
+to open new request/cancel files by name. The index is an optimization: the
+individual envelopes and durable identities remain authoritative. Missing, corrupt
+or overwritten hints are recovered by a periodic full scan (five seconds after
+hints have been observed). Older publishers retain the scan-based path.
+
+Heartbeat telemetry includes loop/scan timing and journal location. Publication
+defaults to five seconds. The default
+freshness allowance is 45 seconds, configurable as `bastion.heartbeat_max_age_sec`
+(5–300). Readiness is checked before publication; an absent/stale/stopped worker
+returns `session_pending_worker` without queuing a command. Freshness is a liveness
+hint, not signed identity, and a ready worker can still disconnect after preflight.
+Enterprise continues to require fresh attestation before protected dispatch.
+
+Transfers do not enqueue unconditional two-second VFS cleanup requests. Hop-spool
+stages use direct controller cleanup; remote temporary-file cleanup belongs to
+the existing transfer command where possible. Interrupted transfers can still
+leave owned staging files for later reconciliation.
+
+`egw clean` attempts local Appliance cleanup first, even if Bastion is unavailable.
+It atomically claims expired, unclaimed requests before removing them, removes
+eligible orphan cancels/old responses and retains fresh transfer chunks. Processing
+files are deferred unless the supported local-journal protocol and an exclusive
+session lease establish that no worker is running. Durable journals, agent
+bundles and unrelated files are preserved. Output reports partial cleanup and
+`deferred_processing`; a failed tier gives a nonzero exit code. It is not a blanket
+spool deletion command.
+
+The ViPNet adapter includes Mobile installation candidates and `info`, guarded by
+exact configured version, architecture and trusted publisher matching. These are
+probe candidates, not evidence that every Client version/driver/architecture is
+qualified. No license, key import or provider installation is performed.
+
+## Repeat a field measurement
+
+Use a separate checkout/venv at the exact candidate commit and a private config.
+Keep the existing support bridge available until acceptance and rollback have
+been checked. The operator-run probe preserves each timing and stores no command
+output, topology or credentials in its result receipt:
+
+```sh
+python3 scripts/qualification/field_probe.py \
+  --egw /path/to/venv/bin/egw --config /path/to/enclave.yaml \
+  --source-sha <full-tested-commit> --node app01 \
+  --output /path/to/private/new-probe --samples 5 --parallel 4
+```
+
+`--copy-root /tmp` additionally writes, reads, verifies and deletes one uniquely
+named synthetic TargetNode file; supply an approved scratch directory for that
+OS. Earlier output is never overwritten. The declared commit is operator supplied;
+the launcher's hash does not attest an installed package. Compare individual
+samples and tails under the same RDP conditions. Do not infer WAN latency from a
+local or delayed-loopback sample. Test tunnels, long transfers and controlled RDP
+loss/recovery separately before replacing an operational bridge; this probe does
+not disconnect a session or switch the environment automatically.

@@ -63,7 +63,10 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument('--output',type=Path,default=Path('enclave.yaml'))
     config_actions.add_parser('check',help='Validate configuration and show effective security settings.')
     agents=sub.add_parser('agents',help='Stage an immutable worker bundle or print its Bastion startup command.')
-    agents.add_argument('agents_action',choices=['stage','command','prune'])
+    agents.add_argument('agents_action',choices=['stage','command','prune','stop'])
+    agents.add_argument('--execution-policy',choices=['RemoteSigned'],default='',help='Explicit process-only Standard startup option; never weakens AllSigned or Group Policy.')
+    agents.add_argument('--migrate-legacy-state',action='store_true',help='Approve one-time journal migration after stopping the old worker.')
+    agents.add_argument('--timeout',type=float,default=45,help='Stop request budget in seconds.')
     agents.add_argument('--apply',action='store_true',help='Apply explicit reviewed --remove IDs; requires stopped lease-aware workers.')
     agents.add_argument('--remove',action='append',default=[],help='Exact bundle SHA-256 to remove; repeat as needed.')
     agents.add_argument('--keep',action='append',default=[],help='Additional bundle SHA-256 to retain.')
@@ -524,8 +527,8 @@ def _main(argv: list[str] | None = None) -> int:
         print(f"Secret '{args.key}' stored in OS credential store.");return 0
 
     if args.command=='config' and args.config_action=='init':
-        from enclave_gateway.onboarding import starter_configuration
-        data=(json.dumps(starter_configuration(args.mode),indent=2)+'\n').encode()
+        from enclave_gateway.onboarding import starter_yaml
+        data=starter_yaml(args.mode).encode()
         descriptor=os.open(args.output,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
         with os.fdopen(descriptor,'wb') as output:output.write(data)
         print(json.dumps({'created':str(args.output),'mode':args.mode,'next_step':'Edit topology, then run egw config check. Enterprise placeholders must be replaced with approved release pins.'}))
@@ -551,9 +554,13 @@ def _main(argv: list[str] | None = None) -> int:
         result=preflight(cfg);print(json.dumps(result,indent=2));return 0 if result['healthy'] else 1
     if args.command=='agents' and args.agents_action!='prune' and (args.apply or args.remove or args.keep or args.min_age_hours!=168):
         parser.error('Maintenance flags require agents prune')
+    if args.command=='agents' and args.agents_action not in ('stage','command') and (args.execution_policy or args.migrate_legacy_state):
+        parser.error('Startup options require agents stage or command')
+    if args.command=='agents' and args.agents_action!='stop' and args.timeout!=45:
+        parser.error('--timeout requires agents stop')
     if args.command=='agents' and args.agents_action=='command':
         from enclave_gateway.onboarding import agent_bundle
-        print(agent_bundle(cfg)[3]);return 0
+        print(agent_bundle(cfg,execution_policy=args.execution_policy,migrate_legacy_state=args.migrate_legacy_state)[3]);return 0
     if args.command=='mcp' and cfg.security.mode=='enterprise':
         if not args.policy or (not args.read_only and not args.isolation_map and not args.worker_identity_handshake):
             raise ValueError('Enterprise MCP requires --policy and, for mutable service, --isolation-map. See docs/SECURITY.md.')
@@ -738,7 +745,11 @@ def _main(argv: list[str] | None = None) -> int:
     if args.command=='agents':
         if args.agents_action=='prune':
             print(json.dumps(engine.prune_agents(remove=args.remove,keep=args.keep,min_age_hours=args.min_age_hours,apply=args.apply),indent=2))
-        else:print(json.dumps(engine.stage_agents(),indent=2))
+        elif args.agents_action=='stop':
+            result=engine.stop_worker(timeout_sec=args.timeout)
+            print(json.dumps({'exit_code':result.exit_code,'stdout':result.stdout,'stderr':result.stderr,'tx_id':result.tx_id}))
+            return result.exit_code
+        else:print(json.dumps(engine.stage_agents(execution_policy=args.execution_policy,migrate_legacy_state=args.migrate_legacy_state),indent=2))
         return 0
 
     if args.command == "doctor":
@@ -767,7 +778,7 @@ def _main(argv: list[str] | None = None) -> int:
     if args.command == "clean":
         summary = engine.clean_session(actor="cli")
         print(json.dumps(summary, indent=2, ensure_ascii=False))
-        return 0
+        return 0 if summary['appliance_cleaned'] and summary['bastion_cleaned'] else 1
 
     if args.command == "reset":
         engine.hypervisor.restore_snapshot(args.snapshot)
