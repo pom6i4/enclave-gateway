@@ -74,3 +74,5 @@ The upstream [QEMU build configuration](https://github.com/qemu/qemu/blob/master
 The [isolated acceptance record](AUTONOMOUS_ACCEPTANCE_2026-11-01.md) lists observed results, failed observers, provenance and remaining boundaries.
 
 The [final-source blank-disk acceptance](FRESH_INSTALL_ACCEPTANCE_2026-11-02.md) closes the subsequent full-installation check for the final readiness ordering, including actual task absence on first boot, full VM/TPM poweroff, unchanged preparation records on the next boot and one security request per boot at the existing deadline.
+
+The [four-item autonomous closure](AUTONOMOUS_CLOSURE_2026-11-02.md) records crash-safe preparation recovery, disposable issued PKI, v1 migration and the final whole-command blank-disk lifecycle with cleanup, including retained failures and qualification limits.

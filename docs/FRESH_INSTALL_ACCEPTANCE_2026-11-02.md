@@ -1,5 +1,7 @@
 # Final-source blank-disk installation acceptance — 2026-11-02
 
+The subsequent [four-item autonomous closure](AUTONOMOUS_CLOSURE_2026-11-02.md) records preparation recovery, issued PKI, migration and whole-command lifecycle acceptance on source `2acb86f`. This record retains its original source and results.
+
 **PASS.** The remaining blank-disk installation check is closed for product source commit `44a3af137815a07a6329ff5104ee8fe62b1566cd`. A new isolated Windows Server 2025 Standard Evaluation x64 installation completed using the final startup-task/readiness-ordering implementation. No product changes or manual guest intervention were needed.
 
 ## Scope and results
