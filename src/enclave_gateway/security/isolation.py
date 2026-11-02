@@ -78,7 +78,7 @@ class Backend:
             helper=verified_runtime(spec['runtime_helper'],spec.get('trusted_signers',()),True,expected_sha256=spec['runtime_sha256'])
             if vault is None: raise ValueError('Backend logon requires the broker vault')
             request={'command':command,'expected_sid':expected[4:],'username':spec['username'],'domain':spec.get('domain','.'),
-                     'password':vault.get(spec['password_env'])}
+                     'password':vault.get(spec['password_env']),'environment':dict(spec.get('environment',{}))}
             command=[helper,'run-as']
         self.process=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
                                       text=True,encoding="utf-8",bufsize=1,env=environment,start_new_session=(os.name!='nt'),**options)
@@ -168,7 +168,7 @@ class Backend:
 
 class PrincipalRouter:
     def __init__(self,path,*,vault=None,policy=None):
-        raw=json.loads(Path(path).read_text())
+        raw=json.loads(Path(path).read_text(encoding='utf-8-sig'))
         if set(raw)!={'principals'} or not raw['principals']: raise ValueError('Invalid isolation map')
         self.specs=raw['principals']; self.vault=vault; self._backends={}; self._lock=threading.Lock()
         identities=[spec['identity'] for spec in self.specs.values()]

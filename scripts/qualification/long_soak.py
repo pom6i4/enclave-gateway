@@ -14,6 +14,7 @@ from tempfile import TemporaryDirectory
 ROOT=Path(__file__).resolve().parents[2]
 sys.path[:0]=[str(Path(__file__).resolve().parent),str(ROOT/'src')]
 from worker_loopback import EchoServer, Worker, read_shared
+from lab_artifacts import worker_artifact
 from enclave_gateway.security.attestation import verify
 
 
@@ -29,11 +30,12 @@ def run(args):
     args.output.parent.mkdir(parents=True,exist_ok=True)
     write_report(args.output,report)
     with TemporaryDirectory(prefix='egw-long-soak-') as folder:
-        root=Path(folder);worker=Worker(args.powershell,root,args.runtime,False,args.trusted_signer,startup_timeout_sec=120)
+        artifact=worker_artifact(getattr(args,'worker',None))
+        root=Path(folder);worker=Worker(args.powershell,root,args.runtime,False,args.trusted_signer,startup_timeout_sec=120,worker_path=artifact)
         fast,slow=EchoServer(),EchoServer(silent=True)
         try:
             worker.start();transport=worker.transport
-            worker_hash=hashlib.sha256((Path(__file__).resolve().parents[2]/'src/enclave_gateway/agents/bastion_worker.ps1').read_bytes()).hexdigest()
+            worker_hash=hashlib.sha256(artifact.read_bytes()).hexdigest()
             runtime_hash=hashlib.sha256(args.runtime.read_bytes()).hexdigest()
             def guard():
                 nonce=secrets.token_hex(32)
@@ -104,6 +106,7 @@ def run(args):
 if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('--powershell',required=True);p.add_argument('--runtime',required=True,type=Path)
     p.add_argument('--trusted-signer',required=True);p.add_argument('--seconds',type=int,default=7200)
+    p.add_argument('--worker',type=Path,help='Signed lab copy with the exact current source body')
     p.add_argument('--streams',type=int,default=128);p.add_argument('--output',required=True,type=Path);a=p.parse_args()
     if os.name!='nt':p.error('Use an isolated Windows guest')
     if not 180<=a.seconds<=7200 or not 8<=a.streams<=128:p.error('seconds must be 180..7200 and streams 8..128')

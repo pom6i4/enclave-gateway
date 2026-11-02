@@ -41,3 +41,17 @@ class RouterPreflightTests(unittest.TestCase):
             file.write_text(json.dumps({'principals':original}))
             cfg=Path(original['bob']['config']);data=json.loads(cfg.read_text());data['bastion']['appliance_spool_dir']=r'C:\lab\alice';cfg.write_text(json.dumps(data))
             with self.assertRaises(ValueError): PrincipalRouter(file,policy=policy)
+
+    def test_windows_utf8_bom_maps_policies_and_unicode_config_load_consistently(self):
+        from enclave_gateway.config import EnclaveConfig
+        with TemporaryDirectory() as temp:
+            file,mapping,policy=self.fixture(Path(temp))
+            file.write_text(file.read_text(),encoding='utf-8-sig')
+            for spec in mapping.values():
+                config=Path(spec['config']);value=json.loads(config.read_text());value['profile']='fixture-тест'
+                config.write_text(json.dumps(value,ensure_ascii=False),encoding='utf-8-sig')
+                p=Path(spec['policy']);p.write_text(p.read_text(),encoding='utf-8-sig')
+                self.assertEqual(EnclaveConfig.load(config).profile,'fixture-тест')
+            router=PrincipalRouter(file,policy=policy)
+            self.assertEqual(router._backends,{})
+            router.close()

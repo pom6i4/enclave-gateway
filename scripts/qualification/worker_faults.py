@@ -13,6 +13,7 @@ from tempfile import TemporaryDirectory
 ROOT=Path(__file__).resolve().parents[2]
 sys.path[:0]=[str(ROOT/'src'),str(Path(__file__).resolve().parent)]
 from worker_loopback import Worker
+from lab_artifacts import worker_artifact
 from enclave_gateway.config import EnclaveConfig
 from enclave_gateway.engine import EnclaveEngine
 from enclave_gateway.audit.flight_recorder import FlightRecorder
@@ -27,12 +28,13 @@ def run(args):
     args.output.parent.mkdir(parents=True,exist_ok=True)
     try:
         with TemporaryDirectory(prefix='egw-worker-faults-') as folder:
-            root=Path(folder);worker=Worker(args.powershell,root,args.runtime,False,args.trusted_signer,startup_timeout_sec=120)
+            artifact=worker_artifact(getattr(args,'worker',None))
+            root=Path(folder);worker=Worker(args.powershell,root,args.runtime,False,args.trusted_signer,startup_timeout_sec=120,worker_path=artifact)
             try:
                 worker.start()
                 cfg=EnclaveConfig.from_dict({'appliance':{'hypervisor':'direct'},'provider':{'type':'custom'},
                     'bastion':{'appliance_spool_dir':str(worker.spool),'bastion_spool_dir':str(worker.spool)},
-                    'security':{'worker_sha256':hashlib.sha256((ROOT/'src/enclave_gateway/agents/bastion_worker.ps1').read_bytes()).hexdigest(),
+                    'security':{'worker_sha256':hashlib.sha256(artifact.read_bytes()).hexdigest(),
                         'runtime_sha256':hashlib.sha256(args.runtime.read_bytes()).hexdigest(),'trusted_signers':[args.trusted_signer],
                         'enforce_worker_attestation':True,'require_process_isolation':True}})
                 engine=EnclaveEngine(cfg,control_override=worker.transport.control,vault=SecretVault(env_file=root/'absent.env'),recorder=FlightRecorder(root/'audit.jsonl'))
@@ -105,4 +107,5 @@ def run(args):
 if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('--powershell',required=True);p.add_argument('--runtime',required=True,type=Path)
     p.add_argument('--trusted-signer',required=True);p.add_argument('--output',required=True,type=Path)
+    p.add_argument('--worker',type=Path,help='Signed lab copy with the exact current source body')
     print(json.dumps(run(p.parse_args()),indent=2))

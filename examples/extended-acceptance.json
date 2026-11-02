@@ -1,0 +1,122 @@
+{
+  "revision": 1,
+  "scope": "isolated-extended-acceptance",
+  "expected_source_tests": 170,
+  "inputs_sha256": {
+    "/path/to/private/disposable-controller.py": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "steps": [
+    {
+      "role": "windows-arm64-source",
+      "argv": [
+        "{python}",
+        "/path/to/private/disposable-controller.py",
+        "windows-arm64-source",
+        "{run_dir}/windows-arm64-source"
+      ],
+      "timeout_sec": 1800
+    },
+    {
+      "role": "windows-x64-source",
+      "argv": [
+        "{python}",
+        "/path/to/private/disposable-controller.py",
+        "windows-x64-source",
+        "{run_dir}/windows-x64-source"
+      ],
+      "timeout_sec": 1800
+    },
+    {
+      "role": "windows-accounts",
+      "argv": [
+        "{python}",
+        "/path/to/private/disposable-controller.py",
+        "windows-accounts",
+        "{run_dir}/windows-accounts"
+      ],
+      "timeout_sec": 1200
+    },
+    {
+      "role": "posix-accounts",
+      "argv": [
+        "{python}",
+        "/path/to/private/disposable-controller.py",
+        "posix-accounts",
+        "{run_dir}/posix-accounts"
+      ],
+      "timeout_sec": 600
+    },
+    {
+      "role": "qga-faults",
+      "argv": [
+        "{python}",
+        "/path/to/private/disposable-controller.py",
+        "qga-faults",
+        "{run_dir}/qga-faults"
+      ],
+      "timeout_sec": 600
+    },
+    {
+      "role": "worker-faults",
+      "argv": [
+        "{python}",
+        "/path/to/private/disposable-controller.py",
+        "worker-faults",
+        "{run_dir}/worker-faults"
+      ],
+      "timeout_sec": 600
+    },
+    {
+      "role": "storage-faults",
+      "argv": [
+        "{python}",
+        "/path/to/private/disposable-controller.py",
+        "storage-faults",
+        "{run_dir}/storage-faults"
+      ],
+      "timeout_sec": 600
+    },
+    {
+      "role": "rdp-transfer-disconnect",
+      "argv": [
+        "{python}",
+        "/path/to/private/disposable-controller.py",
+        "rdp-transfer-disconnect",
+        "{run_dir}/rdp-transfer-disconnect"
+      ],
+      "timeout_sec": 900
+    },
+    {
+      "role": "generated-security",
+      "argv": [
+        "{python}",
+        "/path/to/private/disposable-controller.py",
+        "generated-security",
+        "{run_dir}/generated-security"
+      ],
+      "timeout_sec": 600
+    },
+    {
+      "role": "long-soak",
+      "argv": [
+        "{python}",
+        "/path/to/private/disposable-controller.py",
+        "long-soak",
+        "{run_dir}/long-soak"
+      ],
+      "timeout_sec": 8400
+    }
+  ],
+  "cleanup": [
+    {
+      "role": "owned-resources-cleanup",
+      "argv": [
+        "{python}",
+        "/path/to/private/disposable-controller.py",
+        "cleanup",
+        "{run_dir}/owned-resources-cleanup"
+      ],
+      "timeout_sec": 900
+    }
+  ]
+}

@@ -102,7 +102,7 @@ class AccessPolicy:
 
     @classmethod
     def load(cls, path: Path):
-        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        raw = json.loads(Path(path).read_text(encoding="utf-8-sig"))
         if not isinstance(raw, dict) or set(raw) != {"principals"} or not isinstance(raw["principals"], dict):
             raise ValueError("Policy must contain a principals mapping")
         grants = {}

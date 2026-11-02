@@ -112,7 +112,8 @@ def windows_checks(folder,package,pki,output):
         atomic_json(output/'windows-final-cleanup.json',{'status':'passed','vm':'stopped','software_tpm':'stopped','storage':'retained'})
 
 
-def run(manifest_path,output,host_only=False):
+def run(manifest_path,output,host_only=False,extended_manifest=None):
+    if host_only and extended_manifest:raise ValueError('Extended acceptance requires the full profile')
     manifest_path=manifest_path.resolve();output=output.resolve()
     if output.exists():raise FileExistsError('Preserve previous acceptance runs')
     output.mkdir(parents=True,mode=0o700);output.chmod(0o700)
@@ -162,6 +163,8 @@ def run(manifest_path,output,host_only=False):
             pki=step('build-disposable-authority',lambda:build_pki(toolchain,output/'pki-build',rid))
             step('new-disk-full-lifecycle',lambda:command('windows-install',args,env,timeout=9000))
             step('windows-pki-migration-and-crash-recovery',lambda:windows_checks(output/'windows',output/'builds/first/artifacts'/rid,pki,output))
+        if extended_manifest:
+            step('extended-runtime-acceptance',lambda:command('extended-runtime',[python,str(ROOT/'scripts/qualification/extended_acceptance.py'),'--manifest',str(Path(extended_manifest).resolve()),'--output',str(output/'extended')],env,timeout=14400))
         step('hygiene',lambda:command('hygiene',[python,str(ROOT/'scripts/verify_hygiene.py')],env))
         report['status']='passed'
     except BaseException as e:report.update(status='failed',error_type=type(e).__name__);raise
@@ -190,5 +193,5 @@ def run(manifest_path,output,host_only=False):
 
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('--manifest',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--host-only',action='store_true');a=p.parse_args()
-    print(json.dumps(run(a.manifest,a.output,a.host_only),indent=2))
+    p=argparse.ArgumentParser();p.add_argument('--manifest',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--host-only',action='store_true');p.add_argument('--extended-manifest',type=Path);a=p.parse_args()
+    print(json.dumps(run(a.manifest,a.output,a.host_only,a.extended_manifest),indent=2))

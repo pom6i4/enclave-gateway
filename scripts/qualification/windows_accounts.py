@@ -78,6 +78,20 @@ def run(configuration: Path):
                 denied_sync=call(name,12,'node_sync',{'direction':'push','local_dir':fixture['source'],'node':'fixture','remote_dir':str(Path(other['canary']).parent)})
                 assert 'error' in denied_sync,denied_sync
             spec=backend.spec
+            # The account receives only its profile environment and explicitly
+            # configured values, never the broker process's ambient state.
+            request={'command':[spec['python'],'-c',"import os,json,hashlib;from pathlib import Path;import enclave_gateway.security.isolation as module;print(json.dumps({'profile':os.environ.get('EGW_PROFILE'),'unicode':os.environ.get('EGW_UNICODE'),'broker_present':'EGW_BROKER_ONLY' in os.environ,'isolation_sha256':hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()}))"],
+                     'username':spec['username'],'domain':spec.get('domain','.'),'password':vault.get(spec['password_env']),
+                     'expected_sid':spec['identity'][4:],'environment':{**spec.get('environment',{}),'EGW_PROFILE':name,'EGW_UNICODE':'fixture-тест😀'}}
+            isolated=subprocess.run([spec['runtime_helper'],'run-as'],input=json.dumps(request)+'\n',text=True,encoding='utf-8',capture_output=True,timeout=30,
+                                    env={**os.environ,'EGW_BROKER_ONLY':'disposable-broker-marker'})
+            assert isolated.returncode==0 and json.loads(isolated.stdout)=={'profile':name,'unicode':'fixture-тест😀','broker_present':False,
+                    'isolation_sha256':hashlib.sha256((ROOT/'src/enclave_gateway/security/isolation.py').read_bytes()).hexdigest()}
+            request['command']=[spec['python'],'-c',"print('forbidden-environment-launch')"]
+            for invalid in ({'Path':'first','PATH':'second'},{'BAD=NAME':'invalid'},{'BAD':'nul\0value'}):
+                request['environment']=invalid
+                rejected=subprocess.run([spec['runtime_helper'],'run-as'],input=json.dumps(request)+'\n',text=True,encoding='utf-8',capture_output=True,timeout=30)
+                assert rejected.returncode and 'forbidden-environment-launch' not in rejected.stdout
             request={'command':[spec['python'],'-c',"print('forbidden-launch')"], 'username':spec['username'],
                      'domain':spec.get('domain','.'),'password':vault.get(spec['password_env']),'expected_sid':'S-1-5-18'}
             rejected=subprocess.run([spec['runtime_helper'],'run-as'],input=json.dumps(request)+'\n',text=True,encoding='utf-8',capture_output=True,timeout=30)
@@ -91,6 +105,8 @@ def run(configuration: Path):
                 'private_environment_and_state': 'configured', 'own_target_sid': 'passed',
                 'cross_account_acl_denial': 'passed', 'private_environment_acl_denial':'passed',
                 'wrong_sid_launch_denial':'passed','large_ssh_stdin':'passed', 'controller_execution_denial': 'passed',
+                'explicit_environment_without_broker_leak':'passed',
+                'invalid_environment_rejected':'passed',
                 'scoped_windows_sync':'passed' if all('sync' in raw['fixtures'][name] for name in names) else 'not_configured',
                 'customer_environment': 'not_used'}
     finally:

@@ -151,3 +151,7 @@ licensed provider interoperability. Those boundaries remain separate.
 The [2026-11-02 qualification report](REPRODUCIBLE_QUALIFICATION_2026-11-02.md)
 records a completed full run, the four-platform installed matrix, retained
 counterexamples, exact unsigned SBOM and acceptance boundaries.
+
+The [extended runtime profile](EXTENDED_ACCEPTANCE.md) adds source-bound Windows
+source suites, account isolation, actual fault/RDP cases, generated security
+models and the complete two-hour mixed workload.

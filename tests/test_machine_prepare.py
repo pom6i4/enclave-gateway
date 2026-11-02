@@ -133,10 +133,15 @@ function Unregister-ScheduledTask {
             command=[os.environ['EGW_TEST_POWERSHELL'],'-NoProfile','-EncodedCommand',base64.b64encode(loader.encode('utf-16le')).decode()]
             with subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE) as process:
                 try:
-                    deadline=time.monotonic()+30
+                    observer=float(os.environ.get('EGW_TEST_CRASH_OBSERVER_SEC','30'))
+                    self.assertTrue(30<=observer<=240,'Crash checkpoint observer must be within 30..240 seconds')
+                    deadline=time.monotonic()+observer
                     while not (root/'deleted').exists():
-                        if process.poll() is not None or time.monotonic()>deadline:
+                        if process.poll() is not None:
                             raise AssertionError(process.communicate(timeout=2))
+                        if time.monotonic()>deadline:
+                            process.kill();output,error=process.communicate(timeout=5)
+                            self.fail(f'Crash checkpoint not observed within {observer}s: '+(output+error).decode('utf-8','replace'))
                         time.sleep(.02)
                     process.kill();process.communicate(timeout=5)
                 finally:

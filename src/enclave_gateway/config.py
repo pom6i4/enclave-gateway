@@ -304,7 +304,7 @@ class EnclaveConfig:
             raise FileNotFoundError(f"Configuration file not found: {path}")
         for candidate in candidates:
             if candidate.is_file():
-                text = candidate.read_text(encoding="utf-8")
+                text = candidate.read_text(encoding="utf-8-sig")
                 data = parse_yaml_or_json(text)
                 return cls.from_dict(data)
         return cls()

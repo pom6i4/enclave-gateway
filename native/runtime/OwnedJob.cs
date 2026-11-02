@@ -45,10 +45,50 @@ internal static class OwnedJob
             try
             {
                 if(!CreateEnvironmentBlock(out var environment,token,false)) throw new Win32Exception();
-                try {return RunCore(value,token,environment);} finally {DestroyEnvironmentBlock(environment);}
+                try
+                {
+                    if(!value.TryGetProperty("environment",out var configured)) return RunCore(value,token,environment);
+                    var block=ConfiguredEnvironment(environment,configured);
+                    var pointer=Marshal.StringToHGlobalUni(block);
+                    try {return RunCore(value,token,pointer);}
+                    finally
+                    {
+                        for(int i=0;i<block.Length;i++) Marshal.WriteInt16(pointer,i*2,0);
+                        Marshal.FreeHGlobal(pointer);
+                    }
+                }
+                finally {DestroyEnvironmentBlock(environment);}
             }
             finally {UnloadUserProfile(token,profile.Profile);}
         }
+    }
+    static string ConfiguredEnvironment(IntPtr profile,JsonElement configured)
+    {
+        if(configured.ValueKind!=JsonValueKind.Object) throw new IOException("Invalid configured environment");
+        var values=new SortedDictionary<string,string>(StringComparer.OrdinalIgnoreCase);
+        int offset=0;
+        while(Marshal.ReadInt16(profile,offset)!=0)
+        {
+            string entry=Marshal.PtrToStringUni(IntPtr.Add(profile,offset))!;
+            int separator=entry.IndexOf('=',entry.StartsWith('=')?1:0);
+            if(separator<1) throw new IOException("Invalid profile environment");
+            values[entry[..separator]]=entry[(separator+1)..];
+            offset=checked(offset+(entry.Length+1)*2);
+            if(offset>2*1024*1024) throw new IOException("Profile environment limit exceeded");
+        }
+        var names=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach(var property in configured.EnumerateObject())
+        {
+            string name=property.Name;
+            if(names.Count>=128 || name.Length is <1 or >256 || name.IndexOfAny(new[]{'\0','='})>=0 || !names.Add(name) || property.Value.ValueKind!=JsonValueKind.String)
+                throw new IOException("Invalid configured environment entry");
+            string content=property.Value.GetString()!;
+            if(content.Length>32767 || content.Contains('\0')) throw new IOException("Invalid configured environment value");
+            values[name]=content;
+        }
+        string block=string.Join('\0',values.Select(pair=>pair.Key+"="+pair.Value))+"\0\0";
+        if(block.Length>1024*1024) throw new IOException("Configured environment limit exceeded");
+        return block;
     }
     [StructLayout(LayoutKind.Sequential)] struct SecurityAttributes {public int Length;public IntPtr Descriptor;public int Inherit;}
     [DllImport("kernel32.dll",SetLastError=true)] static extern bool CreatePipe(out SafeFileHandle read,out SafeFileHandle write,ref SecurityAttributes attributes,uint size);
