@@ -136,3 +136,11 @@ source after an onboarding or documentation change.
 See [maintainer qualification](../contrib/qualification/README.md) for reproducible
 commands and evidence handling. For dependency upgrades, review the trusted tool
 chain, runtime behavior and release materials again.
+
+Agent-generation cleanup uses shared worker/staging leases and an exclusive
+maintenance lease, and only recognizes unchanged generations with the supported
+cleanup receipt. It trusts Windows file-sharing semantics through the redirected
+drive and the protected spool owner. Legacy workers are not certified by a stale
+heartbeat and their generations are never automatically adopted for deletion.
+Support snapshots use an allow-list rather than copying and attempting to redact
+arbitrary logs; review their digest before saving and sharing them.

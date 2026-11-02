@@ -4,6 +4,7 @@ param(
     [string]$BastionHost = "10.0.1.10",
     [int]$BastionPort = 3389,
     [int]$LocalProxyPort = 33890,
+    [switch]$SkipBastion,
     [int64]$HostEpochUtc = 0,
     [string]$RoutesCsv = "",
     [string]$DnsServersCsv = "",
@@ -28,6 +29,7 @@ if ($HostEpochUtc -gt 0) {
 }
 
 # 2. Disable RDP-over-UDP and idle session timeouts to prevent UDP fragmentation drops and rdpdr unmounts
+if (-not $SkipBastion) {
 $tsPolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
 $rdpClientPolicy = "$tsPolicy\Client"
 foreach ($p in @($tsPolicy, $rdpClientPolicy)) {
@@ -40,6 +42,7 @@ Set-ItemProperty -Path $tsPolicy -Name "MaxIdleTime" -Value 0 -Type DWord -Error
 Set-ItemProperty -Path $tsPolicy -Name "MaxDisconnectionTime" -Value 0 -Type DWord -ErrorAction SilentlyContinue
 & powercfg.exe /change standby-timeout-ac 0 2>$null | Out-Null
 & powercfg.exe /change monitor-timeout-ac 0 2>$null | Out-Null
+}
 
 # 3. Enforce persistent MTU on VPN and primary Ethernet interfaces to prevent PMTUD blackholes
 foreach ($iface in @($AdapterName, "Ethernet")) {
@@ -64,8 +67,10 @@ if ($DnsServersCsv) {
 }
 
 # 5. Configure local TCP portproxy for Bastion RDP forwarding
+if (-not $SkipBastion) {
 & netsh.exe interface portproxy delete v4tov4 listenport=$LocalProxyPort listenaddress=0.0.0.0 2>$null | Out-Null
 & netsh.exe interface portproxy add v4tov4 listenport=$LocalProxyPort listenaddress=0.0.0.0 connectport=$BastionPort connectaddress=$BastionHost | Out-Null
+}
 
 # 6. Optional silent installation of VPN client MSI and key deployment
 if ($MsiPath -and (Test-Path $MsiPath)) {

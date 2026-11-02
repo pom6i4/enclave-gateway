@@ -4,7 +4,6 @@ import hashlib
 import json
 from pathlib import Path
 import secrets
-from enclave_gateway.config import EnclaveConfig, SecuritySpec
 from enclave_gateway.operations.context import mark_dispatched
 from enclave_gateway.security.quoting import ps_quote
 
@@ -32,13 +31,15 @@ def configuration_summary(config):
             seen.add(node);node=config.targets[node].via.lstrip('@')
         routes[name]='appliance' if node=='appliance' else 'bastion'
         if routes[name]=='bastion' and not config.bastion.enabled:raise ValueError('Target route needs bastion.enabled: true: '+name)
-    next_steps=['egw agents stage (or egw heal) to deliver the worker'] if security.mode!='custom' else ['Custom defaults retained: choose a named mode for agent deployment, or keep your existing manual deployment.']
+    next_steps=[]
+    if config.bastion.enabled:
+        next_steps=['egw agents stage (or egw heal) to deliver the worker'] if security.mode!='custom' else ['Custom defaults retained: choose a named mode for agent deployment, or keep your existing manual deployment.']
+        next_steps.append('Start the printed command in the Bastion RDP session')
     return {'valid':True,'security_mode':security.mode,'targets':list(config.targets),'ssh_execution_hops':routes,
             'execution_model':'owned-process-job' if security.require_process_isolation else 'in-process-runspace',
             'signed_agents':security.require_signed_agents,'signed_helpers':security.require_signed_helpers,
             'worker_attestation':security.enforce_worker_attestation,'owned_ssh_commands':security.owned_ssh_commands,
             'next_steps':next_steps+[
-                          'Start the printed command in the Bastion RDP session',
                           'Provision verified known_hosts and SSH keys on the executing hop',
                           'egw doctor --probe-targets'],
             'trust_boundary':'Standard trusts the local operator and RDP session; it does not isolate hostile commands.'
@@ -46,6 +47,7 @@ def configuration_summary(config):
 
 
 def agent_bundle(config):
+    if not config.bastion.enabled:raise ValueError('Agent deployment requires bastion.enabled: true')
     security=config.security
     if security.mode=='custom':raise ValueError('Agent deployment requires explicit security.mode: standard or enterprise; custom configurations are unchanged.')
     signed=security.require_signed_agents or security.mode=='enterprise'
@@ -84,7 +86,14 @@ function Assert-LocalDirectory([string]$path){
  while($p){if($p.Exists -and ($p.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Reparse-point agent directory rejected'};$p=$p.Parent}
 }
 '''
-    execute(guard+"Assert-LocalDirectory "+ps_quote(root)+";[void][IO.Directory]::CreateDirectory("+ps_quote(root)+");[void][IO.Directory]::CreateDirectory("+ps_quote(temporary)+")")
+    execute(guard+"Assert-LocalDirectory "+ps_quote(root)+";[void][IO.Directory]::CreateDirectory("+ps_quote(root)+")\n"+
+            '$lock='+ps_quote(root+'\\.bundle-lease')+r'''
+if(-not (Test-Path -LiteralPath $lock)){
+ try{$f=[IO.File]::Open($lock,[IO.FileMode]::CreateNew,[IO.FileAccess]::ReadWrite,[IO.FileShare]::Read);$f.Dispose()}
+ catch{if(-not (Test-Path -LiteralPath $lock)){throw}}
+}
+if((Get-Item -LiteralPath $lock -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Linked bundle lease rejected'}
+'''+ '[void][IO.Directory]::CreateDirectory('+ps_quote(temporary)+')')
     try:
         for name,data in files.items():control.write_bytes(data,temporary+'\\'+name)
         expected=json.dumps(hashes,separators=(',',':'))
@@ -99,7 +108,11 @@ function Assert-Bundle([string]$folder){
         if config.security.require_signed_agents:
             trusted=','.join(ps_quote(t.replace(' ','').upper()) for t in config.security.trusted_signers)
             checks+="$s=Get-AuthenticodeSignature -LiteralPath $p;if($s.Status -ne 'Valid' -or $s.SignerCertificate.Thumbprint -notin @("+trusted+")){throw 'Untrusted agent publisher'}\n"
-        checks+='}}\nAssert-Bundle $stage\nif(Test-Path -LiteralPath $target){Assert-Bundle $target}else{[IO.Directory]::Move($stage,$target)}\n'
+        checks+='}}\n$lease=[IO.File]::Open('+ps_quote(root+'\\.bundle-lease')+',[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)\ntry {\nAssert-Bundle $stage\n'
+        if b'# EGW_BUNDLE_LEASE_V1' in files['bastion_worker.ps1']:
+            receipt=json.dumps({'protocol':1,'bundle_sha256':identity,'files':hashes},sort_keys=True)
+            checks+='[IO.File]::WriteAllText((Join-Path $stage \'bundle.json\'),'+ps_quote(receipt)+',(New-Object Text.UTF8Encoding($false)))\n'
+        checks+='if(Test-Path -LiteralPath $target){Assert-Bundle $target}else{[IO.Directory]::Move($stage,$target)}\n}finally{$lease.Dispose()}\n'
         execute(checks)
     finally:
         # Only the unique incoming directory belongs to this invocation.

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+import json
+from dataclasses import replace
 import re
 import secrets
 import shlex
@@ -127,10 +129,10 @@ try {{
 def build_powershell_ssh_hop_script(node, bash_script, *, as_root=False, ssh_password="", sudo_password="",
                                    connect_timeout_sec=15, stage_dir=r"%LOCALAPPDATA%\EnclaveGateway\stage", jump_node=None,
                                    helper_path=r"%LOCALAPPDATA%\EnclaveGateway\bin\egw-askpass.exe", trusted_signers=(), require_signed=True,
-                                   capture_streams=False):
+                                   capture_streams=False, result_envelope=False):
     if node.os in ('windows','win','powershell'):
         if as_root: raise ValueError('sudo is unsupported for Windows targets')
-        bootstrap='[Console]::InputEncoding=New-Object Text.UTF8Encoding($false); [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false); & ([scriptblock]::Create([Console]::In.ReadToEnd()))'
+        bootstrap='$ErrorActionPreference="Stop"; $global:LASTEXITCODE=0; [Console]::InputEncoding=New-Object Text.UTF8Encoding($false); [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false); & ([scriptblock]::Create([Console]::In.ReadToEnd())); if ($LASTEXITCODE) {exit $LASTEXITCODE}'
         remote='powershell.exe -NoProfile -NonInteractive -EncodedCommand '+base64.b64encode(bootstrap.encode('utf-16le')).decode()
         payload=bash_script
     else:
@@ -144,6 +146,13 @@ def build_powershell_ssh_hop_script(node, bash_script, *, as_root=False, ssh_pas
     # the original byte-for-byte console behavior.
     output_statement='Write-Output ($outText.TrimEnd([char[]]"`r`n"))' if capture_streams else '[Console]::Out.Write($outText)'
     error_statement='Write-Error -Message $errText -ErrorAction Continue' if capture_streams else '[Console]::Error.Write($errText)'
+    publish=f'''if ($outText) {{{output_statement}}}
+    if ($proc.ExitCode -ne 0) {{throw "SSH failed with exit code $($proc.ExitCode): $errText"}}
+    if ($errText) {{{error_statement}}}'''
+    if result_envelope:
+        publish='''@{schema='egw.ssh-result.v1';exit_code=$proc.ExitCode;
+        stdout_b64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($outText));
+        stderr_b64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($errText))} | ConvertTo-Json -Compress'''
     script=f"""
 $psi=New-Object Diagnostics.ProcessStartInfo
 $psi.FileName='ssh.exe'
@@ -160,9 +169,7 @@ try {{
     [void]$copy.GetAwaiter().GetResult(); $proc.StandardInput.Close()
     $proc.WaitForExit()
     $outText=$output.GetAwaiter().GetResult(); $errText=$errorOutput.GetAwaiter().GetResult()
-    if ($outText) {{{output_statement}}}
-    if ($proc.ExitCode -ne 0) {{throw "SSH failed with exit code $($proc.ExitCode): $errText"}}
-    if ($errText) {{{error_statement}}}
+    {publish}
 }} finally {{try {{if (-not $proc.HasExited) {{$proc.Kill()}}}} catch {{}}; $proc.Dispose()}}
 """
     return _wrap_with_askpass_ps(script, ssh_password, secrets.token_hex(12), stage_dir=stage_dir, helper_path=helper_path, trusted_signers=trusted_signers, require_signed=require_signed)
@@ -238,10 +245,24 @@ class SshHopExecutor:
 
     def _exec_plain(self, node, bash_script, *, as_root=False, ssh_password="", sudo_password="", timeout_sec=120.0, jump_node=None):
         script = build_powershell_ssh_hop_script(node, bash_script, as_root=as_root, ssh_password=ssh_password,
-                                                sudo_password=sudo_password, stage_dir=self.stage_dir, jump_node=jump_node, capture_streams=True, **self.helper_options)
+                                                sudo_password=sudo_password, stage_dir=self.stage_dir, jump_node=jump_node, result_envelope=True, **self.helper_options)
         mark_dispatched()
         with timed("ssh.exec"):
-            return self._exec_hop(script, budget(timeout_sec, "ssh.exec"))
+            result=self._exec_hop(script, budget(timeout_sec, "ssh.exec"))
+        if result.exit_code:return result
+        try:
+            data=json.loads(result.stdout)
+            if set(data)!={'schema','exit_code','stdout_b64','stderr_b64'} or data['schema']!='egw.ssh-result.v1' or type(data['exit_code']) is not int or not 0<=data['exit_code']<=255:
+                raise ValueError('Invalid SSH result envelope')
+            stdout=base64.b64decode(data['stdout_b64'],validate=True).decode('utf-8')
+            stderr=base64.b64decode(data['stderr_b64'],validate=True).decode('utf-8')
+        except (ValueError,TypeError,KeyError,UnicodeError) as error:
+            from enclave_gateway.operations.context import OperationError,current
+            context=current()
+            raise OperationError('ssh_result_invalid','ssh.exec',tx_id=context.tx_id if context else '',
+                                 node=context.node if context else '',indeterminate=True,
+                                 message='SSH result could not be decoded; reconcile the transaction before retrying.') from error
+        return replace(result,exit_code=data['exit_code'],stdout=stdout,stderr=stderr)
 
     def push_file_to_node(self, node, local_path, remote_path, *, as_root=False, ssh_password="", sudo_password="", timeout_sec=900.0, jump_node=None):
         token = secrets.token_hex(12)

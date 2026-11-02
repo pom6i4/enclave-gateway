@@ -63,7 +63,15 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument('--output',type=Path,default=Path('enclave.yaml'))
     config_actions.add_parser('check',help='Validate configuration and show effective security settings.')
     agents=sub.add_parser('agents',help='Stage an immutable worker bundle or print its Bastion startup command.')
-    agents.add_argument('agents_action',choices=['stage','command'])
+    agents.add_argument('agents_action',choices=['stage','command','prune'])
+    agents.add_argument('--apply',action='store_true',help='Apply explicit reviewed --remove IDs; requires stopped lease-aware workers.')
+    agents.add_argument('--remove',action='append',default=[],help='Exact bundle SHA-256 to remove; repeat as needed.')
+    agents.add_argument('--keep',action='append',default=[],help='Additional bundle SHA-256 to retain.')
+    agents.add_argument('--min-age-hours',type=int,default=168,help='Minimum age for pruning; default seven days.')
+    diagnostics=sub.add_parser('diagnostics',help='Preview or save an allow-listed offline support snapshot.')
+    diagnostics.add_argument('diagnostics_action',choices=['preview','save'])
+    diagnostics.add_argument('--output',type=Path)
+    diagnostics.add_argument('--sha256',default='',help='Exact digest from the reviewed preview; required to save.')
 
     p_init = sub.add_parser(
         "init",
@@ -528,10 +536,21 @@ def _main(argv: list[str] | None = None) -> int:
     if args.command=='config':
         from enclave_gateway.onboarding import configuration_summary
         print(json.dumps(configuration_summary(cfg),indent=2));return 0
+    if args.command=='diagnostics':
+        from enclave_gateway.diagnostics import support_preview,save_support
+        if args.diagnostics_action=='preview':
+            if args.output or args.sha256:parser.error('preview accepts neither --output nor --sha256')
+            result=support_preview(cfg)[0]
+        else:
+            if not args.output or not args.sha256:parser.error('save requires --output and the reviewed --sha256')
+            result=save_support(cfg,args.output,args.sha256)
+        print(json.dumps(result,indent=2));return 0
     if args.command=='doctor' and args.preflight:
         if args.fix or args.probe_targets:parser.error('--preflight cannot be combined with --fix or --probe-targets')
         from enclave_gateway.diagnostics import preflight
         result=preflight(cfg);print(json.dumps(result,indent=2));return 0 if result['healthy'] else 1
+    if args.command=='agents' and args.agents_action!='prune' and (args.apply or args.remove or args.keep or args.min_age_hours!=168):
+        parser.error('Maintenance flags require agents prune')
     if args.command=='agents' and args.agents_action=='command':
         from enclave_gateway.onboarding import agent_bundle
         print(agent_bundle(cfg)[3]);return 0
@@ -717,7 +736,10 @@ def _main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command=='agents':
-        print(json.dumps(engine.stage_agents(),indent=2));return 0
+        if args.agents_action=='prune':
+            print(json.dumps(engine.prune_agents(remove=args.remove,keep=args.keep,min_age_hours=args.min_age_hours,apply=args.apply),indent=2))
+        else:print(json.dumps(engine.stage_agents(),indent=2))
+        return 0
 
     if args.command == "doctor":
         diag = engine.doctor(
@@ -792,13 +814,16 @@ def _main(argv: list[str] | None = None) -> int:
             timeout_sec=args.timeout,
             actor="cli", tx_id=args.tx_id,
         )
-        print(json.dumps({"tx_id": res.tx_id, "timings_ms": res.timings_ms}), file=sys.stderr)
+        from enclave_gateway.diagnostics import diagnostic_code,remediation
+        metadata={"tx_id":res.tx_id,"timings_ms":res.timings_ms,"exit_code":res.exit_code}
+        if res.exit_code:metadata['diagnostic_code']=diagnostic_code(res.stderr,res.exit_code)
+        print(json.dumps(metadata),file=sys.stderr)
         if res.stdout:
-            print(res.stdout)
+            sys.stdout.write(res.stdout)
         if res.stderr:
-            print(res.stderr, file=sys.stderr)
-        if res.exit_code:
-            from enclave_gateway.diagnostics import remediation
+            sys.stderr.write(res.stderr)
+        if res.exit_code==255:
+            if res.stderr and not res.stderr.endswith('\n'):print(file=sys.stderr)
             print(remediation(res.stderr or res.stdout),file=sys.stderr)
         return res.exit_code
 
@@ -1037,13 +1062,13 @@ def main(argv: list[str] | None = None) -> int:
         error = exc if isinstance(exc, OperationError) else getattr(exc, "operation_error", None)
         if error is None:
             if isinstance(exc,(ValueError,OSError)):
-                from enclave_gateway.diagnostics import remediation
+                from enclave_gateway.diagnostics import remediation,diagnostic_code
                 detail=str(exc)
-                print(json.dumps({'error':{'code':'setup_error','message':detail,'remediation':remediation(detail)}},ensure_ascii=False),file=sys.stderr)
+                print(json.dumps({'error':{'code':'setup_error','diagnostic_code':diagnostic_code(detail),'message':detail,'remediation':remediation(detail)}},ensure_ascii=False),file=sys.stderr)
                 return 1
             raise
-        from enclave_gateway.diagnostics import remediation
-        data=error.as_dict();data['remediation']=remediation(str(error))
+        from enclave_gateway.diagnostics import remediation,diagnostic_code
+        data=error.as_dict();data['remediation']=remediation(str(error));data['diagnostic_code']=diagnostic_code(str(error))
         print(json.dumps({"error": data}, ensure_ascii=False), file=sys.stderr)
         return 1
 

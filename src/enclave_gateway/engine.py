@@ -298,6 +298,8 @@ ConvertTo-Json $out -Compress -Depth 8
     @tracked("heal")
     def heal(self, *, update_credentials: bool = False, actor: str = "cli") -> ExecResult:
         """Self-heal clock drift, MTU, RDP UDP policy, interactive credentials, and Bastion RDP session."""
+        if self._direct_posix:
+            return ExecResult(0,'No managed Windows settings to repair in POSIX Direct mode. Run egw doctor --probe-targets.','',0)
         tx_id = current().tx_id if current() else generate_tx_id()
         deployment=None
         if self.config.bastion.enabled and self.config.security.mode!='custom':
@@ -308,11 +310,11 @@ ConvertTo-Json $out -Compress -Depth 8
 
         agents_dir = Path(__file__).resolve().parent / "agents"
         init_script = (agents_dir / "appliance_init.ps1").read_text(encoding="utf-8")
-        sup_script = (agents_dir / "session_supervisor.ps1").read_text(encoding="utf-8")
+        sup_script = (agents_dir / "session_supervisor.ps1").read_text(encoding="utf-8") if self.config.bastion.enabled else ''
 
-        domain = self.vault.get(self.config.bastion.domain_env)
-        user = self.vault.get(self.config.bastion.user_env)
-        password = self.vault.get(self.config.bastion.password_env)
+        domain = self.vault.get(self.config.bastion.domain_env) if self.config.bastion.enabled else ''
+        user = self.vault.get(self.config.bastion.user_env) if self.config.bastion.enabled else ''
+        password = self.vault.get(self.config.bastion.password_env) if self.config.bastion.enabled else ''
         domain_user = f"{domain}\\{user}" if domain and user else user
 
         cred_args = ""
@@ -327,8 +329,10 @@ ConvertTo-Json $out -Compress -Depth 8
         combined_ps = f"""
 & {{
 {init_script}
-}} -Mtu {self.config.appliance.mtu} -AdapterName {ps_quote(self.config.provider.adapter_name)} -BastionHost {ps_quote(self.config.bastion.host)} -BastionPort {self.config.bastion.port} -HostEpochUtc {host_epoch} -RoutesCsv {ps_quote(routes_csv)} -DnsServersCsv {ps_quote(dns_csv)}
-
+}} -Mtu {self.config.appliance.mtu} -AdapterName {ps_quote(self.config.provider.adapter_name)} -BastionHost {ps_quote(self.config.bastion.host)} -BastionPort {self.config.bastion.port} -SkipBastion:${str(not self.config.bastion.enabled).lower()} -HostEpochUtc {host_epoch} -RoutesCsv {ps_quote(routes_csv)} -DnsServersCsv {ps_quote(dns_csv)}
+"""
+        if self.config.bastion.enabled:
+            combined_ps+=f"""
 & {{
 {sup_script}
 }} -BastionHost {ps_quote(self.config.bastion.host)} -BastionPort {self.config.bastion.port} -SpoolDir {ps_quote(self.config.bastion.appliance_spool_dir)} -ScheduledTaskName {ps_quote(self.config.bastion.scheduled_task_name)} {cred_args} -ForceReconnect
@@ -341,7 +345,7 @@ ConvertTo-Json $out -Compress -Depth 8
             actor=actor,
             operation="heal",
             node="@appliance",
-            summary="Heal appliance clock, MTU, UDP policy, and Bastion session",
+            summary="Heal appliance clock, MTU, UDP policy, and Bastion session" if self.config.bastion.enabled else "Heal appliance clock and network settings; Bastion disabled",
             exit_code=res.exit_code,
             duration_ms=res.duration_ms,
         )
@@ -351,6 +355,11 @@ ConvertTo-Json $out -Compress -Depth 8
     def stage_agents(self, *, actor='cli'):
         from enclave_gateway.onboarding import stage_agents
         return stage_agents(self.control,self.config)
+
+    @tracked('prune_agents')
+    def prune_agents(self, *, actor='cli', **options):
+        from enclave_gateway.agent_maintenance import prune_agent_bundles
+        return prune_agent_bundles(self.control,self.config,**options)
 
     def _inject_env_into_script(
         self,
@@ -953,11 +962,11 @@ echo "SYNC_PACK_OK"
         nodes: set[str] | None = None,
     ) -> dict[str, Any]:
         """Run end-to-end L1-L7 diagnostic checklist across Host, Appliance, VPN, Bastion, and Targets."""
-        from enclave_gateway.diagnostics import remediation
+        from enclave_gateway.diagnostics import remediation,diagnostic_code
         st=self.status();checks=[];needs_heal=False
         def add(name,ok,detail,applicable=True):
             row={'check':name,'ok':bool(ok),'detail':self.vault.scrubber.scrub(str(detail)),'applicable':applicable}
-            if not ok:row['remediation']=remediation(detail)
+            if not ok:row.update(remediation=remediation(detail),code=diagnostic_code(detail))
             checks.append(row)
         vm_ok=bool(st['appliance']['running']) or st['appliance']['hypervisor']=='direct'
         add('appliance_vm',vm_ok,'Hypervisor='+st['appliance']['hypervisor'])

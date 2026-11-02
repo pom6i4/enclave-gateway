@@ -187,3 +187,61 @@ For lab commands and limits, see [maintainer qualification](../contrib/qualifica
 References: [OpenSSH configuration](https://man.openbsd.org/ssh_config),
 [ssh-keyscan trust limitations](https://man.openbsd.org/ssh-keyscan), and
 [PowerShell execution policies](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_execution_policies).
+
+## Maintain agent generations
+
+`egw agents prune` previews the managed generations on the Appliance. The current
+configuration's bundle is always retained. `--keep <sha256>` protects additional
+rollback versions; the default minimum age is seven days. Legacy generations,
+changed files, extra contents and linked paths are preserved for manual review.
+Incoming staging directories and transaction results are outside this operation.
+
+After reviewing the preview, stop the managed workers in their Bastion sessions
+and apply only the exact eligible identifiers:
+
+```sh
+egw agents prune --keep <rollback-bundle-sha256>
+egw agents prune --apply --remove <retired-bundle-sha256> --keep <rollback-bundle-sha256>
+```
+
+Repeat `--remove` or `--keep` for multiple generations. Keep the same age/retention
+options between preview and apply. Apply checks the complete requested set again
+under an exclusive lease before deleting. A running lease-aware worker, another
+maintenance operation, or changed eligibility makes it refuse the operation. It
+never stops a worker automatically. Staging and new managed workers take shared
+leases, so they cannot race an active cleanup. Older packages without this
+protocol are not adopted for automatic cleanup, even when staged again. Re-sign
+and approve modified scripts through the Enterprise release procedure.
+
+Use a trusted local Windows filesystem on the Appliance and an RDP redirector
+that preserves Windows file-sharing semantics. Protect the spool and lease file
+from unrelated writers; do not replace the lease file to clear a busy error.
+Filesystem I/O failures can leave a partially removed generation; inspect it
+before retrying. Cleanup is not a transaction rollback or evidence-retention tool.
+
+## Prepare a support snapshot
+
+`egw diagnostics preview` is offline. It displays a small allow-listed JSON
+payload and its SHA-256: software/platform versions, security flags, aggregate
+topology counts and Host preflight result codes. It does not include addresses,
+paths, profile/target names, signer identifiers, commands, configuration files,
+logs, command results or credentials. Remote diagnosis remains a separate step.
+
+```sh
+egw diagnostics preview
+egw diagnostics save --output support.json --sha256 <reviewed-preview-sha256>
+```
+
+Saving recomputes the snapshot and refuses if its digest changed. It never
+overwrites an existing file and sends nothing. Review before sharing; software
+versions and enabled security features can themselves be sensitive. Files use
+mode 0600 on POSIX; choose an appropriately ACL-protected output directory on
+Windows. This snapshot is separate from `egw report`, which exports a local audit
+report and can contain operational details.
+
+CLI setup errors and doctor checks include stable diagnostic categories. `exec`
+reports the exit code and transaction identity on stderr while preserving stdout
+and remote stderr. A Windows-hop SSH result retains its own exit code, including
+nonzero command results. SSH status 255 is ambiguous: OpenSSH uses it for client
+failures, but a remote command can also return 255. Use the diagnostic text as a
+hint, verify the channel, and reconcile indeterminate outcomes before retrying.

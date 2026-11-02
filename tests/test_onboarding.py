@@ -195,6 +195,7 @@ class StandardWorkerTests(unittest.TestCase):
             root=Path(folder);spool=root/'spool';spool.mkdir();stop=root/'stop';missing=root/'missing-runtime.exe'
             cfg=EnclaveConfig.from_dict({'security':{'mode':'standard'},'bastion':{'bastion_spool_dir':str(spool)}})
             files,_,identity,start=agent_bundle(cfg);bundle=spool/'agents'/identity;bundle.mkdir(parents=True)
+            (bundle.parent/'.bundle-lease').touch()
             for name,data in files.items():(bundle/name).write_bytes(data)
             if os.name!='nt':start=start.replace('\\','/')
             quote=lambda v:"'"+str(v).replace("'","''")+"'"
@@ -220,7 +221,7 @@ class StandardWorkerTests(unittest.TestCase):
                         from enclave_gateway.transports.ssh_hop import SshHopExecutor
                         executor=SshHopExecutor(transport.exec_bastion,Mock(),Mock())
                         result=executor.exec_node(TargetNodeSpec('fixture','127.0.0.1',user='fixture'),'unused',timeout_sec=15)
-                        self.assertEqual(result.exit_code,0);self.assertEqual(result.stdout,'ssh-тест');self.assertIn('ssh-warning',result.stderr)
+                        self.assertEqual(result.exit_code,0);self.assertEqual(result.stdout,'ssh-тест\n');self.assertIn('ssh-warning',result.stderr)
                     source=root/'source.bin';source.write_bytes(bytes(range(256))*257)
                     remote=root/'target space'/'тест.bin';remote.parent.mkdir()
                     digest=transport.push_file(source,str(remote))

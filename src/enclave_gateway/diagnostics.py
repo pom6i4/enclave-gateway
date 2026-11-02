@@ -5,6 +5,56 @@ from pathlib import Path
 import shutil
 
 
+def diagnostic_code(detail, exit_code=None):
+    """Stable guidance categories; SSH 255 cannot prove transport versus remote exit."""
+    value=str(detail).lower()
+    if exit_code is not None and exit_code not in (0,255):return 'remote_command_failed'
+    if any(s in value for s in ('host key verification failed','remote host identification has changed','no ed25519 host key','no rsa host key')):return 'ssh_host_key'
+    if 'permission denied' in value or 'publickey' in value:return 'ssh_authentication'
+    if any(s in value for s in ('constrained','fulllanguage','applocker','wdac')):return 'endpoint_policy'
+    if any(s in value for s in ('authenticode','untrusted runtime','managed runtime','credential helper')):return 'runtime_trust'
+    if any(s in value for s in ('worker','spool','session_pending','vfs')):return 'worker_channel'
+    if exit_code==255:return 'ssh_connection_or_remote_exit'
+    return 'setup_check_failed'
+
+
+def support_preview(config):
+    """Collect an allow-listed, offline snapshot; never copy free-form diagnostics."""
+    import hashlib
+    import json
+    import platform
+    from enclave_gateway import __version__
+    result=preflight(config)
+    allowed={'qemu','appliance_disk','appliance_firmware','uefi_code','powershell','agent_package'}
+    payload={'schema':'egw.support.v1','version':__version__,
+             'platform':{'os':platform.system(),'architecture':platform.machine(),'python':platform.python_version()},
+             'security':{name:getattr(config.security,name) for name in ('mode','require_signed_helpers','require_signed_agents','require_process_isolation','enforce_worker_attestation','owned_ssh_commands')},
+             'topology':{'bastion_enabled':config.bastion.enabled,'target_count':len(config.targets)},
+             'checks':[{'check':row['check'],'ok':bool(row['ok']),
+                        'code':'ok' if row['ok'] else row['check']+'_unavailable'}
+                       for row in result['checks'] if row['check'] in allowed],
+             'scope':'host-only; no remote probes, configuration values, paths, addresses, commands, logs or credentials'}
+    data=(json.dumps(payload,sort_keys=True,indent=2)+'\n').encode()
+    return {'sha256':hashlib.sha256(data).hexdigest(),'payload':payload},data
+
+
+def save_support(config,output,expected_sha256):
+    import re
+    preview,data=support_preview(config)
+    if not re.fullmatch('[a-f0-9]{64}',expected_sha256) or preview['sha256']!=expected_sha256:
+        raise ValueError('Diagnostic preview changed or digest is invalid; review diagnostics preview again before saving.')
+    requested=Path(output).absolute()
+    path=requested.parent.resolve(strict=True)/requested.name
+    descriptor=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0),0o600)
+    try:
+        with os.fdopen(descriptor,'wb') as stream:
+            stream.write(data);stream.flush();os.fsync(stream.fileno())
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    return {'saved':str(output),'sha256':preview['sha256'],'sent':False}
+
+
 def remediation(detail):
     value=str(detail).lower()
     if any(s in value for s in ('host key verification failed','remote host identification has changed','no ed25519 host key','no rsa host key')):
@@ -23,7 +73,7 @@ def remediation(detail):
 def preflight(config):
     from enclave_gateway.onboarding import configuration_summary,agent_bundle
     checks=[]
-    def add(name,ok,detail,fix):checks.append({'check':name,'ok':bool(ok),'detail':detail,'remediation':fix})
+    def add(name,ok,detail,fix):checks.append({'check':name,'ok':bool(ok),'code':'ok' if ok else name+'_unavailable','detail':detail,'remediation':fix})
     if config.appliance.hypervisor!='direct':
         from enclave_gateway.hypervisor.driver import detect_host_arch,resolve_qemu_binary,resolve_efi_code_path
         arch=detect_host_arch(config.appliance.arch)

@@ -252,7 +252,16 @@ $nativeExecute={
     }
 }
 
+# EGW_BUNDLE_LEASE_V1: retain a shared lease for this managed generation's lifetime.
+$bundleLease=$null
 try {
+    $generation=Get-Item -LiteralPath (Split-Path -Parent $PSCommandPath)
+    if ($generation.Name -cmatch '^[a-f0-9]{64}$' -and $generation.Parent.Name -eq 'agents') {
+        $leasePath=Join-Path $generation.Parent.FullName '.bundle-lease'
+        if((Get-Item -LiteralPath $leasePath -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Linked bundle lease rejected'}
+        $bundleLease=[IO.File]::Open($leasePath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+        if((Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $loadedWorkerHash){throw 'Worker bundle changed during startup'}
+    }
 if($ProcessIsolation){
     $trustProcess=New-Object Diagnostics.Process
     $start=New-Object Diagnostics.ProcessStartInfo
@@ -596,6 +605,7 @@ $e | ConvertTo-Json -Compress -Depth 5
         Start-Sleep -Milliseconds ([Math]::Max(1, [Math]::Min($PollIntervalMs, 50)))
     }
 } finally {
+    try {
     if($trustProcess){
         try{if(-not $trustProcess.HasExited){$trustProcess.Kill();$trustProcess.WaitForExit()}}catch{}
         foreach($name in @('StandardInput','StandardOutput','StandardError')){try{$trustProcess.$name.Dispose()}catch{}}
@@ -616,4 +626,5 @@ $e | ConvertTo-Json -Compress -Depth 5
     foreach($slot in $executionSlots){$slot.Runspace.Close();$slot.Runspace.Dispose()}
     $attestationSlot.Runspace.Close()
     $attestationSlot.Runspace.Dispose()
+    } finally {if($bundleLease){$bundleLease.Dispose()}}
 }

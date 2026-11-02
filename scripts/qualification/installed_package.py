@@ -86,6 +86,11 @@ def run(output: Path,pip_wheel: Path|None=None):
             startup=command('installed-agents-command',[str(entry),'-c',str(starter),'agents','command'],clean)
             if '-Mode Standard' not in startup or '-ProcessIsolation:$false' not in startup:
                 raise ValueError('Installed worker startup resources are unavailable')
+            preview=json.loads(command('installed-diagnostics-preview',[str(entry),'-c',str(starter),'diagnostics','preview'],clean))
+            support=clean/'support.json'
+            command('installed-diagnostics-save',[str(entry),'-c',str(starter),'diagnostics','save','--output',str(support),'--sha256',preview['sha256']],clean)
+            if hashlib.sha256(support.read_bytes()).hexdigest()!=preview['sha256']:
+                raise ValueError('Installed support snapshot differs from its reviewed digest')
             probe='''import hashlib,importlib.metadata,json,pathlib
 import enclave_gateway
 from enclave_gateway.config import EnclaveConfig

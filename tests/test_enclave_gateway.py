@@ -136,6 +136,13 @@ class LoopbackControlChannel:
             )
 
     def _simulate_bastion_worker(self, inner_cmd: str) -> str:
+        output=self._simulate_bastion_command(inner_cmd)
+        if "schema='egw.ssh-result.v1'" in inner_cmd:
+            return json.dumps({'schema':'egw.ssh-result.v1','exit_code':0,
+                               'stdout_b64':base64.b64encode(output.encode()).decode(),'stderr_b64':''})
+        return output
+
+    def _simulate_bastion_command(self, inner_cmd: str) -> str:
         # 1. Multiplexed TCP open
         if "MUX_OPEN_OK:" in inner_cmd:
             m_id = re.search(r"MUX_OPEN_OK:(mux_[0-9a-f]+)", inner_cmd)
@@ -1888,7 +1895,10 @@ for index in range(20):
         def execute(script, timeout):
             scripts.append(script)
             # Return the verification marker without executing Windows code.
-            return ExecResult(0, "VERIFIED:" + digest, "", 0)
+            output="VERIFIED:"+digest
+            if "schema='egw.ssh-result.v1'" in script:
+                output=json.dumps({'schema':'egw.ssh-result.v1','exit_code':0,'stdout_b64':base64.b64encode(output.encode()).decode(),'stderr_b64':''})
+            return ExecResult(0,output,"",0)
         node = TargetNodeSpec("app01", "10.0.20.11", os="windows", user="Admin")
         executor = SshHopExecutor(execute, lambda *_args: digest, Mock())
         with TemporaryDirectory() as tmp:
