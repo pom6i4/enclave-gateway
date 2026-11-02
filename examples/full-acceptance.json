@@ -1,0 +1,34 @@
+{
+  "revision": 1,
+  "scope": "isolated-full-acceptance",
+  "toolchain": {
+    "epoch": 1793577600,
+    "python": {"path": "/path/to/build-venv/bin/python", "version": "3.14.5", "sha256": "0000000000000000000000000000000000000000000000000000000000000000"},
+    "dotnet": {"path": "/path/to/dotnet", "version": "10.0.403", "sha256": "0000000000000000000000000000000000000000000000000000000000000000"},
+    "powershell": {"path": "/path/to/pwsh", "version": "7.6.9", "sha256": "0000000000000000000000000000000000000000000000000000000000000000"},
+    "python_build": {"setuptools": "81.0.0", "wheel": "0.48.0"},
+    "nuget_packages": "/path/to/private/nuget-cache",
+    "dotnet_home": "/path/to/private/dotnet-home",
+    "runtime_version": "10.0.14",
+    "runtimes": ["win-x64", "win-arm64"]
+  },
+  "windows": {
+    "windows_iso": "/path/to/licensed/windows.iso",
+    "virtio_directory": "/path/to/Drivers",
+    "guest_agent_msi": "/path/to/qemu-ga-x86_64.msi",
+    "firmware_code": "/path/to/OVMF_CODE_4M.secboot.fd",
+    "firmware_vars": "/path/to/OVMF_VARS_4M.ms.fd",
+    "arch": "x86_64",
+    "accelerator": "tcg",
+    "cpus": 2,
+    "memory_mb": 4096,
+    "port_base": 26489,
+    "vnc_display": 127
+  },
+  "media_sha256": {
+    "windows_iso": "0000000000000000000000000000000000000000000000000000000000000000",
+    "guest_agent_msi": "0000000000000000000000000000000000000000000000000000000000000000",
+    "firmware_code": "0000000000000000000000000000000000000000000000000000000000000000",
+    "firmware_vars": "0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}

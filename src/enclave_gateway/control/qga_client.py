@@ -226,8 +226,8 @@ class QgaClient:
                     if not active_error:
                         raise
 
-    def _write_stream(self, stream, guest_path: str) -> None:
-        with self._connect_synced() as (sock, reader):
+    def _write_stream(self, stream, guest_path: str, *, timeout_sec: float = 30.0) -> None:
+        with self._connect_synced(timeout_sec) as (sock, reader):
             with self._guest_file(sock, reader, guest_path, "wb") as handle:
                 while chunk := stream.read(self.CHUNK_SIZE):
                     offset = 0
@@ -240,8 +240,8 @@ class QgaClient:
                         offset += count
                 self._request(sock, reader, "guest-file-flush", {"handle": handle})
 
-    def _read_stream(self, stream, guest_path: str) -> None:
-        with self._connect_synced() as (sock, reader):
+    def _read_stream(self, stream, guest_path: str, *, timeout_sec: float = 30.0) -> None:
+        with self._connect_synced(timeout_sec) as (sock, reader):
             with self._guest_file(sock, reader, guest_path, "rb") as handle:
                 while True:
                     result = self._request(sock, reader, "guest-file-read", {"handle": handle, "count": self.CHUNK_SIZE})
@@ -321,18 +321,18 @@ class QgaClient:
         if result.exit_code:
             raise OSError("Failed to publish guest file atomically")
 
-    def write_file(self, local_path: Path, guest_path: str) -> None:
+    def write_file(self, local_path: Path, guest_path: str, *, timeout_sec: float = 30.0) -> None:
         with local_path.open("rb") as stream:
-            self._write_stream(stream, guest_path)
+            self._write_stream(stream, guest_path, timeout_sec=timeout_sec)
 
-    def read_file(self, guest_path: str, local_path: Path) -> None:
+    def read_file(self, guest_path: str, local_path: Path, *, timeout_sec: float = 30.0) -> None:
         from tempfile import NamedTemporaryFile
         local_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = None
         try:
             with NamedTemporaryFile(dir=local_path.parent, delete=False) as stream:
                 tmp = Path(stream.name)
-                self._read_stream(stream, guest_path)
+                self._read_stream(stream, guest_path, timeout_sec=timeout_sec)
             tmp.replace(local_path)
         finally:
             if tmp is not None:

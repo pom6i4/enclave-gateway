@@ -24,6 +24,7 @@ def run(output: Path,pip_wheel: Path|None=None):
     output=output.resolve();report={'status':'running','scope':'built-sdist-wheel-clean-installed-cli','runs':[]}
     environment={key:value for key,value in os.environ.items() if key not in ('PYTHONPATH','PYTHONHOME')}
     environment['PYTHONNOUSERSITE']='1'
+    report['platform']={'system':__import__('platform').system(),'machine':__import__('platform').machine(),'python':sys.version.split()[0]}
     if pip_wheel:
         pip_wheel=pip_wheel.resolve()
         with zipfile.ZipFile(pip_wheel) as bundle:
@@ -44,6 +45,7 @@ def run(output: Path,pip_wheel: Path|None=None):
             # include only Python package inputs, never arbitrary lab contents.
             tracked=['pyproject.toml','README.md','LICENSE']+[str(path.relative_to(ROOT)) for path in (ROOT/'src/enclave_gateway').rglob('*')
                      if path.is_file() and path.suffix in ('.py','.ps1','.xml') and '__pycache__' not in path.parts]
+            report['source_sha256']={name:hashlib.sha256((ROOT/name).read_bytes()).hexdigest() for name in sorted(tracked)}
             for name in tracked:
                 if not name:continue
                 origin=ROOT/name
@@ -96,6 +98,8 @@ print(json.dumps({'package':str(p),'version':enclave_gateway.__version__,'agents
                                    'init','--output-dir',str(clean/'cli-seed')],clean))
             if cli['disk_created'] or cli['efi_vars_created'] or 'machine_prepare.ps1' not in cli['copied_agents']:raise ValueError('Invalid installed CLI provisioning result')
             report.update(status='passed',resources=len(resources),artifacts={path.name:hashlib.sha256(path.read_bytes()).hexdigest() for path in (archive,wheel)})
+            if report['source_sha256']!={name:hashlib.sha256((ROOT/name).read_bytes()).hexdigest() for name in sorted(tracked)}:
+                raise RuntimeError('Installed-package source changed during acceptance')
     except BaseException as error:report.update(status='failed',error_type=type(error).__name__);raise
     finally:(output/'result.json').write_text(json.dumps(report,indent=2)+'\n')
     return report

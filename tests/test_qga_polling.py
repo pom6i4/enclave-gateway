@@ -2,12 +2,26 @@
 import base64
 import contextlib
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import Mock
 
 from enclave_gateway.control.qga_client import QgaClient
 
 
 class QgaPollingTests(unittest.TestCase):
+    def test_explicit_file_budget_reaches_one_connection_without_replay(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'input';p.write_bytes(b'fixture');client=QgaClient('unused')
+            with patch.object(client,'_write_stream',side_effect=TimeoutError('uncertain')) as write:
+                with self.assertRaises(TimeoutError):client.write_file(p,'C:/lab/input',timeout_sec=600)
+                self.assertEqual(write.call_count,1);self.assertEqual(write.call_args.kwargs,{'timeout_sec':600})
+            with patch.object(client,'_read_stream',side_effect=TimeoutError('interrupted')) as read:
+                target=Path(d)/'old';target.write_bytes(b'old')
+                with self.assertRaises(TimeoutError):client.read_file('C:/lab/input',target,timeout_sec=600)
+                self.assertEqual(target.read_bytes(),b'old');self.assertEqual(read.call_args.kwargs,{'timeout_sec':600})
+
     def client(self, responses):
         client=QgaClient('unused')
         @contextlib.contextmanager

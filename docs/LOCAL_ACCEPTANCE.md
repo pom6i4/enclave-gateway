@@ -1,5 +1,9 @@
 # Local acceptance and release policy
 
+The [full reproducible acceptance entry point](REPRODUCIBLE_ACCEPTANCE.md) adds
+explicit tool/media approval, independent unsigned builds and SBOM, generated
+crash models and a complete disposable Windows PKI/migration/preparation suite.
+
 Run a complete local plan without hosted workflows:
 
 ```sh
