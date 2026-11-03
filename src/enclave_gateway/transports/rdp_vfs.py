@@ -12,7 +12,6 @@ import time
 import zlib
 import re
 from tempfile import NamedTemporaryFile
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -796,6 +795,8 @@ Write-Output 'MISS'
 
         max_workers = max(1, min(self.spec.parallel_streams, len(blocks_to_stage) or 1))
         if max_workers > 1:
+            from concurrent.futures import ThreadPoolExecutor
+
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 changed_indices = list(pool.map(bind_context(_stage_single_block), blocks_to_stage))
         else:
@@ -866,6 +867,8 @@ Write-Output 'MISS'
                     finally:
                         self._cleanup_stage(path)
                 max_workers = max(1, min(self.spec.parallel_streams, num_chunks))
+                from concurrent.futures import ThreadPoolExecutor
+
                 with ThreadPoolExecutor(max_workers=max_workers) as pool:
                     # Consume ordered chunks incrementally; avoid retaining the whole file.
                     with temp_path.open("wb") as stream:
