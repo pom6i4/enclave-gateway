@@ -4,6 +4,13 @@
 
 ### Configuration and security
 
+- Discover global/XDG configuration with explicit environment overrides; keep
+  global audit, transaction state and optional environment files outside CWD.
+  Add private `config init --global` and preserve explicit config precedence.
+- Make dependency-free quoted YAML escapes consistent with PyYAML for Windows
+  paths. Report missing SSH password helpers before remote execution; Standard
+  key-only operation ignores an unused backup password without retrieving it.
+
 - Validate lifecycle JSON with exact field types, unique keys, approved architecture
   values and bounded manifest size. Validate all configured actions before planning;
   reject malformed inputs before execution or local artifact hashing.
@@ -13,6 +20,10 @@
   paths, with explicit inventory-bound review of synthetic fixture findings.
 
 ### Operations and transport
+
+- Add opt-in per-user Bastion autostart with verified local generations, retained
+  security/protocol settings and one-time migration. Require explicit worker
+  acknowledgement when removing its HKCU Run entry during graceful stop.
 
 - Preserve authenticated POSIX cancellation acknowledgement when an already closed
   peer makes the client half-close report ENOTCONN; other errors still fail.

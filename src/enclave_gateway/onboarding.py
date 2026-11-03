@@ -45,6 +45,22 @@ def starter_yaml(mode='standard'):
     return '# Edit topology, then run egw config check and egw doctor --preflight.\n'+'\n'.join(emit(starter_configuration(mode)))+'\n'
 
 
+def key_only_authentication(config,node):
+    return config.security.mode=='standard' and bool(node.ssh_key_path) and not config.security.askpass_helper_path
+
+
+def authentication_warnings(config):
+    result=[]
+    for name,node in config.targets.items():
+        if node.password_env and not config.security.askpass_helper_path:
+            key=key_only_authentication(config,node)
+            result.append({'code':'ssh_password_helper_missing','target':name,'severity':'warning' if key else 'error',
+                           'authentication':'key-only' if key else 'password-helper-required',
+                           'message':('Backup password_env is ignored; SSH uses the configured key with BatchMode=yes. ' if key else 'Password authentication is not configured for execution. ')+
+                           'Configure security.askpass_helper_path with an approved native helper for SSH password authentication or ssh-copy-id password bootstrap. sudo_password_env is independent.'})
+    return result
+
+
 def configuration_summary(config):
     security=config.security
     routes={}
@@ -59,7 +75,10 @@ def configuration_summary(config):
     if config.bastion.enabled:
         next_steps=['egw agents stage (or egw heal) to deliver the worker'] if security.mode!='custom' else ['Custom defaults retained: choose a named mode for agent deployment, or keep your existing manual deployment.']
         next_steps.append('Start the printed command in the Bastion RDP session')
-    return {'provider_type':config.provider.type,'provider_lifecycle_configured':bool(config.provider.lifecycle_manifest),
+    return {'configuration_file':str(config.source_path) if config.source_path else None,
+            'warnings':authentication_warnings(config),
+            'ssh_authentication':{name:('key-only' if key_only_authentication(config,node) else 'password-helper' if node.password_env else 'key-or-agent') for name,node in config.targets.items()},
+            'provider_type':config.provider.type,'provider_lifecycle_configured':bool(config.provider.lifecycle_manifest),
             'spool_protocol':config.bastion.spool_protocol,'valid':True,'security_mode':security.mode,'targets':list(config.targets),'ssh_execution_hops':routes,
             'execution_model':'owned-process-job' if security.require_process_isolation else 'in-process-runspace',
             'signed_agents':security.require_signed_agents,'signed_helpers':security.require_signed_helpers,
@@ -71,7 +90,7 @@ def configuration_summary(config):
                 if security.mode=='standard' else 'See docs/SECURITY.md for deployment requirements.'}
 
 
-def agent_bundle(config, *, execution_policy='',migrate_legacy_state=False):
+def agent_bundle(config, *, execution_policy='',migrate_legacy_state=False,persist_autostart=False):
     if not config.bastion.enabled:raise ValueError('Agent deployment requires bastion.enabled: true')
     security=config.security
     if execution_policy and (execution_policy!='RemoteSigned' or security.mode!='standard' or security.require_signed_agents):raise ValueError('Process RemoteSigned is an explicit Standard-only option; signed modes retain endpoint policy')
@@ -95,13 +114,14 @@ def agent_bundle(config, *, execution_policy='',migrate_legacy_state=False):
     if security.require_process_isolation:command+=' -RuntimeHelper '+ps_quote(security.runtime_helper_path)
     if security.trusted_signers:command+=' -TrustedSignerThumbprintsCsv '+ps_quote(','.join(security.trusted_signers))
     if migrate_legacy_state:command+=' -MigrateLegacyState'
+    if persist_autostart:command+=' -RegisterAutostart'
     command=_local_bootstrap_prefix(remote.rsplit('\\',1)[0],identity,hashes,execution_policy)+command
     return files,hashes,identity,command
 
 
-def stage_agents(control,config,*,execution_policy='',migrate_legacy_state=False):
+def stage_agents(control,config,*,execution_policy='',migrate_legacy_state=False,persist_autostart=False):
     if not config.bastion.enabled:raise ValueError('Agent deployment requires bastion.enabled: true')
-    files,hashes,identity,command=agent_bundle(config,execution_policy=execution_policy,migrate_legacy_state=migrate_legacy_state)
+    files,hashes,identity,command=agent_bundle(config,execution_policy=execution_policy,migrate_legacy_state=migrate_legacy_state,persist_autostart=persist_autostart)
     spool=config.bastion.appliance_spool_dir.rstrip('\\/')
     root=spool+'\\agents';target=root+'\\'+identity;temporary=root+'\\.incoming-'+secrets.token_hex(16)
     def execute(script):

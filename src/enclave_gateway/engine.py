@@ -93,10 +93,16 @@ class EnclaveEngine:
         recorder: FlightRecorder | None = None,
         control_override: ControlChannel | None = None,
         journal: TransactionJournal | None = None,
+        state_dir: str | Path | None = None,
     ) -> None:
         self.config = config or EnclaveConfig.load()
-        self.vault = vault or SecretVault()
-        self.recorder = recorder or FlightRecorder()
+        from enclave_gateway.config import state_directory
+        self.state_dir=state_directory(self.config,state_dir)
+        if self.state_dir is not None and (vault is None or recorder is None):
+            from enclave_gateway.operations.retention import private_directory
+            private_directory(self.state_dir)
+        self.vault = vault or SecretVault(env_file=self.state_dir/'.env' if self.state_dir is not None else None)
+        self.recorder = recorder or FlightRecorder(self.state_dir/'audit.jsonl' if self.state_dir is not None else None)
         self.recorder.scrubber = self.vault.scrubber
         from enclave_gateway.operations.retention import RetentionPolicy
         self.journal = journal or TransactionJournal(self.recorder.log_path.with_suffix(".transactions.sqlite3"), RetentionPolicy(**self.config.journal_retention))
@@ -131,6 +137,7 @@ class EnclaveEngine:
             helper_path=self.config.security.askpass_helper_path,
             trusted_signers=self.config.security.trusted_signers,
             require_signed=self.config.security.require_signed_helpers,
+            security_mode=self.config.security.mode,
             owned_commands=self.config.security.owned_ssh_commands,
             runtime_helper_path=self.config.security.runtime_helper_path,
         )
@@ -146,6 +153,7 @@ class EnclaveEngine:
             helper_path=self.config.security.askpass_helper_path,
             trusted_signers=self.config.security.trusted_signers,
             require_signed=self.config.security.require_signed_helpers,
+            security_mode=self.config.security.mode,
             owned_commands=self.config.security.owned_ssh_commands,
             runtime_helper_path=self.config.security.runtime_helper_path,
         )
@@ -223,13 +231,20 @@ class EnclaveEngine:
         self._worker_ready_at=time.monotonic()
         return state
 
+    def _ssh_password(self,target):
+        if not target.password_env:return ''
+        from enclave_gateway.onboarding import key_only_authentication
+        if key_only_authentication(self.config,target):return ''
+        return self.vault.get(target.password_env) or ''
+
     @tracked('stop_worker')
-    def stop_worker(self, *, actor='cli', timeout_sec=45):
+    def stop_worker(self, *, actor='cli', timeout_sec=45, unregister_autostart=False):
         if not self.config.bastion.enabled:raise ValueError('Bastion is disabled')
-        result=self._scrub_result(self.rdp_vfs.exec_bastion('',op='stop',timeout_sec=timeout_sec))
+        result=self._scrub_result(self.rdp_vfs.exec_bastion('',op='stop',timeout_sec=timeout_sec,extra_fields={'unregister_autostart':True} if unregister_autostart else None))
         self._worker_ready_at=0
-        if result.exit_code==0 and result.stdout!='WORKER_STOP_ACCEPTED':
-            raise OperationError('worker_stop_unsupported','worker.stop',message='Worker did not acknowledge stop. Upgrade to a stop-aware worker; no process was killed.')
+        expected='WORKER_STOP_ACCEPTED;AUTOSTART_UNREGISTERED' if unregister_autostart else 'WORKER_STOP_ACCEPTED'
+        if result.exit_code==0 and result.stdout!=expected:
+            raise OperationError('worker_stop_unsupported','worker.stop',message='Worker did not acknowledge the requested stop/autostart removal. Upgrade the worker; check its HKCU Run entry before considering decommission complete.')
         return result
 
     def status(self) -> dict[str, Any]:
@@ -476,7 +491,7 @@ ConvertTo-Json $out -Compress -Depth 8
         else:
             target = self._resolve_target(node)
             ssh_pw = (
-                self.vault.get(target.password_env) if target.password_env else ""
+                self._ssh_password(target)
             )
             sudo_pw = (
                 self.vault.get(target.sudo_password_env)
@@ -537,7 +552,7 @@ ConvertTo-Json $out -Compress -Depth 8
             else:
                 target = self._resolve_target(node)
                 ssh_pw = (
-                    self.vault.get(target.password_env) if target.password_env else ""
+                    self._ssh_password(target)
                 )
                 sudo_pw = (
                     self.vault.get(target.sudo_password_env)
@@ -563,7 +578,7 @@ ConvertTo-Json $out -Compress -Depth 8
             else:
                 target = self._resolve_target(node)
                 ssh_pw = (
-                    self.vault.get(target.password_env) if target.password_env else ""
+                    self._ssh_password(target)
                 )
                 sudo_pw = (
                     self.vault.get(target.sudo_password_env)
@@ -970,7 +985,9 @@ echo "SYNC_PACK_OK"
         """Generate hop host SSH keypair if missing and install public key onto TargetNode."""
         tx_id = current().tx_id if current() else generate_tx_id()
         target = self._resolve_target(node)
-        ssh_pw = self.vault.get(target.password_env) if target.password_env else ""
+        if target.password_env and not self.config.security.askpass_helper_path:
+            raise ValueError('ssh-copy-id password bootstrap requires an approved security.askpass_helper_path; normal key-based execution remains available')
+        ssh_pw = self._ssh_password(target)
         hop, jump_node = self._resolve_hop_and_jump(target)
         raw_res = hop.bootstrap_ssh_key(
             target, ssh_password=ssh_pw, jump_node=jump_node

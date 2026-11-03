@@ -202,7 +202,7 @@ class SecuritySpec:
     mode: str = 'custom'
     agent_package_dir: str = ''
     bootstrap_sha256: str = ''
-    askpass_helper_path: str = r"%LOCALAPPDATA%\EnclaveGateway\bin\egw-askpass.exe"
+    askpass_helper_path: str | None = None
     trusted_signers: list[str] = field(default_factory=list)
     runtime_helper_path: str = r"%LOCALAPPDATA%\EnclaveGateway\bin\egw-runtime.exe"
     require_signed_helpers: bool | None = None
@@ -217,6 +217,10 @@ class SecuritySpec:
 
 
     def __post_init__(self):
+        if self.askpass_helper_path is None:
+            self.askpass_helper_path='' if self.mode=='standard' else r'%LOCALAPPDATA%\EnclaveGateway\bin\egw-askpass.exe'
+        if not isinstance(self.askpass_helper_path,str) or any(c in self.askpass_helper_path for c in '\r\n\0'):
+            raise ValueError('Askpass helper path must be a string without control characters')
         if self.mode not in ('standard','enterprise','custom'):
             raise ValueError('security.mode must be standard, enterprise or custom')
         for name in ('require_signed_helpers','require_signed_agents','enforce_worker_attestation','require_process_isolation','owned_ssh_commands'):
@@ -244,6 +248,7 @@ class SecuritySpec:
     @classmethod
     def from_dict(cls, raw):
         raw=dict(raw)
+        if 'askpass_helper_path' in raw and not isinstance(raw['askpass_helper_path'],str):raise ValueError('Askpass helper path must be a string')
         for name in ('require_signed_helpers','require_signed_agents','enforce_worker_attestation','require_process_isolation','owned_ssh_commands'):
             if name in raw and type(raw[name]) is not bool:raise ValueError('Security requirements must be boolean')
         if raw.get('mode')=='standard':
@@ -252,8 +257,34 @@ class SecuritySpec:
         return cls(**raw)
 
 
+def global_config_path() -> Path:
+    base=os.environ.get('XDG_CONFIG_HOME','')
+    directory=Path(base).expanduser() if base and Path(base).expanduser().is_absolute() else Path.home()/'.config'
+    return directory/'enclave-gateway'/'enclave.yaml'
+
+
+def configuration_path(path=None) -> Path | None:
+    selected=path if path is not None else os.environ.get('ENCLAVE_CONFIG') or None
+    candidates=[Path(selected).expanduser()] if selected is not None else [Path('enclave.yaml'),Path('config/enclave.yaml'),global_config_path()]
+    if selected is not None and not candidates[0].is_file():raise FileNotFoundError(f'Configuration file not found: {selected}')
+    return next((candidate.absolute() for candidate in candidates if candidate.is_file()),None)
+
+
+def state_directory(config=None, explicit=None, *, source_path=None) -> Path | None:
+    value=explicit if explicit is not None else os.environ.get('ENCLAVE_STATE_DIR')
+    if value is not None and str(value):return Path(value).expanduser().absolute()
+    origin=config.source_path if config is not None else source_path
+    if origin==global_config_path().absolute():return global_config_path().parent/'state'
+    return None
+
+
+class _ConfigurationOrigin:
+    # Runtime provenance is deliberately absent from dataclass serialization.
+    __slots__=('_source_path',)
+
+
 @dataclass(slots=True)
-class EnclaveConfig:
+class EnclaveConfig(_ConfigurationOrigin):
     profile: str = "default"
     appliance: ApplianceSpec = field(default_factory=ApplianceSpec)
     provider: ProviderSpec = field(default_factory=ProviderSpec)
@@ -373,36 +404,52 @@ class EnclaveConfig:
             forwards=forwards,
         )
 
+    @property
+    def source_path(self) -> Path | None:
+        return getattr(self,'_source_path',None)
+
     @classmethod
     def load(cls, path: str | Path | None = None) -> EnclaveConfig:
-        candidates = (
-            [Path(path)]
-            if path
-            else [
-                Path("enclave.yaml"),
-                Path("config/enclave.yaml"),
-            ]
-        )
-        if path is not None and not Path(path).is_file():
-            raise FileNotFoundError(f"Configuration file not found: {path}")
-        for candidate in candidates:
-            if candidate.is_file():
-                text = candidate.read_text(encoding="utf-8-sig")
-                try:data = parse_yaml_or_json(text)
-                except Exception as error:
-                    raise ValueError('Cannot parse configuration; use unique mapping keys and valid YAML/JSON. See docs/GUIDE.md.') from error
-                return cls.from_dict(data)
-        raise FileNotFoundError('No enclave.yaml found. Run egw config init, or pass --config /path/to/enclave.yaml.')
+        candidate=configuration_path(path)
+        if candidate is not None:
+            text=candidate.read_text(encoding='utf-8-sig')
+            try:data=parse_yaml_or_json(text)
+            except Exception as error:
+                raise ValueError('Cannot parse configuration; use unique mapping keys and valid YAML/JSON. See docs/GUIDE.md.') from error
+            result=cls.from_dict(data);result._source_path=candidate;return result
+        raise FileNotFoundError('No enclave.yaml found. Run egw config init (local) or egw config init --global, set ENCLAVE_CONFIG, or pass --config /path/to/enclave.yaml.')
 
 
 def _parse_scalar(val: str) -> Any:
     val = val.strip()
     if not val:
         return ""
-    if (val.startswith("'") and val.endswith("'")) or (
-        val.startswith('"') and val.endswith('"')
-    ):
-        return val[1:-1]
+    if val.startswith("'"):
+        if not val.endswith("'") or len(val)<2:raise ValueError('Unterminated YAML single-quoted string')
+        inner=val[1:-1];result=[];index=0
+        while index<len(inner):
+            if inner[index]=="'":
+                if inner[index:index+2]!="''":raise ValueError('Invalid YAML single quote')
+                result.append("'");index+=2
+            else:result.append(inner[index]);index+=1
+        return ''.join(result)
+    if val.startswith('"'):
+        if not val.endswith('"') or len(val)<2:raise ValueError('Unterminated YAML double-quoted string')
+        escapes={'0':'\0','a':'\a','b':'\b','t':'\t','n':'\n','v':'\v','f':'\f','r':'\r','e':'\x1b',' ':' ','"':'"','/':'/','\\':'\\','N':'\x85','_':'\xa0','L':'\u2028','P':'\u2029'}
+        result=[];inner=val[1:-1];index=0
+        while index<len(inner):
+            char=inner[index];index+=1
+            if char=='"':raise ValueError('Unescaped YAML double quote')
+            if char!='\\':result.append(char);continue
+            if index==len(inner):raise ValueError('Incomplete YAML escape')
+            char=inner[index];index+=1
+            if char in escapes:result.append(escapes[char])
+            elif char in 'xuU':
+                count={'x':2,'u':4,'U':8}[char];digits=inner[index:index+count]
+                if len(digits)!=count or not re.fullmatch('[0-9A-Fa-f]+',digits):raise ValueError('Invalid YAML hexadecimal escape')
+                result.append(chr(int(digits,16)));index+=count
+            else:raise ValueError('Unknown YAML escape; use literal single quotes for Windows paths')
+        return ''.join(result)
     if val.startswith("[") and val.endswith("]"):
         inner = val[1:-1].strip()
         if not inner:
@@ -426,16 +473,19 @@ def _parse_scalar(val: str) -> Any:
 
 
 def _strip_inline_comment(line: str) -> str:
-    in_single = False
-    in_double = False
-    for idx, ch in enumerate(line):
-        if ch == "'" and not in_double:
-            in_single = not in_single
-        elif ch == '"' and not in_single:
-            in_double = not in_double
-        elif ch == "#" and not in_single and not in_double:
-            if idx == 0 or line[idx - 1].isspace():
-                return line[:idx].rstrip()
+    quote=None;index=0;start=True
+    while index<len(line):
+        char=line[index]
+        if quote=='"' and char=='\\':index+=2;continue
+        if quote=="'" and line[index:index+2]=="''":index+=2;continue
+        if quote:
+            if char==quote:quote=None
+        elif char in ("'",'"') and start:quote=char;start=False
+        elif char=='#' and (index==0 or line[index-1].isspace()):return line[:index].rstrip()
+        elif char in '[,' or (char==':' and (index+1==len(line) or line[index+1].isspace())):start=True
+        elif char=='-' and start and index+1<len(line) and line[index+1].isspace():start=True
+        elif not char.isspace():start=False
+        index+=1
     return line.rstrip()
 
 

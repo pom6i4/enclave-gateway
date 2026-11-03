@@ -96,6 +96,10 @@ def preflight(config):
         try:agent_bundle(config);add('agent_package',True,'Agent bundle ready to stage','egw agents stage')
         except (OSError,ValueError) as error:add('agent_package',False,str(error),'Provide the approved signed package and pins for Enterprise; bundled sources are used in Standard.')
     result=configuration_summary(config)
+    for warning in result['warnings']:
+        add('ssh_authentication:'+warning['target'],warning['severity']!='error',warning['message'],
+            'Use an SSH key in Standard, or configure the approved askpass helper on the executing hop.')
+        checks[-1]['severity']=warning['severity']
     result.update(healthy=all(c['ok'] for c in checks),checks=checks,scope='host-only-read-only',
                   remote_checks='not_run: QGA, RDP, endpoint policy, SSH trust and login must be checked on the actual hop')
     return result

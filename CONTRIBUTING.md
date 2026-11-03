@@ -41,6 +41,13 @@ Run checks that exercise the actual changed boundary; mock results do not certif
 remote installs or a production signing chain. Preserve failed evidence and state
 exact skips/observer budgets. Do not loosen a gate to turn a failure into a pass.
 
+On a disposable Windows account, `EGW_TEST_WINDOWS_AUTOSTART=1` enables
+`test_windows_autostart.py`. It uses a local Stream spool, registers and replays
+the current user's HKCU Run command, verifies acknowledgement/removal, and rejects
+tampered worker bytes. It skips rather than replacing an existing worker Run
+entry. Run it only in an isolated lab account; it does not prove RDP logon or
+reconnect behavior and requires neither production credentials nor native helpers.
+
 Use neutral example addresses and names. Keep credentials, private keys, filled
 lab manifests, proprietary installers and VM disks out of Git. Use the repository
 hooks and configured author identity. Avoid unrelated formatting or infrastructure

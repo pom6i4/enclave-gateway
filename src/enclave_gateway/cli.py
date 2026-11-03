@@ -60,11 +60,15 @@ def build_parser() -> argparse.ArgumentParser:
     config_actions=config.add_subparsers(dest='config_action',required=True)
     create=config_actions.add_parser('init',help='Write a starter configuration; never overwrite a file.')
     create.add_argument('--mode',choices=['standard','enterprise'],default='standard')
-    create.add_argument('--output',type=Path,default=Path('enclave.yaml'))
+    destination=create.add_mutually_exclusive_group()
+    destination.add_argument('--output',type=Path)
+    destination.add_argument('--global',dest='global_config',action='store_true',help='Create the private XDG user configuration.')
     config_actions.add_parser('check',help='Validate configuration and show effective security settings.')
     agents=sub.add_parser('agents',help='Stage an immutable worker bundle or print its Bastion startup command.')
     agents.add_argument('agents_action',choices=['stage','command','prune','stop'])
     agents.add_argument('--execution-policy',choices=['RemoteSigned'],default='',help='Explicit process-only Standard startup option; never weakens AllSigned or Group Policy.')
+    agents.add_argument('--persist-autostart',action='store_true',help='Explicitly register current-user Bastion logon startup when the printed command runs.')
+    agents.add_argument('--unregister-autostart',action='store_true',help='Remove the current worker user HKCU startup value before acknowledged stop.')
     agents.add_argument('--migrate-legacy-state',action='store_true',help='Approve one-time journal migration after stopping the old worker.')
     agents.add_argument('--timeout',type=float,default=45,help='Stop request budget in seconds.')
     agents.add_argument('--apply',action='store_true',help='Apply explicit reviewed --remove IDs; requires stopped lease-aware workers.')
@@ -505,6 +509,9 @@ def _main(argv: list[str] | None = None) -> int:
         print(json.dumps(export_openai_tools() if args.export_openai_tools else export_openapi_spec(),indent=2));return 0
     if args.command=='secret':
         from enclave_gateway.security.secrets import SecretVault
+        from enclave_gateway.config import state_directory,configuration_path
+        source=configuration_path(args.config) if args.state_dir is None and not os.environ.get('ENCLAVE_STATE_DIR') else None
+        args.state_dir=state_directory(explicit=args.state_dir,source_path=source)
         if args.state_dir:
             from enclave_gateway.operations.retention import private_directory
             private_directory(args.state_dir)
@@ -528,8 +535,13 @@ def _main(argv: list[str] | None = None) -> int:
 
     if args.command=='config' and args.config_action=='init':
         from enclave_gateway.onboarding import starter_yaml
+        from enclave_gateway.config import global_config_path
+        if args.global_config or (args.output is not None and args.output.expanduser().absolute()==global_config_path().absolute()):
+            from enclave_gateway.operations.retention import private_directory
+            args.output=global_config_path();private_directory(args.output.parent)
+        else:args.output=(args.output or Path('enclave.yaml')).expanduser()
         data=starter_yaml(args.mode).encode()
-        descriptor=os.open(args.output,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+        descriptor=os.open(args.output,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0),0o600)
         with os.fdopen(descriptor,'wb') as output:output.write(data)
         print(json.dumps({'created':str(args.output),'mode':args.mode,'next_step':'Edit topology, then run egw config check. Enterprise placeholders must be replaced with approved release pins.'}))
         return 0
@@ -554,13 +566,15 @@ def _main(argv: list[str] | None = None) -> int:
         result=preflight(cfg);print(json.dumps(result,indent=2));return 0 if result['healthy'] else 1
     if args.command=='agents' and args.agents_action!='prune' and (args.apply or args.remove or args.keep or args.min_age_hours!=168):
         parser.error('Maintenance flags require agents prune')
-    if args.command=='agents' and args.agents_action not in ('stage','command') and (args.execution_policy or args.migrate_legacy_state):
+    if args.command=='agents' and args.agents_action not in ('stage','command') and (args.execution_policy or args.migrate_legacy_state or args.persist_autostart):
         parser.error('Startup options require agents stage or command')
+    if args.command=='agents' and args.agents_action!='stop' and args.unregister_autostart:
+        parser.error('--unregister-autostart requires agents stop')
     if args.command=='agents' and args.agents_action!='stop' and args.timeout!=45:
         parser.error('--timeout requires agents stop')
     if args.command=='agents' and args.agents_action=='command':
         from enclave_gateway.onboarding import agent_bundle
-        print(agent_bundle(cfg,execution_policy=args.execution_policy,migrate_legacy_state=args.migrate_legacy_state)[3]);return 0
+        print(agent_bundle(cfg,execution_policy=args.execution_policy,migrate_legacy_state=args.migrate_legacy_state,persist_autostart=args.persist_autostart)[3]);return 0
     if args.command=='mcp' and cfg.security.mode=='enterprise':
         if not args.policy or (not args.read_only and not args.isolation_map and not args.worker_identity_handshake):
             raise ValueError('Enterprise MCP requires --policy and, for mutable service, --isolation-map. See docs/SECURITY.md.')
@@ -570,15 +584,9 @@ def _main(argv: list[str] | None = None) -> int:
         from enclave_gateway.audit.flight_recorder import FlightRecorder
         if not args.worker_state_dir: raise ValueError('Worker state directory is required')
         private_directory(args.worker_state_dir)
-        engine=EnclaveEngine(config=cfg,vault=SecretVault(env_file=Path(args.config).resolve().parent/'.env'),recorder=FlightRecorder(args.worker_state_dir/'audit.jsonl'))
-    elif args.state_dir:
-        from enclave_gateway.security.secrets import SecretVault
-        from enclave_gateway.operations.retention import private_directory
-        from enclave_gateway.audit.flight_recorder import FlightRecorder
-        private_directory(args.state_dir)
-        engine=EnclaveEngine(config=cfg,vault=SecretVault(env_file=args.state_dir/'.env'),recorder=FlightRecorder(args.state_dir/'audit.jsonl'))
+        engine=EnclaveEngine(config=cfg,vault=SecretVault(env_file=(cfg.source_path or Path(args.config)).parent/'.env'),recorder=FlightRecorder(args.worker_state_dir/'audit.jsonl'))
     else:
-        engine = EnclaveEngine(config=cfg)
+        engine=EnclaveEngine(config=cfg,state_dir=args.state_dir)
 
     if args.command == "mcp":
         policy = AccessPolicy.load(args.policy) if args.policy else None
@@ -746,10 +754,10 @@ def _main(argv: list[str] | None = None) -> int:
         if args.agents_action=='prune':
             print(json.dumps(engine.prune_agents(remove=args.remove,keep=args.keep,min_age_hours=args.min_age_hours,apply=args.apply),indent=2))
         elif args.agents_action=='stop':
-            result=engine.stop_worker(timeout_sec=args.timeout)
+            result=engine.stop_worker(timeout_sec=args.timeout,unregister_autostart=args.unregister_autostart)
             print(json.dumps({'exit_code':result.exit_code,'stdout':result.stdout,'stderr':result.stderr,'tx_id':result.tx_id}))
             return result.exit_code
-        else:print(json.dumps(engine.stage_agents(execution_policy=args.execution_policy,migrate_legacy_state=args.migrate_legacy_state),indent=2))
+        else:print(json.dumps(engine.stage_agents(execution_policy=args.execution_policy,migrate_legacy_state=args.migrate_legacy_state,persist_autostart=args.persist_autostart),indent=2))
         return 0
 
     if args.command == "doctor":

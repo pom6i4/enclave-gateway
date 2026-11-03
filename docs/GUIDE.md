@@ -37,6 +37,54 @@ positional value, which can enter shell history. `secret get` reports only wheth
 a value is present. These commands and MCP schema/client-config exports work
 without a topology or audit database.
 
+### Configuration discovery and private state
+
+For an installed `egw` executable on PATH:
+
+```sh
+egw config init --global
+# Edit ~/.config/enclave-gateway/enclave.yaml, then run from any directory:
+egw config check
+egw doctor --preflight
+```
+
+The search order is explicit `-c / --config`, `ENCLAVE_CONFIG`, `./enclave.yaml`,
+`./config/enclave.yaml`, then
+`${XDG_CONFIG_HOME:-~/.config}/enclave-gateway/enclave.yaml`. XDG_CONFIG_HOME must
+be absolute; a relative value is ignored. An explicit/environment configuration
+that does not exist fails instead of silently selecting another deployment.
+`config check` reports `configuration_file`. A local config takes precedence over
+the global one: use `-c` or `ENCLAVE_CONFIG` to pin the deployment when needed.
+
+State selection is explicit `--state-dir`, then `ENCLAVE_STATE_DIR`. Otherwise a
+selected global config uses its sibling `state/` directory for `audit.jsonl`,
+`audit.transactions.sqlite3` and the optional `.env`. This also applies when that
+global file was selected explicitly. No `logs/` or `.env` is created in the current
+directory. Other configs retain their existing local state defaults; relative
+paths inside a config still refer to the working directory. Use absolute paths
+for a global deployment. The config file and state paths are not exported as
+topology settings.
+
+`config init --global` creates a private application directory (0700) and config
+(0600) on POSIX, refuses overwrite and rejects linked private directories. An
+explicit `config init --output ~/.config/enclave-gateway/enclave.yaml` has the same
+protection. State directories use 0700; Windows deployments must also protect
+their enclosing profile with the appropriate account ACLs. Store the optional
+`.env` privately (0600 on POSIX); OS credential storage remains supported. Offline
+`config check` does not create state. Secret commands can locate the selected
+state without parsing a topology or contacting a remote machine.
+
+Windows paths have the same bytes with or without the optional PyYAML dependency:
+
+| Path | Plain YAML | Single quoted | Double quoted |
+| --- | --- | --- | --- |
+| Local | `C:\EnclaveGateway\spool` | `'C:\EnclaveGateway\spool'` | `"C:\\EnclaveGateway\\spool"` |
+| Redirected | `\\tsclient\C\EnclaveGateway\spool` | `'\\tsclient\C\EnclaveGateway\spool'` | `"\\\\tsclient\\C\\EnclaveGateway\\spool"` |
+
+Double quotes interpret YAML escapes such as `\\`, `\"`, `\n`, `\r`, `\t`;
+escape every backslash there. Single quotes are literal, with `''` representing
+one apostrophe. Invalid escapes fail instead of changing a Windows path.
+
 ## First connection
 
 ### Choose the controller
@@ -213,6 +261,18 @@ to Bastion. Further TargetNode aliases in `via` form a checked hop chain; every
 SSH hop needs its own approved identity and host-key trust. Host interactive SSH
 also needs Host-side keys and trust; identical path strings can name different
 files on different machines.
+
+In Standard mode, a configured `ssh_key_path` with no
+`security.askpass_helper_path` selects key authentication with `BatchMode=yes`.
+A backup `password_env` is reported as ignored and its secret is not retrieved;
+there is no interactive password fallback. `sudo_password_env` remains independent.
+`config check` and `doctor --preflight` warn about this combination. Password-only
+authentication without a helper is reported as unready during preflight. To use
+SSH passwords, configure an approved native `security.askpass_helper_path` on the
+executing hop; its runtime trust checks still apply. `ssh-copy-id` password
+bootstrap requires that helper too. Custom/Enterprise retain their authentication
+and signature requirements. A configured helper path is not proof that its
+remote executable is installed or trusted.
 
 Obtain each server's public host key and SHA-256 fingerprint from its administrator
 through a trusted channel. On the executing hop, inspect the candidate with
@@ -402,7 +462,9 @@ leaves the originals intact and does not replay old requests. Unknown/incomplete
 legacy files require reconciliation. Do not run the legacy worker again against
 that spool after migration. An older backup or a snapshot rollback also requires
 outcome reconciliation; journal identity alone does not establish backup freshness.
-Perform migration in foreground before registering persistent startup.
+With managed signed `-RegisterStartup`, perform migration in foreground before
+registering the task. The per-user option below can register and migrate during
+one foreground invocation; subsequent starts do not migrate again.
 
 `egw agents stop --timeout 45` requests an acknowledged graceful stop. It refuses
 while jobs or mux connections remain active, and never kills an unrelated process.
@@ -411,6 +473,56 @@ Close those connections, let jobs finish and retry with a new operation. Its
 starting the printed command again. A mutex and an exclusive spool session lease
 reject duplicate workers. Reinstall/re-sign changed Enterprise scripts and update
 approved pins before using them.
+
+### Per-user worker autostart
+
+Opt in when generating the command, then run the complete printed command in the
+approved Bastion session:
+
+```sh
+egw agents stage --persist-autostart --execution-policy RemoteSigned
+# For a one-time legacy upgrade, also add --migrate-legacy-state.
+# To reprint, repeat the required flags with: egw agents command ...
+```
+
+The process-policy option is Standard-only and explicit; omit it when the
+endpoint already permits the approved scripts or the package requires signatures.
+Staging alone does not modify Bastion's registry. Bootstrap `-RegisterAutostart`
+copies the verified generation into `%LOCALAPPDATA%\EnclaveGateway\autostart-agents`,
+saves the bootstrap byte-for-byte as `start_worker.ps1` and atomically writes
+`autostart.json`. Its protected local directory belongs only to the current SID
+and SYSTEM. Settings preserve Files/Stream, state location, runtime, isolation,
+signatures and publishers. Persistent starts verify both script hashes and never
+save `-MigrateLegacyState` or an unsigned laboratory override. Authenticode and
+Internet-zone alternate streams survive script copying. Signed/AllSigned starts
+retain AllSigned; an explicitly selected Standard process RemoteSigned is retained
+without overriding Group Policy. No SDK or native runtime is added for Standard
+runspaces.
+
+Only after the local files are prepared does bootstrap register
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run\EnclaveGatewayWorker`.
+Individual files are published atomically; interrupted multi-file updates fail
+hash checks and can be re-registered from the approved command. HKCU Run executes
+at **user logon**, may be delayed by Windows and has a 260-character command limit
+([Microsoft documentation](https://learn.microsoft.com/en-us/windows/win32/setupapi/run-and-runonce-registry-keys)).
+A normal RDP disconnect/reconnect is not a new logon trigger; leave the resident
+worker running through disconnects. This registration is not a crash supervisor.
+The existing singleton rejects duplicates. Managed Enterprise deployments can
+use the signed scheduled task with its reconnect trigger described in SECURITY.md.
+
+To decommission, while the worker is still running:
+
+```sh
+egw agents stop --unregister-autostart --timeout 45
+```
+
+The worker removes only its current user's `EnclaveGatewayWorker` value, confirms
+`WORKER_STOP_ACCEPTED;AUTOSTART_UNREGISTERED`, then stops. An older worker lacking
+that receipt cannot claim successful removal. Normal `agents stop` leaves
+autostart enabled. If already stopped, remove that value in the Bastion user's
+session (or restart the approved worker and use this command); the Host cannot
+edit that user's registry through Appliance HKCU. Local generations and journals,
+unrelated Run values and managed scheduled tasks are retained.
 
 ## WAN RDP behavior and cleanup
 

@@ -873,7 +873,17 @@ if($ProcessIsolation){
                 } elseif ($ProcessIsolation) { throw 'Isolated execution requires a request deadline' }
                 if($request.op -eq 'stop'){
                     if($activeTxJobs.Count -or $pendingMux.Count -or $Global:EnclaveMuxSockets.Count){Write-Response $txId 75 '' 'WORKER_BUSY: close active streams and wait for jobs before stopping' 0 'failed';continue}
-                    Write-Response $txId 0 'WORKER_STOP_ACCEPTED' '' 0 'completed'
+                    $ack='WORKER_STOP_ACCEPTED'
+                    if($request.PSObject.Properties.Name -contains 'unregister_autostart'){
+                        if($request.unregister_autostart -isnot [bool]){throw 'Invalid autostart stop option'}
+                        if($request.unregister_autostart){
+                            if($env:OS -ne 'Windows_NT'){throw 'HKCU autostart requires Windows'}
+                            $key=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Run',$true)
+                            if($key){try{$key.DeleteValue('EnclaveGatewayWorker',$false);if($null -ne $key.GetValue('EnclaveGatewayWorker',$null)){throw 'Autostart removal readback failed'}}finally{$key.Dispose()}}
+                            $ack+=';AUTOSTART_UNREGISTERED'
+                        }
+                    }
+                    Write-Response $txId 0 $ack '' 0 'completed'
                     $stopRequested=$true;break
                 }
                 $action=[string]$request.mux_action

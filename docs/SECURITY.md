@@ -67,9 +67,18 @@ journal and reconcile indeterminate operations instead of blindly replaying them
 
 `bastion_bootstrap.ps1 -Mode Enterprise -RegisterStartup` can register an approved
 signed persistent worker for that user. Its runtime, publishers, scripts and
-startup paths must be provisioned first. Standard bootstrap is foreground only;
-it cannot register unsigned persistent startup. Existing signed Custom startup
-settings remain supported. No mode turns off WDAC, AppLocker, ConstrainedLanguage
+startup paths must be provisioned first. The managed task requires signed native
+isolation and supports logon/reconnect triggers. Separately,
+`agents stage --persist-autostart` registers an opt-in current-user HKCU Run entry
+when the operator runs its command on Bastion. It supports named Standard and
+Enterprise modes, keeps their security requirements, pins local script bytes and
+never repeats migration. Standard persistence has the same trusted-user/process
+boundary as Standard foreground execution; it is not an Enterprise claim. The
+copied bootstrap retains its Authenticode signature; signed startup retains
+AllSigned. HKCU Run is a logon trigger, not reconnect or crash supervision. See
+[the operational guide](GUIDE.md#per-user-worker-autostart) for removal and policy
+details. Existing signed Custom managed startup settings remain supported.
+No mode turns off WDAC, AppLocker, ConstrainedLanguage
 or domain execution policy. If `.exe` execution is forbidden, native isolation is
 unavailable: an administrator must approve it or choose a suitable trust boundary.
 
@@ -113,6 +122,9 @@ client may run on Bastion, Appliance or Host; [GUIDE.md](GUIDE.md#ssh-trust)
 distinguishes the corresponding key stores. Base64 is encoding, not encryption.
 The native askpass helper keeps passwords out of command arguments and temporary
 password files, but privileged OS/process inspection remains in the trust boundary.
+Standard key-only authentication does not retrieve a configured backup SSH
+password when no askpass helper is configured. Password authentication still needs
+an approved helper; this choice never weakens Custom/Enterprise helper checks.
 Do not put secrets in topology files, command history, release archives or Git.
 
 Use the OS credential store, or a private environment file with appropriate

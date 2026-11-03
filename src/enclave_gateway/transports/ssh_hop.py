@@ -230,8 +230,9 @@ try {{
 class SshHopExecutor:
     def __init__(self, exec_hop_fn: Callable[[str, float], ExecResult], push_hop_fn: Callable[[Path, str, float], str],
                  pull_hop_fn: Callable[[str, Path, float], str], *, stage_dir=r"%LOCALAPPDATA%\EnclaveGateway\stage",
-                 helper_path=r"%LOCALAPPDATA%\EnclaveGateway\bin\egw-askpass.exe", trusted_signers=(), require_signed=True, owned_commands=False, runtime_helper_path=r"%LOCALAPPDATA%\EnclaveGateway\bin\egw-runtime.exe", cleanup_hop_fn=None):
+                 helper_path=r"%LOCALAPPDATA%\EnclaveGateway\bin\egw-askpass.exe", trusted_signers=(), require_signed=True, owned_commands=False, runtime_helper_path=r"%LOCALAPPDATA%\EnclaveGateway\bin\egw-runtime.exe", cleanup_hop_fn=None, security_mode='custom'):
         self.runtime_helper_path=runtime_helper_path
+        self.security_mode=security_mode
         self.owned_commands=owned_commands
         self._exec_hop = exec_hop_fn
         self._push_hop = push_hop_fn
@@ -240,7 +241,16 @@ class SshHopExecutor:
         self.stage_dir = stage_dir.rstrip("\\/")
         self.helper_options = dict(helper_path=helper_path, trusted_signers=tuple(trusted_signers), require_signed=require_signed)
 
+    def _authentication(self,node,password,jump_node):
+        def key_only(value):return self.security_mode=='standard' and value.ssh_key_path and not self.helper_options['helper_path']
+        if key_only(node):password=''
+        if jump_node:
+            if isinstance(jump_node,(list,tuple)):jump_node=[replace(j,password_env='') if key_only(j) else j for j in jump_node]
+            elif key_only(jump_node):jump_node=replace(jump_node,password_env='')
+        return password,jump_node
+
     def exec_node(self, node, bash_script, *, as_root=False, ssh_password="", sudo_password="", timeout_sec=120.0, jump_node=None):
+        ssh_password,jump_node=self._authentication(node,ssh_password,jump_node)
         if self.owned_commands:
             from enclave_gateway.transports.owned_ssh import run
             return run(self,node,bash_script,dict(as_root=as_root,ssh_password=ssh_password,sudo_password=sudo_password,timeout_sec=timeout_sec,jump_node=jump_node))
@@ -268,6 +278,7 @@ class SshHopExecutor:
         return replace(result,exit_code=data['exit_code'],stdout=stdout,stderr=stderr)
 
     def push_file_to_node(self, node, local_path, remote_path, *, as_root=False, ssh_password="", sudo_password="", timeout_sec=900.0, jump_node=None):
+        ssh_password,jump_node=self._authentication(node,ssh_password,jump_node)
         token = secrets.token_hex(12)
         stage = f"{self.stage_dir}\\egw_stage_{token}"
         windows = node.os in ("windows", "win", "powershell")
@@ -330,6 +341,7 @@ echo "VERIFIED:$sha"
             raise
 
     def pull_file_from_node(self, node, remote_path, local_path, *, as_root=False, ssh_password="", sudo_password="", timeout_sec=600.0, jump_node=None):
+        ssh_password,jump_node=self._authentication(node,ssh_password,jump_node)
         token = secrets.token_hex(12)
         stage = f"{self.stage_dir}\\egw_pull_{token}"
         windows = node.os in ("windows", "win", "powershell")
@@ -385,6 +397,8 @@ echo "VERIFIED:$sha"
             pass
 
     def bootstrap_ssh_key(self, node, *, ssh_password="", timeout_sec=60.0, jump_node=None):
+        if ssh_password and not self.helper_options['helper_path']:
+            raise ValueError('Password bootstrap requires security.askpass_helper_path; configure the approved native credential helper before ssh-copy-id')
         if node.os in ("windows", "win", "powershell"):
             raise ValueError("Windows authorized_keys provisioning requires an administrator-approved ACL policy")
         result = self._exec_hop("""

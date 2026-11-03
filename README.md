@@ -73,6 +73,11 @@ python3 -m venv .venv
 On Windows use `.venv\Scripts\python.exe` and `.venv\Scripts\egw.exe`;
 see [installation](docs/GUIDE.md#installation).
 
+For a global installation, use `egw config init --global`. The CLI can then run
+from any directory; the global configuration and private state are selected
+without a shell wrapper. See [configuration discovery](docs/GUIDE.md#configuration-discovery-and-private-state)
+for precedence and environment overrides.
+
 Connect the Appliance's approved RDP session to the Bastion with drive redirection.
 **Run the command printed by `agents stage` inside that Bastion session.**
 It copies the verified scripts locally on Bastion and starts a foreground
