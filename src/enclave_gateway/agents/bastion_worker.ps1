@@ -248,8 +248,8 @@ $nativeTrust={
 function Start-WorkerPipeline($Pipe) {
     # Windows PowerShell retains implicit BeginInvoke input buffers until GC.
     # Own both buffers so their wait handles are released on every completion.
-    $inputBuffer=New-Object 'Management.Automation.PSDataCollection[psobject]'
-    $outputBuffer=New-Object 'Management.Automation.PSDataCollection[psobject]'
+    $inputBuffer=[Management.Automation.PSDataCollection[psobject]]::new()
+    $outputBuffer=[Management.Automation.PSDataCollection[psobject]]::new()
     $inputBuffer.Complete()
     try {return @{Handle=$Pipe.BeginInvoke($inputBuffer,$outputBuffer);Input=$inputBuffer;Output=$outputBuffer}}
     catch {$inputBuffer.Dispose();$outputBuffer.Dispose();throw}
@@ -342,7 +342,7 @@ function Set-StreamFailure($Shared,$Failure,[string]$Message){
     # Access denial, sharing conflicts, capacity and arbitrary script errors do not.
     $retry=$redirectedAbort -or (($cause -is [IO.IOException] -or $cause -is [ComponentModel.Win32Exception]) -and $code -in @(2,3,6,53,55,59,64,67,1167,1231,2250))
     [Threading.Monitor]::Enter($Shared.SyncRoot)
-    try{if(-not $Shared.Stop){$Shared.Error=$Message+' ('+$cause.GetType().FullName+', win32_code='+$code+'): '+$cause.Message;$Shared.Retryable=$retry;$Shared.FaultCode=$code;$Shared.Stop=$true}}finally{[Threading.Monitor]::Exit($Shared.SyncRoot)}
+    try{if(-not $Shared.Stop){$Shared.Error=$Message+' ('+$cause.GetType().FullName+', win32_code='+$code+'): '+$cause.Message;$Shared.Retryable=$retry;$Shared.FaultCode=$code;$Shared.Stop=$true;[void]$Shared.DispatchWake.Set()}}finally{[Threading.Monitor]::Exit($Shared.SyncRoot)}
 }
 function Throw-StreamFailure {
     $failure=[IO.IOException]::new([string]$streamState.Error)
@@ -365,7 +365,7 @@ function Initialize-StreamIpc {
     foreach($path in @($requestPath)){
         $file=[IO.File]::Open($path,[IO.FileMode]::CreateNew,[IO.FileAccess]::ReadWrite,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete));$file.Dispose()
     }
-    $script:streamState=[hashtable]::Synchronized(@{Stop=$false;Error='';Retryable=$false;FaultCode=0;In=(New-Object 'Collections.Concurrent.ConcurrentQueue[object]');Out=(New-Object 'Collections.Concurrent.ConcurrentQueue[object]');RequestPath=$requestPath;Spool=$SpoolDir;Instance=$workerInstance;Heartbeat='';HighWater=[long]0;NextTicket=[long]0;Prepared=(New-Object 'Collections.Concurrent.ConcurrentDictionary[long,object]');Opening=(New-Object 'Collections.Concurrent.ConcurrentDictionary[long,bool]');Expected=(New-Object 'Collections.Concurrent.ConcurrentDictionary[long,bool]');ReadMs=0;WriteMs=0;WriteOpenMs=0;WriteIoMs=0;HeartbeatMs=0;FramesIn=0;FramesOut=0;ReaderReady=$false;WriterReady=$false})
+    $script:streamState=[hashtable]::Synchronized(@{Stop=$false;Error='';Retryable=$false;FaultCode=0;In=(New-Object 'Collections.Concurrent.ConcurrentQueue[object]');Out=[Collections.Concurrent.BlockingCollection[object]]::new(256);DispatchWake=[Threading.AutoResetEvent]::new($false);RequestPath=$requestPath;Spool=$SpoolDir;Instance=$workerInstance;Heartbeat='';HighWater=[long]0;NextTicket=[long]0;Prepared=(New-Object 'Collections.Concurrent.ConcurrentDictionary[long,object]');Opening=(New-Object 'Collections.Concurrent.ConcurrentDictionary[long,bool]');Expected=(New-Object 'Collections.Concurrent.ConcurrentDictionary[long,bool]');ReadMs=0;WriteMs=0;WriteOpenMs=0;WriteIoMs=0;HeartbeatMs=0;FramesIn=0;FramesOut=0;ReaderReady=$false;WriterReady=$false})
     Start-StreamPipe {
         param($Shared)
         $ErrorActionPreference='Stop';$file=$null;$sha=[Security.Cryptography.SHA256]::Create()
@@ -406,7 +406,7 @@ function Initialize-StreamIpc {
                         $value|Add-Member -NotePropertyName __stream_ticket -NotePropertyValue $ticket -Force
                         [Threading.Monitor]::Enter($Shared.SyncRoot)
                         try{if($nextBlock -gt $Shared.HighWater){$Shared.HighWater=$nextBlock}}finally{[Threading.Monitor]::Exit($Shared.SyncRoot)}
-                        $Shared.In.Enqueue($value);$Shared.FramesIn++
+                        $Shared.In.Enqueue($value);$Shared.FramesIn++;[void]$Shared.DispatchWake.Set()
                     }catch{}
                 }
                 if(-not $count){Start-Sleep -Milliseconds 5}
@@ -459,7 +459,7 @@ function Initialize-StreamIpc {
             $Shared.WriterReady=$true
             while(-not $Shared.Stop -or $Shared.Out.Count){
                 $item=$null
-                if($Shared.Out.TryDequeue([ref]$item)){
+                if($Shared.Out.TryTake([ref]$item,20)){
                     $ticket=[long]$item.Ticket
                     if($ticket -lt 0 -or $ticket -ge 16384){throw 'Invalid response ticket'}
                     $bytes=[Text.Encoding]::ASCII.GetBytes($item.Frame)
@@ -487,7 +487,7 @@ function Initialize-StreamIpc {
                     $Shared.WriteIoMs=$ioTimer.ElapsedMilliseconds;$Shared.WriteMs=$timer.ElapsedMilliseconds
                     [Threading.Monitor]::Enter($Shared.SyncRoot)
                     try{$Shared.FramesOut++}finally{[Threading.Monitor]::Exit($Shared.SyncRoot)}
-                }else{Start-Sleep -Milliseconds 5}
+                }
             }
         }catch{Set-StreamFailure $Shared $_ 'Stream response writer failed'}finally{if($file){$file.Dispose()}}
     } $streamState
@@ -552,11 +552,12 @@ function Send-StreamResponse($Result) {
     }
     $sha=[Security.Cryptography.SHA256]::Create()
     try{$digest=[BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
-    if($streamState.Out.Count -ge 256){throw 'Stream response backlog reached capacity; reconcile the Host journal'}
     $frame='EGWS1 '+$digest+' '+[Convert]::ToBase64String($bytes)+"`n"
     if($script:streamReservedBytes+$frame.Length -gt 67108864){throw 'Stream response capacity reached'}
+    if(-not $streamState.Out.TryAdd(@{Ticket=[long]$streamTxIds[$Result.tx_id];Frame=$frame})){
+        throw 'Stream response backlog reached capacity; reconcile the Host journal'
+    }
     $script:streamReservedBytes+=$frame.Length
-    $streamState.Out.Enqueue(@{Ticket=[long]$streamTxIds[$Result.tx_id];Frame=$frame})
 }
 function Close-Mux {
     param([string]$ConnectionId)
@@ -572,8 +573,8 @@ $execute = {
     $global:LASTEXITCODE = 0
     try {
         $items = @(& ([scriptblock]::Create($ScriptText)) 2>&1)
-        $outLines = New-Object Collections.Generic.List[string]
-        $errLines = New-Object Collections.Generic.List[string]
+        $outLines = [Collections.Generic.List[string]]::new()
+        $errLines = [Collections.Generic.List[string]]::new()
         foreach ($item in $items) {
             if ($item -is [Management.Automation.ErrorRecord]) { $errLines.Add($item.ToString()) }
             elseif ($null -ne $item) { $outLines.Add($item.ToString()) }
@@ -831,7 +832,7 @@ if($ProcessIsolation){
             }
         }
 
-        $dispatchItems=New-Object Collections.Generic.List[object]
+        $dispatchItems=[Collections.Generic.List[object]]::new()
         if($SpoolProtocol -eq 'Stream'){
             # Read new control messages before revisiting occupied execution
             # slots. A full pending batch must never starve cancellation.
@@ -1100,7 +1101,19 @@ $e | ConvertTo-Json -Compress -Depth 5
             $lastHeartbeatMs=$lastHeartbeat-$heartbeatStart
         }
         $lastLoopMs=$clock.ElapsedMilliseconds-$loopStart
-        Start-Sleep -Milliseconds ([Math]::Max(1, [Math]::Min($PollIntervalMs, 50)))
+        $pause=[Math]::Max(1, [Math]::Min($PollIntervalMs, 50))
+        if($streamState){
+            # Wake when a frame arrives or a pipeline completes. Keep the
+            # original polling ceiling for heartbeat, mux and deadline checks.
+            if($activeTxJobs.Count -lt 64){
+                $handles=[Collections.Generic.List[Threading.WaitHandle]]::new()
+                $handles.Add($streamState.DispatchWake)
+                foreach($job in $activeTxJobs){$handles.Add($job.Handle.AsyncWaitHandle)}
+                [void][Threading.WaitHandle]::WaitAny($handles.ToArray(),$pause)
+            }else{
+                [void]$streamState.DispatchWake.WaitOne($pause)
+            }
+        }else{Start-Sleep -Milliseconds $pause}
     }
 } finally {
     try {
@@ -1113,6 +1126,8 @@ $e | ConvertTo-Json -Compress -Depth 5
         }finally{
             foreach($prepared in @($streamState.Prepared.Values)){$prepared.Dispose()}
             $streamState.Prepared.Clear()
+            $streamState.Out.Dispose()
+            $streamState.DispatchWake.Dispose()
         }
         # Endpoints are immutable per instance; retain them for reconciliation.
         # A stopped descriptor cannot authorize a new worker instance.

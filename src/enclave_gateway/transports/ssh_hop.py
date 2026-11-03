@@ -154,13 +154,13 @@ def build_powershell_ssh_hop_script(node, bash_script, *, as_root=False, ssh_pas
         stdout_b64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($outText));
         stderr_b64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($errText))} | ConvertTo-Json -Compress'''
     script=f"""
-$psi=New-Object Diagnostics.ProcessStartInfo
+$psi=[Diagnostics.ProcessStartInfo]::new()
 $psi.FileName='ssh.exe'
 $psi.Arguments={ps_quote(subprocess.list2cmdline(arguments))}
 $psi.UseShellExecute=$false
 $psi.RedirectStandardInput=$true; $psi.RedirectStandardOutput=$true; $psi.RedirectStandardError=$true
-$psi.StandardOutputEncoding=New-Object Text.UTF8Encoding($false); $psi.StandardErrorEncoding=New-Object Text.UTF8Encoding($false)
-$proc=New-Object Diagnostics.Process; $proc.StartInfo=$psi
+$psi.StandardOutputEncoding=[Text.UTF8Encoding]::new($false); $psi.StandardErrorEncoding=$psi.StandardOutputEncoding
+$proc=[Diagnostics.Process]::new(); $proc.StartInfo=$psi
 try {{
     [void]$proc.Start()
     $output=$proc.StandardOutput.ReadToEndAsync(); $errorOutput=$proc.StandardError.ReadToEndAsync()

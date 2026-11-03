@@ -14,21 +14,6 @@ from enclave_gateway.config import EnclaveConfig
 from enclave_gateway.engine import EnclaveEngine
 from enclave_gateway.security.policy import AccessPolicy
 from enclave_gateway.operations.context import OperationError
-from enclave_gateway.mcp_server.server import (
-    McpHttpServer,
-    McpJsonRpcServer,
-    export_openai_tools,
-    export_openapi_spec,
-    generate_client_configs,
-)
-from enclave_gateway.provision.builder import ApplianceProvisioner, ProvisionOptions
-from enclave_gateway.transports.rdp_vfs import RdpVfsTunnelServer
-from enclave_gateway.transports.socks5_mux import (
-    MultiPortForwardSupervisor,
-    Socks5VfsServer,
-    pump_stdio_mux,
-)
-from enclave_gateway.tui.dashboard import run_interactive_top
 
 
 def _parse_copy_spec(spec: str) -> tuple[str | None, str]:
@@ -502,10 +487,14 @@ def _main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command=='mcp-config':
+        from enclave_gateway.mcp_server.server import generate_client_configs
+
         configs=generate_client_configs(config_path=args.config)
         value=configs if args.client=='all' else configs[args.client]
         print(value if isinstance(value,str) else json.dumps(value,indent=2,ensure_ascii=False));return 0
     if args.command=='mcp' and (args.export_openai_tools or args.export_openapi):
+        from enclave_gateway.mcp_server.server import export_openai_tools, export_openapi_spec
+
         print(json.dumps(export_openai_tools() if args.export_openai_tools else export_openapi_spec(),indent=2));return 0
     if args.command=='secret':
         from enclave_gateway.security.secrets import SecretVault
@@ -589,6 +578,8 @@ def _main(argv: list[str] | None = None) -> int:
         engine=EnclaveEngine(config=cfg,state_dir=args.state_dir)
 
     if args.command == "mcp":
+        from enclave_gateway.mcp_server.server import McpHttpServer, McpJsonRpcServer
+
         policy = AccessPolicy.load(args.policy) if args.policy else None
         router=None
         if args.isolation_map:
@@ -674,6 +665,8 @@ def _main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "init":
+        from enclave_gateway.provision.builder import ApplianceProvisioner, ProvisionOptions
+
         if args.recover_machine_preparation:
             if args.create_disk or args.force_disk or args.launch_installer or args.detach_installer:
                 parser.error('Machine recovery cannot create a disk or launch an installer')
@@ -768,6 +761,8 @@ def _main(argv: list[str] | None = None) -> int:
         return 0 if diag["healthy"] else 1
 
     if args.command == "top":
+        from enclave_gateway.tui.dashboard import run_interactive_top
+
         return run_interactive_top(
             engine, interval_sec=args.interval, once=args.once
         )
@@ -948,6 +943,8 @@ def _main(argv: list[str] | None = None) -> int:
         print(
             f"Listening on 127.0.0.1:{local_port} -> relaying ({mode_str}) via RdpVfsTransport to {target_host}:{target_port}..."
         )
+        from enclave_gateway.transports.rdp_vfs import RdpVfsTunnelServer
+
         server = RdpVfsTunnelServer(
             engine.rdp_vfs,
             local_port,
@@ -962,6 +959,8 @@ def _main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "socks5":
+        from enclave_gateway.transports.socks5_mux import Socks5VfsServer
+
         port = args.port if args.port is not None else cfg.appliance.socks5_port
         aliases = {name: spec.host for name, spec in cfg.targets.items()}
         print(
@@ -980,6 +979,8 @@ def _main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "forward":
+        from enclave_gateway.transports.socks5_mux import MultiPortForwardSupervisor
+
         if not cfg.forwards and not args.with_socks5:
             print(
                 "Error: no 'forwards:' configured in enclave.yaml (and --with-socks5 not specified).",
@@ -1015,6 +1016,8 @@ def _main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "stdio-proxy":
+        from enclave_gateway.transports.socks5_mux import pump_stdio_mux
+
         resolved_host = (
             cfg.targets[args.host].host if args.host in cfg.targets else args.host
         )
@@ -1047,6 +1050,8 @@ def _main(argv: list[str] | None = None) -> int:
 
     if args.command == "profile":
         if args.profile_action == "create":
+            from enclave_gateway.provision.builder import ApplianceProvisioner
+
             provisioner = ApplianceProvisioner(cfg)
             base_disk = Path(args.base_disk) if args.base_disk else None
             out_dir = Path(args.output_dir) if args.output_dir else None
