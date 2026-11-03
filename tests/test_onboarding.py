@@ -33,7 +33,7 @@ class ConfigurationTests(unittest.TestCase):
         parser=build_parser()
         for name in ('README.md','docs/GUIDE.md'):
             examples=0
-            for block in re.findall(r'```(?:sh|powershell)\n(.*?)```',(ROOT/name).read_text(),re.S):
+            for block in re.findall(r'```(?:sh|powershell)\n(.*?)```',(ROOT/name).read_text(encoding="utf-8"),re.S):
                 for line in block.replace('\\\n',' ').splitlines():
                     line=line.strip()
                     for prefix in ('egw ','.venv/bin/egw ',r'.\.venv\Scripts\egw.exe '):

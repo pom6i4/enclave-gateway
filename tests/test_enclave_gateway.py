@@ -1720,7 +1720,7 @@ for index in range(20):
     def test_ssh_posix_payload_executes_and_sudo_quoting_is_valid(self):
         marker = "literal ' quote $HOME ; Ж"
         invocation = build_remote_bash_invocation("printf '%s' " + __import__('shlex').quote(marker))
-        result = subprocess.run(["sh", "-c", invocation], capture_output=True, text=True, timeout=3)
+        result = subprocess.run(["sh", "-c", invocation], capture_output=True, encoding="utf-8", timeout=3)
         self.assertEqual((result.returncode, result.stdout), (0, marker))
         with TemporaryDirectory() as tmp:
             sudo = Path(tmp) / "sudo"
