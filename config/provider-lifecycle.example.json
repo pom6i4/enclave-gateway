@@ -1,80 +1,56 @@
 {
   "revision": 1,
   "provider": "custom",
-  "versions": [
-    "0.0.0-fixture"
-  ],
-  "architectures": [
-    "x86_64"
-  ],
-  "source": "https://vendor.enclave.internal/approved-controller-contract",
+  "versions": ["0.0.0-example"],
+  "architectures": ["x86_64"],
+  "source": "https://example.enclave.internal/approved-provider-controller-contract",
   "actions": {
     "install": [
       {
-        "executable": "C:\\EnclaveGateway\\bin\\example-controller.exe",
+        "executable": "C:\\EnclaveGateway\\approved\\example-provider-controller.exe",
         "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-        "publisher": "CN=Example Provider Controller",
-        "version": "0.0.0-fixture",
+        "publisher": "CN=Example Provider Publisher",
+        "version": "0.0.0-example",
         "architecture": "x86_64",
-        "success_codes": [
-          0,
-          3010
-        ],
-        "arguments": [
-          "install",
-          "{installer}"
-        ]
+        "arguments": ["install", "--installer", "{installer}"],
+        "success_codes": [0],
+        "timeout_sec": 120
       }
     ],
     "connect": [
       {
-        "executable": "C:\\EnclaveGateway\\bin\\example-controller.exe",
+        "executable": "C:\\EnclaveGateway\\approved\\example-provider-controller.exe",
         "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-        "publisher": "CN=Example Provider Controller",
-        "version": "0.0.0-fixture",
+        "publisher": "CN=Example Provider Publisher",
+        "version": "0.0.0-example",
         "architecture": "x86_64",
-        "success_codes": [
-          0,
-          3010
-        ],
-        "arguments": [
-          "connect",
-          "{profile_file}"
-        ]
+        "arguments": ["connect", "--profile", "{profile_file}"],
+        "success_codes": [0],
+        "timeout_sec": 120
       }
     ],
     "disconnect": [
       {
-        "executable": "C:\\EnclaveGateway\\bin\\example-controller.exe",
+        "executable": "C:\\EnclaveGateway\\approved\\example-provider-controller.exe",
         "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-        "publisher": "CN=Example Provider Controller",
-        "version": "0.0.0-fixture",
+        "publisher": "CN=Example Provider Publisher",
+        "version": "0.0.0-example",
         "architecture": "x86_64",
-        "success_codes": [
-          0,
-          3010
-        ],
-        "arguments": [
-          "disconnect",
-          "{tunnel_name}"
-        ]
+        "arguments": ["disconnect", "--profile", "{profile_file}"],
+        "success_codes": [0],
+        "timeout_sec": 120
       }
     ],
     "import_key": [
       {
-        "executable": "C:\\EnclaveGateway\\bin\\example-controller.exe",
+        "executable": "C:\\EnclaveGateway\\approved\\example-provider-controller.exe",
         "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-        "publisher": "CN=Example Provider Controller",
-        "version": "0.0.0-fixture",
+        "publisher": "CN=Example Provider Publisher",
+        "version": "0.0.0-example",
         "architecture": "x86_64",
-        "success_codes": [
-          0,
-          3010
-        ],
-        "arguments": [
-          "import_key",
-          "{key_file}"
-        ]
+        "arguments": ["import_key", "--key", "{key_file}"],
+        "success_codes": [0],
+        "timeout_sec": 120
       }
     ]
   }

@@ -4,6 +4,8 @@ from dataclasses import asdict
 import io
 import json
 import os
+import re
+import shlex
 from pathlib import Path
 import subprocess
 import sys
@@ -11,8 +13,8 @@ import tempfile
 import time
 import unittest
 from unittest.mock import Mock,patch
-from enclave_gateway.cli import main
-from enclave_gateway.config import EnclaveConfig,SecuritySpec,TargetNodeSpec,parse_yaml_or_json
+from enclave_gateway.cli import main,build_parser
+from enclave_gateway.config import EnclaveConfig,ProviderSpec,SecuritySpec,TargetNodeSpec,parse_yaml_or_json
 from enclave_gateway.onboarding import starter_configuration,configuration_summary,agent_bundle,stage_agents
 from enclave_gateway.transports.ssh_hop import _ssh_args
 from enclave_gateway.control.qga_client import ExecResult
@@ -26,6 +28,53 @@ def enterprise(**extra):
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_public_shell_recipes_match_the_cli_parser_without_dispatch(self):
+        parser=build_parser()
+        for name in ('README.md','docs/GUIDE.md'):
+            examples=0
+            for block in re.findall(r'```(?:sh|powershell)\n(.*?)```',(ROOT/name).read_text(),re.S):
+                for line in block.replace('\\\n',' ').splitlines():
+                    line=line.strip()
+                    for prefix in ('egw ','.venv/bin/egw ',r'.\.venv\Scripts\egw.exe '):
+                        if not line.startswith(prefix):continue
+                        examples+=1
+                        with self.subTest(document=name,command=line),patch('sys.stdout',new_callable=io.StringIO),patch('sys.stderr',new_callable=io.StringIO):
+                            try:parser.parse_args(shlex.split(line[len(prefix):]))
+                            except SystemExit as error:self.assertEqual(error.code,0)
+                        break
+            self.assertGreater(examples,0)
+
+    def test_provider_type_is_validated_before_engine_creation(self):
+        for value in ('unknown','','ViPNet'):
+            with self.subTest(value=value),self.assertRaisesRegex(ValueError,'^Unsupported VPN provider type$'):
+                EnclaveConfig.from_dict({'provider':{'type':value}})
+        for value in (None,False,1,[],{}):
+            with self.subTest(value=value),self.assertRaisesRegex(ValueError,'^Unsupported VPN provider type$'):
+                ProviderSpec(type=value)
+        with tempfile.TemporaryDirectory() as folder:
+            file=Path(folder)/'invalid.json';file.write_text('{"provider":{"type":"unknown"}}')
+            with patch('enclave_gateway.cli.EnclaveEngine') as engine,patch('sys.stderr',new_callable=io.StringIO) as stderr:
+                self.assertEqual(main(['-c',str(file),'config','check']),1)
+                self.assertIn('Unsupported VPN provider type',stderr.getvalue());self.assertNotIn('Traceback',stderr.getvalue())
+                engine.assert_not_called()
+
+    def test_provider_summary_reports_configuration_without_claiming_live_qualification(self):
+        from enclave_gateway.providers.adapters import provider_adapter
+        for name in ('vipnet','kontinent','wireguard','anyconnect','openvpn','custom'):
+            for manifest in ('','/absolute/private/provider-lifecycle.json'):
+                with self.subTest(name=name,manifest=manifest):
+                    cfg=EnclaveConfig.from_dict({'provider':{'type':name,'lifecycle_manifest':manifest}})
+                    self.assertEqual(provider_adapter(name).name,name)
+                    report=configuration_summary(cfg)
+                    self.assertEqual(report['provider_type'],name)
+                    self.assertIs(report['provider_lifecycle_configured'],bool(manifest))
+        with tempfile.TemporaryDirectory() as folder:
+            file=Path(folder)/'config.json';file.write_text(json.dumps({'provider':{'type':'custom','lifecycle_manifest':'/absolute/private/provider-lifecycle.json'}}))
+            with patch('enclave_gateway.cli.EnclaveEngine') as engine,patch('sys.stdout',new_callable=io.StringIO) as output:
+                self.assertEqual(main(['-c',str(file),'config','check']),0)
+                report=json.loads(output.getvalue());self.assertEqual(report['provider_type'],'custom');self.assertTrue(report['provider_lifecycle_configured'])
+                engine.assert_not_called()
+
     def test_named_modes_preserve_legacy_and_reject_enterprise_downgrades(self):
         old=SecuritySpec();self.assertTrue(old.require_signed_helpers);self.assertTrue(old.require_signed_agents)
         self.assertFalse(old.require_process_isolation);self.assertEqual(old.mode,'custom')

@@ -1,8 +1,18 @@
 # Enclave Gateway (`egw`)
 
-Run commands, transfer files and forward TCP connections into an enclave through
-an approved Windows VPN Appliance and an RDP Bastion. `egw` connects a local CLI
-or MCP client to TargetNodes without requiring an inbound SSH port on the Bastion.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](pyproject.toml)
+[![Zero mandatory third-party Python dependencies](https://img.shields.io/badge/Python_dependencies-0_required-green.svg)](pyproject.toml)
+[![MCP server](https://img.shields.io/badge/MCP-server-green.svg)](docs/SECURITY.md)
+
+Run commands, transfer files and forward TCP connections from a macOS (Apple
+Silicon arm64 or Intel x86_64), Linux or Windows Host through an isolated Windows
+VPN Appliance and an RDP Bastion (TCP 3389), even when inbound SSH to Bastion is
+closed. The Appliance uses QEMU HVF / KVM / WHPX with matching Host/guest
+architectures; Windows Direct mode uses the existing Host instead of an isolated
+VM. Use the organization's approved Windows VPN client: ViPNet Client,
+АПКШ Континент, Cisco AnyConnect / Secure Client, OpenVPN, WireGuard or a custom
+provider. `egw` connects a local CLI or MCP client to the enclave's TargetNodes.
 
 ```text
 Host → QGA → Windows Appliance → RDP redirected drive → Bastion worker → SSH → TargetNode
@@ -11,6 +21,34 @@ Host → QGA → Windows Appliance → RDP redirected drive → Bastion worker �
 **Beta software.** Standard mode is for a trusted operator and RDP session.
 Enterprise adds signed native isolation and verified identities. Neither mode
 replaces the organization's endpoint policy, VPN entitlement or host-key approval.
+
+## Key capabilities
+
+- **QEMU Appliance & 6 VPN Provider Adapters** — `vipnet`, `kontinent`,
+  `anyconnect`, `openvpn`, `wireguard`, `custom`. Installed-binary probes inspect
+  PE architecture (`arm64` / `x86_64` / `x86`), Authenticode and exact configured
+  versions/publisher. Matching configuration does not qualify a driver or VPN
+  session. Optional `egw provider install|connect|disconnect|import_key` plans use
+  a hash-pinned lifecycle manifest; apply requires its reviewed approval digest.
+  No proprietary command line or key-import procedure is inferred.
+- **Transactional RDP VFS Transport** — `[MS-RDPEFS]` / `\\tsclient` redirected
+  files, without custom virtual-channel `.dll` installation. Parallel Striped I/O
+  and block deltas use SHA-256, default 4 MiB blocks and optional zlib compression.
+  Standard executes commands in warm PowerShell runspaces; transfer scripts use
+  a RunspacePool. No C# compiler or additional worker `.exe` is required.
+- **Multi-Hop SSH, SOCKS5 & Port Forwarding** — `egw exec`, `cp` and `sync`;
+  bidirectional TCP multiplexing and RFC 1928 SOCKS5 (`egw socks5`); OpenSSH
+  ProxyCommand (`egw ssh`, `stdio-proxy`, `ssh-config`); supervised forwards
+  (`egw forward`), terminal monitoring (`egw top`) and layered L1–L7 diagnostics
+  (`egw doctor`, `heal`). SSH requires verified host keys and credentials on the
+  executing hop; transport compatibility and latency need deployment validation.
+- **Governed MCP Server (stdio & HTTP)** — connect AI agents and IDEs with
+  `egw mcp`, role/tool/node/path policies and `PrincipalRouter` backends.
+  `DestructiveCommandGuard` checks commands, `SecretScrubber` filters registered
+  and recognized secret patterns, `FlightRecorder` provides hash-linked audit,
+  and `egw transactions` retains operation identities/outcomes. These controls
+  supplement explicit authorization and Enterprise OS isolation; command checks
+  and scrubbing cannot recognize every possible shell effect or secret.
 
 ## Start with an existing environment
 
@@ -31,6 +69,9 @@ python3 -m venv .venv
 .venv/bin/egw doctor --preflight
 .venv/bin/egw agents stage
 ```
+
+On Windows use `.venv\Scripts\python.exe` and `.venv\Scripts\egw.exe`;
+see [installation](docs/GUIDE.md#installation).
 
 Connect the Appliance's approved RDP session to the Bastion with drive redirection.
 **Run the command printed by `agents stage` inside that Bastion session.**

@@ -101,6 +101,95 @@ spool paths consistently. Keep credentials outside redirected user-readable
 locations. The spool is a command channel: grant access only to its trusted
 operator/session. An arbitrary writer is not an untrusted service principal.
 
+## VPN providers (`provider.type`)
+
+`provider.type` selects one registered adapter; unknown names fail during config
+loading. `egw config check` reports `provider_type` and
+`provider_lifecycle_configured`. The latter means a manifest path is configured,
+not that its contents, executable or live VPN session have been accepted.
+
+| Type | Installed-artifact probe and deployment boundary |
+| --- | --- |
+| `vipnet` | ViPNet Mobile binary candidates; `info` runs only after the configured publisher/version/PE architecture match. Qualify the actual Client edition, driver and route separately. |
+| `kontinent` | No assumed binary path or proprietary status arguments. Supply approved artifact/service settings for the installed АПКШ Континент release. |
+| `anyconnect` | Cisco Secure Client / AnyConnect `vpncli.exe` candidates and `vpnagent` service; qualified binary may run `state`. |
+| `openvpn` | OpenVPN binary and service candidates; inspects artifact/service evidence without guessing a status CLI invocation. |
+| `wireguard` | `wg.exe` and tunnel-service candidates; qualified binary may run `show`. |
+| `custom` | Explicit `binary_path` / `service_name` when artifact evidence is needed, or an externally managed approved VPN connection. No inferred status command. |
+
+For installed-binary qualification, configure `expected_publisher` with the exact
+Authenticode certificate subject, `qualified_versions` with exact file-version
+strings and `qualified_architectures` with the approved PE values (`arm64`,
+`x86_64`, `x86`). `binary_path` overrides adapter candidates; `service_name`
+overrides its service pattern. Status command execution requires a valid
+Authenticode signature and all three configured matches. Empty lists or a missing
+publisher leave the binary `unqualified`; they do not authorize execution.
+`configuration_matched` is artifact evidence. Driver qualification remains
+`not_verified`; a successful network probe proves reachability, not VPN identity.
+
+### Optional approved lifecycle recipes
+
+Use `egw provider --help` for `install`, `connect`, `disconnect` and `import_key`.
+These operations require an explicit hash-pinned `lifecycle_manifest`; neither
+ViPNet nor Континент management commands are inferred from a provider name.
+Existing VPN connections require no lifecycle recipe for ordinary `exec`/`cp`.
+
+[`config/provider-lifecycle.example.json`](../config/provider-lifecycle.example.json)
+is a schema-valid **custom-controller illustration**, not a vendor procedure.
+Its controller path, zero hash, example publisher/version, source URL and arguments
+are deliberately fictitious. Replace them with an administrator-reviewed,
+documented procedure before apply. Each step pins the executable's SHA-256,
+Authenticode publisher subject, exact file version and PE architecture. Manifest
+`versions` / `architectures` constrain those controller steps; they do not qualify
+VPN drivers. Keep installers, profiles and key material outside the repository.
+
+Configure a private copy using an absolute manifest path on the Host and its
+reviewed SHA-256 (`python3 -c "import hashlib,pathlib; print(hashlib.sha256(pathlib.Path('/absolute/private/provider-lifecycle.json').read_bytes()).hexdigest())"`).
+Add these fields to `provider` in your private configuration:
+
+```yaml
+provider:
+  type: custom
+  lifecycle_manifest: /absolute/private/provider-lifecycle.json
+  lifecycle_manifest_sha256: '<reviewed-manifest-sha256>'
+  lifecycle_inputs:
+    installer: 'C:\EnclaveGateway\approved\installer.msi'
+    profile_file: 'C:\EnclaveGateway\approved\profile.conf'
+    key_file: 'C:\EnclaveGateway\approved\key-container.dst'
+```
+
+The placeholder digest must be replaced before planning. `lifecycle_inputs` are
+literal paths on the Windows execution host (Appliance, or Windows Direct Host),
+not automatically uploaded Host files. Only whole argument placeholders such as
+`{installer}`, `{key_file}` and `{profile_file}` are expanded; embedded placeholders
+or shell fragments are not evaluated. `source` records the approved procedure's
+provenance; it is not downloaded or executed.
+
+```sh
+egw provider --help
+egw provider connect
+# Review the returned steps, artifacts and approval_digest, then explicitly apply:
+egw provider connect --apply --approval-digest <reviewed-plan-digest>
+```
+
+Without `--apply`, the command plans only; there is no `--dry-run` flag. A plan
+reads the local manifest and hashes configured local artifacts, but does not run
+the controller or contact the VPN. Apply recomputes the plan and rejects a changed
+digest before execution. Runtime checks still verify the actual executable's
+hash, signature/publisher, version and PE architecture. Apply also requires an
+approved signed `egw-runtime.exe` and its configured trusted signer, including
+when the surrounding security mode is Standard. Planning the example successfully
+does not establish that it can execute.
+
+Optional `lifecycle_local_artifacts` maps `installer` or `key_file` to private Host
+files for the matching action; `lifecycle_artifact_publishers` supplies the
+installer's approved publisher. Planning includes their content hashes. Apply
+stages them under transaction-specific names, verifies delivery and attempts
+cleanup; inspect `cleanup_pending` before considering the operation complete.
+Approved success codes can report `reboot_required`, but no automatic reboot is
+performed. Hash/signature checks do not establish that a proprietary procedure is
+safe for your version: qualify it separately, without sharing production keys.
+
 ## SSH trust
 
 There are **two different locations** to configure:

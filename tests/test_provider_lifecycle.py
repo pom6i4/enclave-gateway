@@ -13,6 +13,26 @@ from enclave_gateway.control.qga_client import ExecResult
 
 
 class ProviderLifecycleTests(unittest.TestCase):
+    def test_shipped_example_plans_every_action_without_executing_a_controller(self):
+        file=Path(__file__).resolve().parents[1]/'config/provider-lifecycle.example.json'
+        inputs={'installer':r'C:\EnclaveGateway\approved\installer.msi','key_file':r'C:\EnclaveGateway\approved\key-container.dst',
+                'profile_file':r'C:\EnclaveGateway\approved\profile.conf'}
+        spec=ProviderSpec(type='custom',lifecycle_manifest=str(file),lifecycle_manifest_sha256=hashlib.sha256(file.read_bytes()).hexdigest(),lifecycle_inputs=inputs)
+        manifest=json.loads(file.read_text())
+        self.assertEqual(set(manifest['actions']),{'install','connect','disconnect','import_key'})
+        with TemporaryDirectory() as root:
+            control=Mock();engine=engine_at(root,control);engine.config.provider=spec
+            for action,argument in (('install','installer'),('connect','profile_file'),('disconnect','profile_file'),('import_key','key_file')):
+                with self.subTest(action=action):
+                    result=plan(spec,action);self.assertEqual(result['provider'],'custom');self.assertFalse(result['automatic_reboot'])
+                    self.assertIn(inputs[argument],result['steps'][0]['arguments'])
+                    self.assertEqual(plan(spec,action)['approval_digest'],result['approval_digest'])
+                    self.assertEqual(engine.provider_manage(action)['status'],'planned')
+                    with self.assertRaises(OperationError):engine.provider_manage(action,apply=True,approval_digest='wrong')
+            control.exec_powershell.assert_not_called()
+            engine.config.provider.lifecycle_manifest_sha256='f'*64
+            with self.assertRaisesRegex(ValueError,'changed after approval'):plan(spec,'connect')
+
     def fixture(self,root):
         file=Path(root)/'recipe.json'
         manifest={'revision':1,'provider':'custom','versions':['fixture-v1'],'architectures':['x86_64'],

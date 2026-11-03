@@ -19,7 +19,7 @@ appliance:
 
 # Use the existing approved VPN connection. No installer or key import by default.
 provider:
-  type: custom
+  type: custom                   # custom | vipnet | kontinent | anyconnect | openvpn | wireguard
   installer_path: ''
   dst_key_path: ''
   probe_host: ''                  # Follows bastion.host; explicit for a different probe

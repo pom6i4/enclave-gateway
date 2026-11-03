@@ -119,7 +119,11 @@ class ProviderSpec:
 
 
     def __post_init__(self):
+        from enclave_gateway.providers.adapters import provider_adapter
         from enclave_gateway.security.quoting import validate_endpoint
+        if not isinstance(self.type,str):
+            raise ValueError('Unsupported VPN provider type')
+        provider_adapter(self.type)
         validate_endpoint(self.probe_host,self.probe_port)
         for entries in (self.qualified_versions, self.qualified_architectures):
             if not isinstance(entries, list) or any(not isinstance(value, str) for value in entries):
