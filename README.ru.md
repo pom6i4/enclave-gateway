@@ -47,7 +47,7 @@ python3 -m venv .venv
 ## Документация
 
 - [Руководство на русском](docs/ru/GUIDE.md) и [полное руководство на английском](docs/GUIDE.md).
-- [Архитектура безопасности и Enterprise](docs/SECURITY.md) на английском.
+- [Архитектура безопасности и внедрение Enterprise](docs/ru/SECURITY.md).
 - [Сборка, совместимость и релизная приёмка](docs/RELEASING.md) на английском.
 - [Как внести вклад](CONTRIBUTING.md) на английском.
 

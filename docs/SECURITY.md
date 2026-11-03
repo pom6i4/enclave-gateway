@@ -1,5 +1,7 @@
 # Security architecture and Enterprise deployment
 
+English · [Русский](ru/SECURITY.md)
+
 ## Trust boundaries
 
 The Host operator controls the CLI and QGA/QMP channel. QGA commonly executes as
