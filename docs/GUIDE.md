@@ -1,5 +1,7 @@
 # Engineer and administrator guide
 
+English · [Русское руководство](ru/GUIDE.md)
+
 ## Installation
 
 The Python CLI requires Python 3.10 or newer and has no mandatory third-party

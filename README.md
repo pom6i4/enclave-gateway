@@ -1,5 +1,7 @@
 # Enclave Gateway (`egw`)
 
+English · [Русский](README.ru.md)
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](pyproject.toml)
 [![Zero mandatory third-party Python dependencies](https://img.shields.io/badge/Python_dependencies-0_required-green.svg)](pyproject.toml)
