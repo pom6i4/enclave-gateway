@@ -365,7 +365,7 @@ function Initialize-StreamIpc {
     foreach($path in @($requestPath)){
         $file=[IO.File]::Open($path,[IO.FileMode]::CreateNew,[IO.FileAccess]::ReadWrite,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete));$file.Dispose()
     }
-    $script:streamState=[hashtable]::Synchronized(@{Stop=$false;Error='';Retryable=$false;FaultCode=0;In=(New-Object 'Collections.Concurrent.ConcurrentQueue[object]');Out=[Collections.Concurrent.BlockingCollection[object]]::new(256);DispatchWake=[Threading.AutoResetEvent]::new($false);RequestPath=$requestPath;Spool=$SpoolDir;Instance=$workerInstance;Heartbeat='';HighWater=[long]0;NextTicket=[long]0;Prepared=(New-Object 'Collections.Concurrent.ConcurrentDictionary[long,object]');Opening=(New-Object 'Collections.Concurrent.ConcurrentDictionary[long,bool]');Expected=(New-Object 'Collections.Concurrent.ConcurrentDictionary[long,bool]');ReadMs=0;WriteMs=0;WriteOpenMs=0;WriteIoMs=0;HeartbeatMs=0;FramesIn=0;FramesOut=0;ReaderReady=$false;WriterReady=$false})
+    $script:streamState=[hashtable]::Synchronized(@{Stop=$false;Error='';Retryable=$false;FaultCode=0;In=(New-Object 'Collections.Concurrent.ConcurrentQueue[object]');Out=[Collections.Concurrent.BlockingCollection[object]]::new(256);DispatchWake=[Threading.AutoResetEvent]::new($false);PrepareWake=[Threading.SemaphoreSlim]::new(0,4);RequestPath=$requestPath;Spool=$SpoolDir;Instance=$workerInstance;Heartbeat='';HighWater=[long]0;NextTicket=[long]0;Prepared=(New-Object 'Collections.Concurrent.ConcurrentDictionary[long,object]');Opening=(New-Object 'Collections.Concurrent.ConcurrentDictionary[long,bool]');Expected=(New-Object 'Collections.Concurrent.ConcurrentDictionary[long,bool]');ReadMs=0;WriteMs=0;WriteOpenMs=0;WriteIoMs=0;HeartbeatMs=0;FramesIn=0;FramesOut=0;ReaderReady=$false;WriterReady=$false})
     Start-StreamPipe {
         param($Shared)
         $ErrorActionPreference='Stop';$file=$null;$sha=[Security.Cryptography.SHA256]::Create()
@@ -374,7 +374,7 @@ function Initialize-StreamIpc {
             [void]($sha.ComputeHash((New-Object byte[] 0)));[void]('{"ready":true}'|ConvertFrom-Json)
             $Shared.ReaderReady=$true;$bytes=New-Object byte[] 65536;$buffer='';$offset=[long]0
             while(-not $Shared.Stop){
-                if($Shared.In.Count -ge 128){Start-Sleep -Milliseconds 5;continue}
+                if($Shared.In.Count -ge 128){[Threading.Thread]::Sleep(5);continue}
                 $timer=[Diagnostics.Stopwatch]::StartNew();$count=$file.Read($bytes,0,$bytes.Length);$Shared.ReadMs=$timer.ElapsedMilliseconds
                 if($count){$buffer += [Text.Encoding]::ASCII.GetString($bytes,0,$count)}
                 while($buffer.Length){
@@ -405,11 +405,18 @@ function Initialize-StreamIpc {
                         if($value.op -ne 'cancel'){[void]$Shared.Expected.TryAdd($ticket,$true)}
                         $value|Add-Member -NotePropertyName __stream_ticket -NotePropertyValue $ticket -Force
                         [Threading.Monitor]::Enter($Shared.SyncRoot)
-                        try{if($nextBlock -gt $Shared.HighWater){$Shared.HighWater=$nextBlock}}finally{[Threading.Monitor]::Exit($Shared.SyncRoot)}
+                        try{
+                            if($nextBlock -gt $Shared.HighWater){
+                                $Shared.HighWater=$nextBlock
+                                # One reader grants wakeups; consumers can only reduce this count.
+                                $wakeups=4-$Shared.PrepareWake.CurrentCount
+                                if($wakeups){[void]$Shared.PrepareWake.Release($wakeups)}
+                            }
+                        }finally{[Threading.Monitor]::Exit($Shared.SyncRoot)}
                         $Shared.In.Enqueue($value);$Shared.FramesIn++;[void]$Shared.DispatchWake.Set()
                     }catch{}
                 }
-                if(-not $count){Start-Sleep -Milliseconds 5}
+                if(-not $count){[Threading.Thread]::Sleep(5)}
             }
         }catch{Set-StreamFailure $Shared $_ 'Stream request reader failed'}finally{if($file){$file.Dispose()};$sha.Dispose()}
     } $streamState
@@ -440,7 +447,12 @@ function Initialize-StreamIpc {
                         if($Shared.Opening.TryAdd($candidate,$true)){$ticket=$candidate}
                     }
                 }finally{[Threading.Monitor]::Exit($Shared.SyncRoot)}
-                if($ticket -lt 0){Start-Sleep -Milliseconds 5;continue}
+                if($ticket -lt 0){
+                    # A request advances the reserve. Keep a bounded wait for
+                    # preparation races and shutdown, without polling four runspaces every 5 ms.
+                    [void]$Shared.PrepareWake.Wait(50)
+                    continue
+                }
                 try{
                     $path=[IO.Path]::Combine($Shared.Spool,('ipc_res_'+$Shared.Instance+'_'+$ticket+'.bin'))
                     $file=[IO.File]::Open($path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
@@ -1128,6 +1140,7 @@ $e | ConvertTo-Json -Compress -Depth 5
             $streamState.Prepared.Clear()
             $streamState.Out.Dispose()
             $streamState.DispatchWake.Dispose()
+            $streamState.PrepareWake.Dispose()
         }
         # Endpoints are immutable per instance; retain them for reconciliation.
         # A stopped descriptor cannot authorize a new worker instance.

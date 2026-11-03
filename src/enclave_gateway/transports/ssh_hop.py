@@ -165,8 +165,8 @@ try {{
     [void]$proc.Start()
     $output=$proc.StandardOutput.ReadToEndAsync(); $errorOutput=$proc.StandardError.ReadToEndAsync()
     $bytes=[Convert]::FromBase64String('{encoded}')
-    $copy=$proc.StandardInput.BaseStream.WriteAsync($bytes,0,$bytes.Length)
-    [void]$copy.GetAwaiter().GetResult(); $proc.StandardInput.Close()
+    $proc.StandardInput.BaseStream.Write($bytes,0,$bytes.Length)
+    $proc.StandardInput.Close()
     $proc.WaitForExit()
     $outText=$output.GetAwaiter().GetResult(); $errText=$errorOutput.GetAwaiter().GetResult()
     {publish}
