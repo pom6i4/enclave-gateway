@@ -78,6 +78,12 @@ copied bootstrap retains its Authenticode signature; signed startup retains
 AllSigned. HKCU Run is a logon trigger, not reconnect or crash supervision. See
 [the operational guide](GUIDE.md#per-user-worker-autostart) for removal and policy
 details. Existing signed Custom managed startup settings remain supported.
+Stream bootstrap supervision retries only classified channel failures backed by
+the previously validated local journal binding. It rechecks worker bytes and
+configured trust before each restart, never repeats migration or commands, and
+ends on normal stop. Missing journals, changed bindings and policy failures remain
+fatal. Old nonempty responses and requests remain evidence; channel recovery does
+not establish whether an interrupted remote side effect completed.
 No mode turns off WDAC, AppLocker, ConstrainedLanguage
 or domain execution policy. If `.exe` execution is forbidden, native isolation is
 unavailable: an administrator must approve it or choose a suitable trust boundary.

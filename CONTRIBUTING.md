@@ -48,6 +48,13 @@ tampered worker bytes. It skips rather than replacing an existing worker Run
 entry. Run it only in an isolated lab account; it does not prove RDP logon or
 reconnect behavior and requires neither production credentials nor native helpers.
 
+`EGW_TEST_POWERSHELL` also enables Stream recovery tests. A private test copy
+injects a typed revoked-handle error at the request reader; it exercises the actual
+bootstrap, new descriptor, journal continuity, no-replay, orphan selection,
+duplicate-supervisor rejection and fatal trust/configuration boundaries. The
+product has no fault-injection switch. This fixture is not an RDP reconnect or
+WAN timing qualification. Failed recovery-fixture files are retained outside Git.
+
 Use neutral example addresses and names. Keep credentials, private keys, filled
 lab manifests, proprietary installers and VM disks out of Git. Use the repository
 hooks and configured author identity. Avoid unrelated formatting or infrastructure

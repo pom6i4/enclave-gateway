@@ -215,4 +215,56 @@ if (($UseStartupConfiguration -or $UseAutostartConfiguration) -and $SourceSpool.
         Start-Sleep -Milliseconds 200
     }
 }
-& $workerSrc -Mode $Mode -ProcessIsolation:$ProcessIsolation -SpoolDir $SourceSpool -StopFile $StopFile -StateRoot $StateRoot -SpoolProtocol $SpoolProtocol -HeartbeatIntervalMs $HeartbeatIntervalMs -MigrateLegacyState:$MigrateLegacyState -RuntimeHelper $RuntimeHelper -TrustedSignerThumbprints $trusted -AllowUnsignedLab:$AllowUnsignedLab
+# A normal worker return (including an acknowledged stop) ends supervision.
+# Only a typed channel fault with a previously validated local journal can retry.
+$approvedWorkerHash=(Get-FileHash -LiteralPath $workerSrc -Algorithm SHA256).Hash
+$expectedBinding=''
+$supervisorMutex=$null;$supervisorHeld=$false
+try{
+if($SpoolProtocol -eq 'Stream'){
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try{$key=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes([IO.Path]::GetFullPath($SourceSpool).TrimEnd([char[]]'\/').ToLowerInvariant()))).Replace('-','')}finally{$sha.Dispose()}
+    $supervisorMutex=New-Object Threading.Mutex($false,('EnclaveGateway.Supervisor.'+$key))
+    try{$supervisorHeld=$supervisorMutex.WaitOne(0)}catch [Threading.AbandonedMutexException]{$supervisorHeld=$true}
+    if(-not $supervisorHeld){throw 'WORKER_ALREADY_RUNNING: one supervisor per spool is allowed'}
+}
+while($true){
+    if($StopFile -and [IO.File]::Exists($StopFile)){break}
+    try{
+        if((Get-FileHash -LiteralPath $workerSrc -Algorithm SHA256).Hash -cne $approvedWorkerHash){throw 'Worker bytes changed during supervision; restage the approved package'}
+        if($RequireSignedAgents -and -not $AllowUnsignedLab){Assert-TrustedScript $workerSrc;Assert-TrustedScript $PSCommandPath}
+        if($ProcessIsolation -and -not $AllowUnsignedLab){Assert-TrustedScript $RuntimeHelper}
+        & $workerSrc -Mode $Mode -ProcessIsolation:$ProcessIsolation -SpoolDir $SourceSpool -StopFile $StopFile -StateRoot $StateRoot -ExpectedStorageBinding $expectedBinding -SpoolProtocol $SpoolProtocol -HeartbeatIntervalMs $HeartbeatIntervalMs -MigrateLegacyState:$MigrateLegacyState -RuntimeHelper $RuntimeHelper -TrustedSignerThumbprints $trusted -AllowUnsignedLab:$AllowUnsignedLab
+        break
+    }catch{
+        $fault=$_.Exception
+        while($fault -and $fault.Data['EGW.StreamDisconnected'] -ne $true){$fault=$fault.InnerException}
+        if($SpoolProtocol -ne 'Stream' -or -not $fault -or $fault.Data['EGW.StorageBinding'] -cnotmatch '^[a-f0-9]{64}$'){throw}
+        $bindingHash=[string]$fault.Data['EGW.StorageBinding']
+        if($expectedBinding -and $expectedBinding -cne $bindingHash){throw 'WORKER_JOURNAL_IDENTITY_MISMATCH: supervisor binding changed'}
+        $expectedBinding=$bindingHash;$MigrateLegacyState=$false
+        Write-Warning ('STREAM_RECOVERING: '+$fault.Message+' (win32_code='+$fault.Data['EGW.ChannelError']+'); waiting for the same spool and local journal. Reconcile pending transactions; commands are never replayed.')
+    }
+    $attempt=0
+    while($true){
+        $delay=@(1000,2000,5000)[[Math]::Min($attempt,2)];$attempt++
+        $until=[DateTime]::UtcNow.AddMilliseconds($delay)
+        while([DateTime]::UtcNow -lt $until){
+            if($StopFile -and [IO.File]::Exists($StopFile)){return}
+            Start-Sleep -Milliseconds 100
+        }
+        if(-not [IO.Directory]::Exists($SourceSpool)){continue}
+        $probe=$null
+        try{
+            $probe=[IO.File]::Open(([IO.Path]::Combine($SourceSpool,'.worker-session')),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+            break
+        }catch{
+            $cause=$_.Exception;while($cause.InnerException){$cause=$cause.InnerException}
+            if($cause -isnot [IO.IOException] -or ($cause.HResult -band 65535) -notin @(2,3,6,32,33,53,55,59,64,67,1167,1231,2250)){throw}
+        }finally{if($probe){$probe.Dispose()}}
+    }
+}
+}finally{
+    if($supervisorHeld){$supervisorMutex.ReleaseMutex()}
+    if($supervisorMutex){$supervisorMutex.Dispose()}
+}

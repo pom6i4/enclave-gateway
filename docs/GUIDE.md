@@ -646,6 +646,48 @@ snapshot in use; heartbeat data remains a liveness hint, not proof of process li
 startup/stopped compatibility marker in this mode; use `egw status` for live
 telemetry. The configured heartbeat age limit is unchanged.
 
+### Stream recovery after a redirected-drive disconnect
+
+Run the worker through the staged **local bootstrap**. In Stream mode bootstrap
+supervises recognized redirected-path/handle failures and waits with a capped
+1/2/5-second backoff for the same spool and an exclusive session lease. It closes
+the old instance before starting a new one, publishes a new descriptor and warms
+its response reserve. The supervisor holds its own singleton throughout backoff;
+a duplicate bootstrap is rejected. Direct invocation of `bastion_worker.ps1`
+does not provide supervision. Re-stage and restart an older deployment to acquire
+the new bootstrap; an already running older process is not patched in place.
+
+Recovery requires the original Bastion-local durable journal. Its storage binding
+is pinned from the failed instance; a missing/changed binding or local journal
+fails closed. Migration is permitted only on the initial invocation. Before every
+restart bootstrap checks unchanged worker bytes and the configured signature and
+runtime requirements. `STREAM_RECOVERING` reports the failed phase and Win32 code;
+the recognized codes follow
+[Microsoft's error definitions](https://learn.microsoft.com/openspecs/windows_protocols/ms-erref/18d8fbe8-a967-4f1c-ae50-99ca8e491d2d).
+Access denial, journal/policy/signature errors, singleton conflicts and exhausted
+capacity are not generic retry conditions. Files mode retains its existing behavior.
+
+After acquiring the exclusive spool lease, a new Stream instance removes old
+same-format heartbeat snapshots and **zero-length** response placeholders. Locked
+files are deferred. Nonempty responses, old request streams, transaction records,
+and unrelated names remain available for reconciliation; they are not automatically
+resubmitted. Responses already logically erased may have nonzero file length and
+are retained too. Plan retention/archival for this evidence rather than deleting
+all `ipc_*` files during a live session.
+
+An exchange interrupted by disconnect can still return an indeterminate outcome
+or cancellation, even after the next command succeeds. Inspect the existing
+transaction identity and reconcile external effects; recovery never replays the
+payload. TCP/mux connections belonging to the old instance are closed and must be
+reopened by their clients. Readiness/attestation and latency gates are unchanged.
+
+A normal worker return, including `egw agents stop`, ends supervision. The
+explicit `-StopFile` is also observed during backoff; use a local path when it must
+remain available during drive loss. A Host stop RPC cannot cross an unavailable
+channel. HKCU Run still triggers only at logon: a killed bootstrap, fatal policy
+error or actual user logoff needs an approved start/logon or the managed task.
+This is channel recovery within the existing session, not general crash supervision.
+
 Each frame contains a delimiter, SHA-256 and Base64 JSON. Incomplete/corrupt
 frames cannot execute. This checksum establishes completeness, not authenticity.
 The request JSON limit is 1 MiB; select `files` before dispatching larger commands.

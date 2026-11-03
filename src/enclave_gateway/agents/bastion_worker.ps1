@@ -11,6 +11,7 @@ param(
     [int]$MaxTransactionRecords = 100000,
     [string]$StopFile = "",
     [string]$StateRoot = "",
+    [string]$ExpectedStorageBinding = "",
     [switch]$MigrateLegacyState,
     [bool]$ProcessIsolation = ($env:OS -eq 'Windows_NT'),
     [string]$RuntimeHelper = "$env:LOCALAPPDATA\EnclaveGateway\bin\egw-runtime.exe",
@@ -37,6 +38,7 @@ if ($ParallelStreams -lt 1 -or $ParallelStreams -gt 64 -or $MaxMuxSessions -lt 1
     throw 'Invalid worker resource limits'
 }
 $ErrorActionPreference = 'Stop'
+if($ExpectedStorageBinding -and ($ExpectedStorageBinding -cnotmatch '^[a-f0-9]{64}$' -or $MigrateLegacyState)){throw 'Invalid supervised storage binding or repeated migration'}
 
 $ProgressPreference='SilentlyContinue'
 function Move-WorkerFile([string]$Source,[string]$Destination) {
@@ -61,15 +63,30 @@ function Get-TextHash([string]$Value){
     $sha=[Security.Cryptography.SHA256]::Create()
     try{return [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Value))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
 }
-$instanceLease=$null;$workerMutex=$null;$mutexHeld=$false
+function Throw-SpoolFailure($Failure,[string]$BindingHash,[bool]$AllowMissing=$true){
+    $cause=$Failure.Exception;while($cause.InnerException){$cause=$cause.InnerException}
+    $code=$cause.HResult -band 65535
+    if($BindingHash -cmatch '^[a-f0-9]{64}$' -and $cause -is [IO.IOException] -and $code -in @(2,3,6,53,55,59,64,67,1167,1231,2250) -and ($AllowMissing -or $code -notin @(2,3))){
+        $failure=[IO.IOException]::new('Stream spool unavailable during initialization',$cause)
+        $failure.Data['EGW.StreamDisconnected']=$true;$failure.Data['EGW.StorageBinding']=$BindingHash
+        $failure.Data['EGW.ChannelError']=$code
+        throw $failure
+    }
+    throw $Failure
+}
+$instanceLease=$null;$workerMutex=$null;$mutexHeld=$false;$storageBindingHash=''
 try {
-[void][IO.Directory]::CreateDirectory($SpoolDir)
+try{[void][IO.Directory]::CreateDirectory($SpoolDir)}catch{Throw-SpoolFailure $_ $ExpectedStorageBinding}
 $spoolIdentity=Get-TextHash ([IO.Path]::GetFullPath($SpoolDir).TrimEnd([char[]]'\/').ToLowerInvariant())
 $workerMutex=New-Object Threading.Mutex($false,('EnclaveGateway.Worker.'+$spoolIdentity))
 try{$mutexHeld=$workerMutex.WaitOne(0)}catch [Threading.AbandonedMutexException]{$mutexHeld=$true}
 if(-not $mutexHeld){throw 'WORKER_ALREADY_RUNNING: one worker per spool is allowed'}
 try{$instanceLease=[IO.File]::Open(([IO.Path]::Combine($SpoolDir,'.worker-session')),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)}
-catch{throw 'WORKER_ALREADY_RUNNING: spool session lease is busy'}
+catch{
+    $cause=$_.Exception;while($cause.InnerException){$cause=$cause.InnerException}
+    if($cause -is [IO.IOException] -and ($cause.HResult -band 65535) -in @(32,33)){throw 'WORKER_ALREADY_RUNNING: spool session lease is busy'}
+    Throw-SpoolFailure $_ $ExpectedStorageBinding
+}
 $stateDir=[IO.Path]::Combine($SpoolDir,'.transactions')
 $journalLocation='spool-local'
 if($StateRoot -or $SpoolDir.StartsWith('\\')){
@@ -88,7 +105,18 @@ if($StateRoot -or $SpoolDir.StartsWith('\\')){
     }else{[Environment]::UserName}
     $owner=Get-TextHash ([Environment]::MachineName+"`n"+$sid)
     $binding=[IO.Path]::Combine($SpoolDir,'worker_storage.json')
-    if(-not [IO.File]::Exists($binding)){
+    if($ExpectedStorageBinding){
+        try{$bindingText=[IO.File]::ReadAllText($binding)}catch{
+            $cause=$_.Exception;while($cause.InnerException){$cause=$cause.InnerException}
+            if($cause -is [IO.IOException] -and ($cause.HResult -band 65535) -in @(2,3)){
+                if(-not [IO.Directory]::Exists($SpoolDir)){Throw-SpoolFailure $_ $ExpectedStorageBinding}
+                throw 'WORKER_JOURNAL_IDENTITY_MISMATCH: supervised storage binding is missing'
+            }
+            Throw-SpoolFailure $_ $ExpectedStorageBinding $false
+        }
+        if((Get-TextHash $bindingText) -cne $ExpectedStorageBinding){throw 'WORKER_JOURNAL_IDENTITY_MISMATCH: supervised storage binding is missing or changed'}
+    }
+    if(-not $ExpectedStorageBinding -and -not [IO.File]::Exists($binding)){
         $legacy=@()
         if([IO.Directory]::Exists($stateDir)){$legacy=@([IO.Directory]::EnumerateFiles($stateDir))}
         if(($legacy.Count -or [IO.File]::Exists(([IO.Path]::Combine($SpoolDir,'worker_state.json')))) -and -not $MigrateLegacyState){throw 'LEGACY_STATE_MIGRATION_REQUIRED: stop the old worker and explicitly approve MigrateLegacyState'}
@@ -119,7 +147,8 @@ if($StateRoot -or $SpoolDir.StartsWith('\\')){
         $temporary=$binding+'.'+[Guid]::NewGuid().ToString('N')+'.tmp'
         try{Write-DurableText $temporary $metadata;[IO.File]::Move($temporary,$binding)}finally{if([IO.File]::Exists($temporary)){[IO.File]::Delete($temporary)}}
     }
-    $record=[IO.File]::ReadAllText($binding)|ConvertFrom-Json
+    if(-not $ExpectedStorageBinding){$bindingText=[IO.File]::ReadAllText($binding)}
+    $record=$bindingText|ConvertFrom-Json
     if($record.protocol -ne 2 -or $record.storage_id -notmatch '^[a-f0-9]{32}$' -or $record.owner_sha256 -cne $owner){throw 'WORKER_JOURNAL_IDENTITY_MISMATCH: restore the original Bastion account and journal'}
     $stateDir=[IO.Path]::Combine($StateRoot,$record.storage_id)
     if([IO.Directory]::Exists($stateDir) -and ([IO.File]::GetAttributes($stateDir) -band [IO.FileAttributes]::ReparsePoint)){throw 'Linked journal directory rejected'}
@@ -127,7 +156,9 @@ if($StateRoot -or $SpoolDir.StartsWith('\\')){
     if(-not [IO.File]::Exists($localMetadata)){throw 'WORKER_JOURNAL_MISSING: restore local durable state; an empty replacement is forbidden'}
     $localRecord=[IO.File]::ReadAllText($localMetadata)|ConvertFrom-Json
     if($localRecord.protocol -ne 2 -or $localRecord.storage_id -cne $record.storage_id -or $localRecord.owner_sha256 -cne $owner){throw 'WORKER_JOURNAL_IDENTITY_MISMATCH'}
+    $storageBindingHash=Get-TextHash $bindingText
 }
+if($ExpectedStorageBinding -and -not $storageBindingHash){throw 'Supervised recovery requires a Bastion-local durable journal'}
 [void][IO.Directory]::CreateDirectory($stateDir)
 $pendingHints=@{};$knownHints=@{};$hintToken='';$hintSeen=$false;$lastRecovery=-60000
 $heartbeatState=$null;$lastHeartbeatMs=0;$lastHintMs=0;$lastDirectoryMs=0;$lastJournalMs=0;$lastResponseMs=0;$lastClaimMs=0;$lastReadMs=0
@@ -135,7 +166,7 @@ $stopRequested=$false;$lastMaintenance=-60000;$scanCount=0;$lastScanMs=0;$lastLo
 
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 Set-PSReadLineOption -HistorySaveStyle SaveNothing -ErrorAction SilentlyContinue
-[void][IO.Directory]::CreateDirectory($SpoolDir)
+try{[void][IO.Directory]::CreateDirectory($SpoolDir)}catch{Throw-SpoolFailure $_ $storageBindingHash}
 # The selected durable journal has already been opened before allocating runspaces.
 $Global:EnclaveMuxSockets = @{}
 $pendingMux = New-Object Collections.Generic.List[object]
@@ -162,6 +193,23 @@ $nativeCompletedSinceCleanup = 0
 $nativeCleanupCycles = 0
 $readRetryCount=0
 $workerInstance=[Guid]::NewGuid().ToString('N')
+if($SpoolProtocol -eq 'Stream'){
+    # The singleton and exclusive spool lease are already held. Preserve all
+    # nonempty outcomes and request streams for explicit reconciliation.
+    try{foreach($old in [IO.Directory]::EnumerateFiles($SpoolDir)){
+        $name=[IO.Path]::GetFileName($old)
+        if($name -cmatch '^worker_pulse_([a-f0-9]{32})_[ab]\.json$'){$emptyOnly=$false}
+        elseif($name -cmatch '^ipc_res_([a-f0-9]{32})_([0-9]{1,5})\.bin$' -and [int]$Matches[2] -lt 16384){$emptyOnly=$true}
+        else{continue}
+        if($Matches[1] -ceq $workerInstance){continue}
+        $held=$null
+        try{
+            if([IO.File]::GetAttributes($old) -band [IO.FileAttributes]::ReparsePoint){continue}
+            $held=[IO.File]::Open($old,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::Delete)
+            if(-not $emptyOnly -or $held.Length -eq 0){[IO.File]::Delete($old)}
+        }catch [IO.IOException]{}catch [UnauthorizedAccessException]{}finally{if($held){$held.Dispose()}}
+    }}catch{Throw-SpoolFailure $_ $storageBindingHash}
+}
 $loadedWorkerHash=(Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $workerSignatureStatus='NotSupported'
 $workerSigner=''
@@ -268,14 +316,16 @@ function Write-Response {
         stdout_b64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Stdout));
         stderr_b64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Stderr)); duration_ms=$DurationMs }
     if($streamTxIds.ContainsKey($TxId)){
+        $stored=$false
         try{
             if($StoreState){Write-State $TxId $State}
+            $stored=$true
             Send-StreamResponse $result
         }catch{
             # Delivery/storage failure after execution is indeterminate to the
             # caller. Never fabricate an execution failure or replay its payload.
-            $streamState.Error='Stream response publication failed; reconcile the transaction journal'
-            $streamState.Stop=$true
+            Set-StreamFailure $streamState $_ 'Stream response publication failed; reconcile the transaction journal'
+            if(-not $stored){$streamState.Retryable=$false}
         }
         $streamTxIds.Remove($TxId)
         $script:completedCount++;$script:lastResponseMs=$clock.ElapsedMilliseconds-$responseStarted
@@ -295,9 +345,28 @@ function Write-Response {
 # EGW_STREAM_V1: keep redirected handles warm; only local durable journal
 # writes precede dispatch. Hashes seal frames, not the channel's identity.
 $streamState=$null;$streamReservedBytes=0;$streamPipes=@();$streamTxIds=@{};$streamPending=New-Object Collections.Generic.Queue[object]
+function Set-StreamFailure($Shared,$Failure,[string]$Message){
+    $cause=$Failure.Exception;while($cause.InnerException){$cause=$cause.InnerException}
+    $code=$cause.HResult -band 65535
+    # Only recognized missing/invalid redirected-path/handle errors qualify.
+    # Access denial, sharing conflicts, capacity and arbitrary script errors do not.
+    $retry=($cause -is [IO.IOException] -or $cause -is [ComponentModel.Win32Exception]) -and $code -in @(2,3,6,53,55,59,64,67,1167,1231,2250)
+    [Threading.Monitor]::Enter($Shared.SyncRoot)
+    try{if(-not $Shared.Stop){$Shared.Error=$Message;$Shared.Retryable=$retry;$Shared.FaultCode=$code;$Shared.Stop=$true}}finally{[Threading.Monitor]::Exit($Shared.SyncRoot)}
+}
+function Throw-StreamFailure {
+    $failure=[IO.IOException]::new([string]$streamState.Error)
+    if($streamState.Retryable -and $storageBindingHash){
+        $failure.Data['EGW.StreamDisconnected']=$true
+        $failure.Data['EGW.StorageBinding']=$storageBindingHash
+        $failure.Data['EGW.ChannelError']=$streamState.FaultCode
+    }
+    throw $failure
+}
 function Start-StreamPipe($Code,$Shared) {
     $pipe=[powershell]::Create()
-    [void]$pipe.AddScript($Code).AddArgument($Shared)
+    $wrapped="param(`$Shared)`nfunction Set-StreamFailure {`n"+${function:Set-StreamFailure}.ToString()+"`n}`n& {`n"+$Code.ToString()+"`n} `$Shared"
+    [void]$pipe.AddScript($wrapped).AddArgument($Shared)
     try{$handle=$pipe.BeginInvoke()}catch{$pipe.Dispose();throw}
     $script:streamPipes+=@{Pipe=$pipe;Handle=$handle}
 }
@@ -306,7 +375,7 @@ function Initialize-StreamIpc {
     foreach($path in @($requestPath)){
         $file=[IO.File]::Open($path,[IO.FileMode]::CreateNew,[IO.FileAccess]::ReadWrite,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete));$file.Dispose()
     }
-    $script:streamState=[hashtable]::Synchronized(@{Stop=$false;Error='';In=(New-Object 'Collections.Concurrent.ConcurrentQueue[object]');Out=(New-Object 'Collections.Concurrent.ConcurrentQueue[object]');RequestPath=$requestPath;Spool=$SpoolDir;Instance=$workerInstance;Heartbeat='';HighWater=[long]0;NextTicket=[long]0;Prepared=(New-Object 'Collections.Concurrent.ConcurrentDictionary[long,object]');Opening=(New-Object 'Collections.Concurrent.ConcurrentDictionary[long,bool]');Expected=(New-Object 'Collections.Concurrent.ConcurrentDictionary[long,bool]');ReadMs=0;WriteMs=0;WriteOpenMs=0;WriteIoMs=0;HeartbeatMs=0;FramesIn=0;FramesOut=0;ReaderReady=$false;WriterReady=$false})
+    $script:streamState=[hashtable]::Synchronized(@{Stop=$false;Error='';Retryable=$false;FaultCode=0;In=(New-Object 'Collections.Concurrent.ConcurrentQueue[object]');Out=(New-Object 'Collections.Concurrent.ConcurrentQueue[object]');RequestPath=$requestPath;Spool=$SpoolDir;Instance=$workerInstance;Heartbeat='';HighWater=[long]0;NextTicket=[long]0;Prepared=(New-Object 'Collections.Concurrent.ConcurrentDictionary[long,object]');Opening=(New-Object 'Collections.Concurrent.ConcurrentDictionary[long,bool]');Expected=(New-Object 'Collections.Concurrent.ConcurrentDictionary[long,bool]');ReadMs=0;WriteMs=0;WriteOpenMs=0;WriteIoMs=0;HeartbeatMs=0;FramesIn=0;FramesOut=0;ReaderReady=$false;WriterReady=$false})
     Start-StreamPipe {
         param($Shared)
         $ErrorActionPreference='Stop';$file=$null;$sha=[Security.Cryptography.SHA256]::Create()
@@ -352,7 +421,7 @@ function Initialize-StreamIpc {
                 }
                 if(-not $count){Start-Sleep -Milliseconds 5}
             }
-        }catch{$Shared.Error='Stream request reader failed';$Shared.Stop=$true}finally{if($file){$file.Dispose()};$sha.Dispose()}
+        }catch{Set-StreamFailure $Shared $_ 'Stream request reader failed'}finally{if($file){$file.Dispose()};$sha.Dispose()}
     } $streamState
     # Bounded lookahead hides redirected CreateFile latency from command delivery.
     # A ticket is the physical 4 KiB request block, never a mutable Host counter.
@@ -389,7 +458,7 @@ function Initialize-StreamIpc {
                     $file=$null
                 }finally{$removed=$false;[void]$Shared.Opening.TryRemove($ticket,[ref]$removed)}
             }
-        }catch{$Shared.Error='Stream response preparation failed';$Shared.Stop=$true}finally{if($file){$file.Dispose()}}
+        }catch{Set-StreamFailure $Shared $_ 'Stream response preparation failed'}finally{if($file){$file.Dispose()}}
     } $streamState
     }
     for($writer=0;$writer -lt [Math]::Min(4,$ParallelStreams);$writer++){
@@ -430,7 +499,7 @@ function Initialize-StreamIpc {
                     try{$Shared.FramesOut++}finally{[Threading.Monitor]::Exit($Shared.SyncRoot)}
                 }else{Start-Sleep -Milliseconds 5}
             }
-        }catch{$Shared.Error='Stream response writer failed';$Shared.Stop=$true}finally{if($file){$file.Dispose()}}
+        }catch{Set-StreamFailure $Shared $_ 'Stream response writer failed'}finally{if($file){$file.Dispose()}}
     } $streamState
     }
     Start-StreamPipe {
@@ -466,11 +535,12 @@ function Initialize-StreamIpc {
                 }
                 Start-Sleep -Milliseconds 25
             }
-        }catch{$Shared.Error='Stream heartbeat publisher failed';$Shared.Stop=$true}
+        }catch{Set-StreamFailure $Shared $_ 'Stream heartbeat publisher failed'}
     } $streamState
     $readyDeadline=$clock.ElapsedMilliseconds+30000
     while(-not $streamState.ReaderReady -or -not $streamState.WriterReady -or $streamState.Prepared.Count -lt 32){
-        if($streamState.Stop -or $clock.ElapsedMilliseconds -gt $readyDeadline){throw 'Stream handles did not become ready'}
+        if($streamState.Stop){Throw-StreamFailure}
+        if($clock.ElapsedMilliseconds -gt $readyDeadline){throw 'Stream handles did not become ready'}
         Start-Sleep -Milliseconds 10
     }
     $descriptor=@{revision=3;block_bytes=4096;instance=$workerInstance;worker_sha256=$loadedWorkerHash}|ConvertTo-Json -Compress
@@ -646,12 +716,12 @@ if($ProcessIsolation){
                 [void]$warm.Invoke();if($warm.Streams.Error.Count){throw 'Resident slot initialization failed'}
             }finally{$warm.Dispose()}
         }
-        Initialize-StreamIpc
+        try{Initialize-StreamIpc}catch{Throw-SpoolFailure $_ $storageBindingHash}
     }
     while (-not $stopRequested -and (-not $StopFile -or -not [IO.File]::Exists($StopFile))) {
         $loopStart=$clock.ElapsedMilliseconds
         Complete-WorkerJobs
-        if($streamState -and $streamState.Stop){throw $streamState.Error}
+        if($streamState -and $streamState.Stop){Throw-StreamFailure}
         $scanStart=$clock.ElapsedMilliseconds
         if($SpoolProtocol -eq 'Files'){
         try{

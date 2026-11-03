@@ -21,6 +21,11 @@
 
 ### Operations and transport
 
+- Recover Stream workers through the local bootstrap after classified redirected
+  drive/handle failures, with capped backoff, supervisor singleton, rechecked
+  trust and pinned durable storage. Preserve no-replay and normal stop behavior;
+  prune only obsolete heartbeats and unused zero-length response placeholders.
+
 - Add opt-in per-user Bastion autostart with verified local generations, retained
   security/protocol settings and one-time migration. Require explicit worker
   acknowledgement when removing its HKCU Run entry during graceful stop.
