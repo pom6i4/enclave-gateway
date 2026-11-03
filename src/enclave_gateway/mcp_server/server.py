@@ -14,6 +14,7 @@ import secrets
 import socket
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -41,6 +42,12 @@ class BoundedHttpServer(ThreadingHTTPServer):
     def __init__(self, *args, **kwargs):
         self._slots = threading.BoundedSemaphore(64)
         super().__init__(*args, **kwargs)
+
+    def server_bind(self):
+        # HTTPServer resolves the bound address before serving. MCP uses the
+        # configured bind host for authority checks and needs no reverse DNS.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
     def process_request(self, request, address):
         if not self._slots.acquire(blocking=False):
