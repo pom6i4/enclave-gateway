@@ -778,7 +778,7 @@ def _main(argv: list[str] | None = None) -> int:
     if args.command == "clean":
         summary = engine.clean_session(actor="cli")
         print(json.dumps(summary, indent=2, ensure_ascii=False))
-        return 0 if summary['appliance_cleaned'] and summary['bastion_cleaned'] else 1
+        return 0 if summary['ok'] else 1
 
     if args.command == "reset":
         engine.hypervisor.restore_snapshot(args.snapshot)

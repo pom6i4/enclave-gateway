@@ -293,6 +293,13 @@ To upgrade a legacy redirected deployment, stop its old worker first, preserve i
 egw agents stage --migrate-legacy-state
 ```
 
+Startup flags apply to that invocation; `stage` does not persist policy or
+migration choices for a later `agents command`. To regenerate a Standard startup
+command with both approved options, use
+`egw agents command --execution-policy RemoteSigned --migrate-legacy-state`.
+The multiline command verifies hashes and copies the approved scripts locally;
+paste and execute it as a complete block. Do not shorten it by removing checks.
+
 Review and run the printed command once in the approved Bastion session. Migration
 copies and flushes the legacy identities locally before publishing the binding,
 leaves the originals intact and does not replay old requests. Unknown/incomplete
@@ -339,6 +346,23 @@ session lease establish that no worker is running. Durable journals, agent
 bundles and unrelated files are preserved. Output reports partial cleanup and
 `deferred_processing`; a failed tier gives a nonzero exit code. It is not a blanket
 spool deletion command.
+
+After a verified worker exit, `egw clean` skips remote Bastion cleanup and returns
+`ok: true` when the Appliance cleanup succeeds. Its result explicitly says
+`bastion_cleanup: skipped_worker_stopped` and `bastion_cleaned: false`: local
+Bastion stage files have not been inspected. Verification requires the supported
+storage binding and an exclusive session lease, not an absent or stale heartbeat.
+Without that evidence an unavailable worker remains an error. Run cleanup before
+stopping the worker when expired Bastion stage files also need inspection.
+
+Doctor's worker/target probes and each active Bastion cleanup step allow up to
+45 seconds. Mux open, I/O, half-close and close allow up to 60 seconds by default
+(open keeps its existing five-second response allowance). Explicit caller budgets
+and enclosing operation deadlines still apply. These are failure timeouts, not
+performance acceptance thresholds; a slow successful probe is not a latency pass.
+The short-command gate remains 800 ms. Select stream mode for its separate
+heartbeat and request path; the compatible files protocol still performs costly
+redirected metadata operations on WAN routes.
 
 The ViPNet adapter includes Mobile installation candidates and `info`, guarded by
 exact configured version, architecture and trusted publisher matching. These are

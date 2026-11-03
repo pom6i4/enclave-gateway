@@ -57,6 +57,9 @@ class FieldContracts(unittest.TestCase):
         command=agent_bundle(config)[3];self.assertNotIn('Bypass',command);self.assertIn('[IO.File]::Copy',command)
         self.assertIn("& (Join-Path $egwLocal 'bastion_bootstrap.ps1')",command)
         explicit=agent_bundle(config,execution_policy='RemoteSigned')[3];self.assertIn('-Scope Process',explicit);self.assertIn("-eq 'AllSigned'",explicit)
+        combined=agent_bundle(config,execution_policy='RemoteSigned',migrate_legacy_state=True)[3]
+        self.assertIn('-Scope Process',combined);self.assertIn('-MigrateLegacyState',combined)
+        self.assertNotIn('-MigrateLegacyState',agent_bundle(config,execution_policy='RemoteSigned')[3])
         config.security.require_signed_agents=True
         with self.assertRaises(ValueError):agent_bundle(config,execution_policy='RemoteSigned')
 
@@ -84,6 +87,85 @@ class FieldContracts(unittest.TestCase):
         executor=SshHopExecutor(hop,Mock(return_value='a'*64),Mock(),cleanup_hop_fn=cleanup)
         with self.assertRaises(RuntimeError):executor.push_file_to_node(__import__('enclave_gateway.config',fromlist=['TargetNodeSpec']).TargetNodeSpec('app','10.0.0.10'),Path('unused'),'/tmp/result')
         self.assertEqual(hop.call_count,1);cleanup.assert_called_once()
+
+    def test_clean_after_verified_stop_skips_bastion_and_cli_reports_actual_scope(self):
+        from enclave_gateway.cli import main
+        with tempfile.TemporaryDirectory() as folder:
+            control=Mock();control.exec_powershell.return_value=ExecResult(0,'APPLIANCE_CLEAN_OK:{"removed":2,"stopped_worker_verified":true}','',1)
+            engine=engine_at(Path(folder),control)
+            engine.rdp_vfs.close_mux_sessions=Mock(side_effect=AssertionError('Stopped worker must not receive cleanup'))
+            engine.rdp_vfs.exec_bastion=Mock(side_effect=AssertionError('Stopped worker must not receive cleanup'))
+            result=engine.clean_session()
+            self.assertTrue(result['ok']);self.assertTrue(result['appliance_cleaned']);self.assertFalse(result['bastion_cleaned'])
+            self.assertEqual(result['bastion_cleanup'],'skipped_worker_stopped');self.assertEqual(result['errors'],[])
+            engine.rdp_vfs.exec_bastion.assert_not_called();engine.rdp_vfs.close_mux_sessions.assert_not_called()
+            with patch('enclave_gateway.cli.EnclaveConfig.load',return_value=engine.config),patch('enclave_gateway.cli.EnclaveEngine',return_value=engine),patch('sys.stdout',new_callable=io.StringIO) as output:
+                engine.clean_session=Mock(return_value=result)
+                self.assertEqual(main(['clean']),0)
+                self.assertFalse(json.loads(output.getvalue())['bastion_cleaned'])
+
+    def test_cleanup_unavailable_or_unverified_is_not_relabelled_as_success(self):
+        for code,proof in ((1,True),(0,False),(0,'true'),(0,None)):
+            with self.subTest(code=code,proof=proof),tempfile.TemporaryDirectory() as folder:
+                control=Mock();control.exec_powershell.return_value=ExecResult(code,'APPLIANCE_CLEAN_OK:'+json.dumps({'stopped_worker_verified':proof}),'',1)
+                engine=engine_at(Path(folder),control);engine.rdp_vfs.close_mux_sessions=Mock(side_effect=TimeoutError('WAN unavailable'))
+                result=engine.clean_session()
+                self.assertFalse(result['ok']);self.assertFalse(result['bastion_cleaned']);self.assertEqual(result['bastion_cleanup'],'failed')
+                self.assertIn('bastion_cleanup_unavailable',result['errors']);engine.rdp_vfs.close_mux_sessions.assert_called_once()
+        for response in (ExecResult(0,'APPLIANCE_CLEAN_OK:{broken','',1),RuntimeError('Appliance unavailable')):
+            with self.subTest(response=response),tempfile.TemporaryDirectory() as folder:
+                control=Mock()
+                if isinstance(response,Exception):control.exec_powershell.side_effect=response
+                else:control.exec_powershell.return_value=response
+                engine=engine_at(Path(folder),control);engine.rdp_vfs.close_mux_sessions=Mock()
+                engine.rdp_vfs.exec_bastion=Mock(return_value=ExecResult(0,'BASTION_CLEAN_OK','',1))
+                result=engine.clean_session()
+                self.assertFalse(result['ok']);self.assertFalse(result['appliance_cleaned']);self.assertTrue(result['bastion_cleaned'])
+                self.assertIn('appliance_cleanup_unavailable',result['errors'])
+
+    def test_doctor_and_active_cleanup_allow_slow_round_trip_without_hiding_failure(self):
+        with tempfile.TemporaryDirectory() as folder:
+            control=Mock();control.exec_powershell.return_value=ExecResult(0,'DIAG_CLOCK:'+str(int(time.time()))+':UDP:1','',1)
+            config=EnclaveConfig.from_dict({'appliance':{'hypervisor':'direct'},'targets':{'app01':{'host':'10.0.0.10'}}})
+            engine=engine_at(Path(folder),control,config)
+            engine.status=Mock(return_value={'appliance':{'running':True,'hypervisor':'direct'},'provider':{'tunnel_up':True,'probe_host':'10.0.0.10','probe_port':3389},'bastion':{'worker_healthy':True}})
+            def ping(*args,timeout_sec,**kwargs):
+                if timeout_sec<30:raise TimeoutError('Synthetic 30-second round trip exceeds budget')
+                return ExecResult(0,'VFS_PONG','',30000)
+            engine.rdp_vfs.exec_bastion=Mock(side_effect=ping)
+            engine.exec_node=Mock(return_value=ExecResult(0,'TARGET_SSH_OK','',30000))
+            self.assertTrue(engine.doctor(probe_targets=True)['healthy'])
+            self.assertGreaterEqual(engine.exec_node.call_args.kwargs['timeout_sec'],30)
+            engine.rdp_vfs.exec_bastion=Mock(return_value=ExecResult(1,'','genuine failure',30000))
+            report=engine.doctor(probe_targets=True)
+            self.assertFalse(report['healthy']);self.assertTrue(any(row['check']=='bastion_rdp_vfs_ipc' and not row['ok'] for row in report['checks']))
+            control.exec_powershell.return_value=ExecResult(0,'APPLIANCE_CLEAN_OK:{"stopped_worker_verified":false}','',1)
+            engine.rdp_vfs.close_mux_sessions=Mock()
+            engine.rdp_vfs.exec_bastion=Mock(return_value=ExecResult(0,'BASTION_CLEAN_OK','',30000))
+            result=engine.clean_session();self.assertTrue(result['ok']);self.assertEqual(result['bastion_cleanup'],'completed')
+            self.assertGreaterEqual(engine.rdp_vfs.close_mux_sessions.call_args.kwargs['timeout_sec'],30)
+            self.assertGreaterEqual(engine.rdp_vfs.exec_bastion.call_args.kwargs['timeout_sec'],30)
+
+    def test_mux_wan_budgets_preserve_explicit_deadlines_and_errors(self):
+        from enclave_gateway.transports.rdp_vfs import RdpVfsTransport
+        from enclave_gateway.operations.context import OperationContext,activate,budget
+        transport=RdpVfsTransport(Mock(),BastionSpec())
+        waits=[]
+        def execute(*args,timeout_sec,extra_fields=None,**kwargs):
+            waits.append(budget(timeout_sec))
+            action=(extra_fields or {}).get('mux_action')
+            return ExecResult(0,'MUX_OPEN_OK:'+extra_fields['conn_id'] if action=='open' else 'MUX_DATA:' if action=='io' else '','',0)
+        transport.exec_bastion=Mock(side_effect=execute)
+        conn=transport.mux_open('127.0.0.1',22);transport.mux_io(conn);transport.mux_shutdown_write(conn);transport.mux_close(conn);transport.close_mux_sessions()
+        self.assertTrue(all(wait>=60 for wait in waits))
+        context=OperationContext('tx_mux_deadline','@bastion','local',time.monotonic()+.25)
+        with activate(context):transport.mux_io(conn,timeout_sec=.1)
+        self.assertLessEqual(waits[-1],.1)
+        with activate(context):
+            context.deadline=time.monotonic()-1
+            with self.assertRaises(OperationError):transport.mux_io(conn)
+        transport.exec_bastion=Mock(return_value=ExecResult(1,'','network denied',0))
+        with self.assertRaises(ConnectionError):transport.mux_io(conn)
 
     def test_qga_suppresses_progress_without_discarding_error_stream(self):
         client=QgaClient('/tmp/enclave-gateway-test-qga.sock')
@@ -248,3 +330,23 @@ class FieldWorkerTests(unittest.TestCase):
             report=json.loads(result.stdout.split(':',1)[1]);self.assertEqual(report['removed'],1);self.assertEqual(report['deferred_processing'],1)
             self.assertTrue((spool/'req_tx_future.json').exists());self.assertTrue((spool/'req_tx_busy.json.processing').exists());self.assertTrue((spool/'unrelated.tmp').exists())
             self.assertFalse((spool/'cancel_tx_expired.json').exists())
+
+    def test_cleanup_distinguishes_live_lease_from_stopped_worker_without_heartbeat_guess(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder).resolve();spool=root/'spool';spool.mkdir()
+            control=LocalPowerShellControl(os.environ['EGW_TEST_POWERSHELL'],translate_paths=False)
+            config=EnclaveConfig.from_dict({'security':{'mode':'standard'},'appliance':{'hypervisor':'direct'},'bastion':{'appliance_spool_dir':str(spool)}})
+            engine=engine_at(root,control,config)
+            engine.rdp_vfs.close_mux_sessions=Mock()
+            engine.rdp_vfs.exec_bastion=Mock(return_value=ExecResult(0,'BASTION_CLEAN_OK','',1))
+            with self.worker(root,spool,state_root=root/'state'):
+                live=engine.clean_session()
+                self.assertTrue(live['ok']);self.assertFalse(live['details']['stopped_worker_verified'])
+                self.assertEqual(live['bastion_cleanup'],'completed');engine.rdp_vfs.close_mux_sessions.assert_called_once()
+            engine.rdp_vfs.close_mux_sessions.reset_mock();engine.rdp_vfs.exec_bastion.reset_mock()
+            # A stale "running" heartbeat is not the stopped-worker authority.
+            (spool/'worker_state.json').write_text(json.dumps({'status':'running'}))
+            stopped=engine.clean_session()
+            self.assertTrue(stopped['ok']);self.assertTrue(stopped['details']['stopped_worker_verified'])
+            self.assertFalse(stopped['bastion_cleaned']);self.assertEqual(stopped['bastion_cleanup'],'skipped_worker_stopped')
+            engine.rdp_vfs.close_mux_sessions.assert_not_called();engine.rdp_vfs.exec_bastion.assert_not_called()

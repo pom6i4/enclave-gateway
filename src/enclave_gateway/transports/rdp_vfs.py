@@ -892,7 +892,7 @@ Write-Output 'MISS'
             pass
 
     def mux_open(
-        self, target_host: str, target_port: int, timeout_sec: float = 15.0
+        self, target_host: str, target_port: int, timeout_sec: float = 60.0
     ) -> str:
         """Open a persistent multiplexed TCP connection inside BastionWorker."""
         validate_endpoint(target_host, target_port)
@@ -940,7 +940,7 @@ Write-Output 'MUX_OPEN_OK:{conn_id}'
         *,
         max_read_bytes: int = 65536,
         read_wait_ms: int = 100,
-        timeout_sec: float = 15.0,
+        timeout_sec: float = 60.0,
     ) -> tuple[bytes, bool]:
         """Perform bidirectional write + read on an active multiplexed TCP connection on Bastion."""
         if not re.fullmatch(r"mux_[0-9a-f]+", conn_id):
@@ -1025,7 +1025,7 @@ if ($eof) {{
             return (base64.b64decode(b64_part, validate=True) if b64_part else b""), False
         raise ConnectionError("Malformed multiplexed I/O response")
 
-    def mux_shutdown_write(self, conn_id: str, timeout_sec: float = 10.0) -> None:
+    def mux_shutdown_write(self, conn_id: str, timeout_sec: float = 60.0) -> None:
         if not re.fullmatch(r"mux_[0-9a-f]+", conn_id):
             raise ValueError("Invalid mux identifier")
         script = f"""
@@ -1038,12 +1038,12 @@ Write-Output 'MUX_SHUTDOWN_OK'
         if result.exit_code:
             raise ConnectionError("Failed to half-close multiplexed stream")
 
-    def close_mux_sessions(self, timeout_sec: float = 15) -> None:
+    def close_mux_sessions(self, timeout_sec: float = 60) -> None:
         result = self.exec_bastion("Write-Output 'MUX_CLOSED_ALL'", timeout_sec=timeout_sec, op="mux", extra_fields={"mux_action": "close_all"})
         if result.exit_code:
             raise ConnectionError("Failed to close worker mux sessions")
 
-    def mux_close(self, conn_id: str, timeout_sec: float = 10.0) -> None:
+    def mux_close(self, conn_id: str, timeout_sec: float = 60.0) -> None:
         """Close and remove a multiplexed TCP connection on Bastion."""
         if not re.fullmatch(r"mux_[0-9a-f]+", conn_id):
             raise ValueError("Invalid mux identifier")

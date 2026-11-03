@@ -1029,7 +1029,7 @@ Write-Output ("DIAG_CLOCK:"+$epoch+":UDP:"+[int]$udp)
                 try:
                     if self.config.security.enforce_worker_attestation:
                         self.attest_worker();add('worker_attestation',True,'Fresh signed worker/runtime/SID evidence verified')
-                    ping=self.rdp_vfs.exec_bastion("Write-Output 'VFS_PONG'",timeout_sec=10)
+                    ping=self.rdp_vfs.exec_bastion("Write-Output 'VFS_PONG'",timeout_sec=45)
                     wrk_ok=ping.exit_code==0 and 'VFS_PONG' in ping.stdout
                     detail='VFS round trip='+str(ping.duration_ms)+'ms' if wrk_ok else ping.stderr
                 except Exception as error:wrk_ok=False;detail=str(error)
@@ -1042,7 +1042,7 @@ Write-Output ("DIAG_CLOCK:"+$epoch+":UDP:"+[int]$udp)
                 if hop is self.bastion_ssh and not wrk_ok:
                     add('target_ssh:'+name,False,'Bastion worker unavailable; provision verified known_hosts and keys on Bastion first');continue
                 try:
-                    result=self.exec_node(name,'echo TARGET_SSH_OK',timeout_sec=20,actor=actor)
+                    result=self.exec_node(name,'echo TARGET_SSH_OK',timeout_sec=45,actor=actor)
                     add('target_ssh:'+name,result.exit_code==0 and 'TARGET_SSH_OK' in result.stdout,result.stdout or result.stderr)
                 except Exception as error:add('target_ssh:'+name,False,str(error))
         if fix and needs_heal and vm_ok and not self._direct_posix:
@@ -1071,10 +1071,13 @@ Write-Output ("DIAG_CLOCK:"+$epoch+":UDP:"+[int]$udp)
                 details=json.loads(app.stdout.split(':',1)[1])
             if not app_ok:errors.append('appliance_cleanup_failed')
         except Exception:
+            app_ok=False
             errors.append('appliance_cleanup_unavailable')
-        if self.config.bastion.enabled:
+        stopped=app_ok and isinstance(details,dict) and details.get('stopped_worker_verified') is True
+        bastion_cleanup='disabled' if not self.config.bastion.enabled else 'skipped_worker_stopped' if stopped else 'failed'
+        if self.config.bastion.enabled and not stopped:
             try:
-                self.rdp_vfs.close_mux_sessions(timeout_sec=15)
+                self.rdp_vfs.close_mux_sessions(timeout_sec=45)
                 result=self.rdp_vfs.exec_bastion("""
 $stage=Join-Path $env:LOCALAPPDATA 'EnclaveGateway\\stage'
 if([IO.Directory]::Exists($stage)){
@@ -1084,16 +1087,18 @@ if([IO.Directory]::Exists($stage)){
  }
 }
 Write-Output 'BASTION_CLEAN_OK'
-""",timeout_sec=20)
+""",timeout_sec=45)
                 bastion_ok=result.exit_code==0
+                if bastion_ok:bastion_cleanup='completed'
                 if not bastion_ok:errors.append('bastion_cleanup_failed')
             except Exception:
                 errors.append('bastion_cleanup_unavailable')
         duration_ms=int((time.monotonic()-started)*1000)
+        ok=app_ok and (bastion_ok or stopped)
         self.recorder.record(tx_id=tx_id,actor=actor,operation='clean',node='@all',
-            summary='Clean expired unclaimed files; preserve durable outcomes and active processing',
-            exit_code=0 if app_ok and bastion_ok else 1,duration_ms=duration_ms)
-        return {'tx_id':tx_id,'appliance_cleaned':app_ok,'bastion_cleaned':bastion_ok,
+            summary='Clean expired unclaimed files; Bastion cleanup='+bastion_cleanup+'; preserve durable outcomes and active processing',
+            exit_code=0 if ok else 1,duration_ms=duration_ms)
+        return {'tx_id':tx_id,'ok':ok,'appliance_cleaned':app_ok,'bastion_cleaned':bastion_ok,'bastion_cleanup':bastion_cleanup,
                 'duration_ms':duration_ms,'details':details,'errors':errors}
 
     def generate_ssh_config(
