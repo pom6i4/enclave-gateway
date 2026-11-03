@@ -4,6 +4,26 @@ The release candidate is a source-bound bundle for review. It does not publish a
 tag, upload packages, change repository visibility or establish Enterprise signing
 trust. Hosted workflows are not needed for these steps.
 
+## Source baseline
+
+The frozen `0.2.0` Beta implementation is
+`49c3cc216473524e52f13d554cf4cabf619c47ee`. This identifies the code exercised
+by the latest cold-start checks. Build and artifact receipts must still bind
+the exact source revision used to assemble the candidate.
+
+On an isolated Windows ARM64 Standard worker with a local Stream spool and
+40 ms of added SSH round-trip delay, three series after worker restart on
+already-running Windows passed all 90 TargetNode calls on the preceding
+revision `bed7e87`. On the frozen revision, the final cold Windows series
+passed 29 of 30 calls. The first call took 1,032 ms. A separate instrumented
+first call took 1,071 ms and completed successfully. The cold-start gate
+remains open at 800 ms per call. These lab runs did not exercise RDP drive
+redirection, a customer WAN or Enterprise process isolation.
+
+Retain the complete cold and warm receipts, including failed samples, in
+private qualification storage. A Beta source freeze does not publish a
+package, sign release artifacts or establish production Enterprise trust.
+
 ## Component compatibility
 
 | Component | Contract | Validation boundary |

@@ -103,6 +103,8 @@ For high-latency redirected drives, evaluate the explicit
 [`bastion.spool_protocol: stream` option](docs/GUIDE.md#short-command-latency-over-redirected-drives).
 The compatible file protocol remains the default; switching requires restarting
 the worker with the same configuration.
+For measured Stream performance and the cold-start acceptance boundary, see
+the [source baseline](docs/RELEASING.md#source-baseline).
 
 ## Choose a trust model
 

@@ -729,7 +729,9 @@ An accepted stop is distinct from confirmed worker exit.
 Measure the complete CLI invocation, including publication, result readback and
 erasure, with a fixed safe output marker. Keep cold startup, warmed Standard,
 Enterprise/native isolation, parallel load and large transfers as separate
-cohorts. Record source hashes, QGA/client/server versions, redirection direction,
+cohorts. For a cold cohort, confirm worker readiness with a read-only check
+and include the first TargetNode invocation. Record source hashes,
+QGA/client/server versions, redirection direction,
 network delay method and measured RTT. Compare a simple bridge on the identical
 route; a delay per TCP `recv` chunk is not a fixed network RTT. LAN results do not
 qualify customer WAN latency.

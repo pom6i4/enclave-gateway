@@ -21,6 +21,10 @@
 
 ### Operations and transport
 
+- Wake Stream dispatch, response writers and response preparation when work
+  arrives. Keep bounded queues and preserve durable transaction outcomes.
+- Reduce short-command overhead by deferring unrelated CLI and transfer imports
+  and writing SSH stdin directly while draining both output streams.
 - Remove redirected-drive history scans/deletion from Stream startup and recovery.
   Prune retired heartbeats and empty response placeholders only in explicit local
   Appliance cleanup after a verified worker exit. Use exclusive handle-based
