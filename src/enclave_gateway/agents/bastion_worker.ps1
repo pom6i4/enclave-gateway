@@ -193,23 +193,8 @@ $nativeCompletedSinceCleanup = 0
 $nativeCleanupCycles = 0
 $readRetryCount=0
 $workerInstance=[Guid]::NewGuid().ToString('N')
-if($SpoolProtocol -eq 'Stream'){
-    # The singleton and exclusive spool lease are already held. Preserve all
-    # nonempty outcomes and request streams for explicit reconciliation.
-    try{foreach($old in [IO.Directory]::EnumerateFiles($SpoolDir)){
-        $name=[IO.Path]::GetFileName($old)
-        if($name -cmatch '^worker_pulse_([a-f0-9]{32})_[ab]\.json$'){$emptyOnly=$false}
-        elseif($name -cmatch '^ipc_res_([a-f0-9]{32})_([0-9]{1,5})\.bin$' -and [int]$Matches[2] -lt 16384){$emptyOnly=$true}
-        else{continue}
-        if($Matches[1] -ceq $workerInstance){continue}
-        $held=$null
-        try{
-            if([IO.File]::GetAttributes($old) -band [IO.FileAttributes]::ReparsePoint){continue}
-            $held=[IO.File]::Open($old,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::Delete)
-            if(-not $emptyOnly -or $held.Length -eq 0){[IO.File]::Delete($old)}
-        }catch [IO.IOException]{}catch [UnauthorizedAccessException]{}finally{if($held){$held.Dispose()}}
-    }}catch{Throw-SpoolFailure $_ $storageBindingHash}
-}
+# Never enumerate or delete retired endpoints over RDPDR during startup.
+# Instance GUIDs cannot collide; explicit Appliance-local clean owns retention.
 $loadedWorkerHash=(Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $workerSignatureStatus='NotSupported'
 $workerSigner=''

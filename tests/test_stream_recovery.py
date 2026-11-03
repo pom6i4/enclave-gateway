@@ -129,8 +129,10 @@ class StreamRecoveryTests(unittest.TestCase):
                 self.assertTrue(error.exception.indeterminate)
             self.assertEqual((spool / 'worker_storage.json').read_bytes(), binding)
             self.assertEqual(retained.read_bytes(), b'preserved-completed-outcome')
-            self.assertFalse(unused.exists())
-            self.assertFalse(list(spool.glob('worker_pulse_' + first + '_*.json')))
+            # Retention never runs over the redirected filesystem during
+            # recovery. Explicit Appliance-local clean owns these old files.
+            self.assertTrue(unused.exists())
+            self.assertTrue(list(spool.glob('worker_pulse_' + first + '_*.json')))
             self.assertTrue((spool / ('ipc_req_' + first + '.bin')).exists())
             for request in (envelope, pending):
                 result = transport._dispatch_envelope(request, timeout_sec=8)
@@ -193,6 +195,29 @@ class StreamRecoveryTests(unittest.TestCase):
             fault.touch()
             self.assertNotEqual(process.wait(timeout=10), 0)
             self.assertNotIn('STREAM_RECOVERING', (root / 'bootstrap.log').read_text(errors='replace'))
+
+    def test_ready_and_execution_do_not_prune_a_backlog_of_retired_endpoints(self):
+        with self.worker() as (root, process, transport, fault):
+            spool = root / 'spool'
+            first = json.loads((spool / 'ipc_descriptor.json').read_text())['instance']
+            retained = {}
+            for generation in range(4):
+                instance = format(generation, '032x')
+                for ticket in range(32):
+                    content = b'nonempty-outcome' if ticket % 3 == 0 else b''
+                    retained['ipc_res_' + instance + '_' + str(ticket) + '.bin'] = content
+                retained['worker_pulse_' + instance + '_a.json'] = b'{"status":"stopped"}'
+                retained['worker_pulse_' + instance + '_b.json'] = b'{"status":"stopped"}'
+                retained['ipc_req_' + instance + '.bin'] = b'reconcile-request'
+            for name, data in retained.items():
+                (spool / name).write_bytes(data)
+            fault.touch()
+            second = self.ready(root, process, first)  # Original 20-second gate.
+            self.assertNotEqual(first, second)
+            self.assertEqual(transport.exec_bastion("Write-Output 'BACKLOG_READY'", timeout_sec=8).stdout,
+                             'BACKLOG_READY')
+            for name, data in retained.items():
+                self.assertEqual((spool / name).read_bytes(), data, name)
 
     def test_duplicate_supervisor_is_rejected_even_during_backoff(self):
         with self.worker() as (root, process, transport, fault):

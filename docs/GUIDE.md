@@ -563,6 +563,18 @@ storage binding and an exclusive session lease, not an absent or stale heartbeat
 Without that evidence an unavailable worker remains an error. Run cleanup before
 stopping the worker when expired Bastion stage files also need inspection.
 
+For Stream history, stop the worker first, then run `egw clean`. The Appliance
+removes only old-instance heartbeat snapshots and zero-length response
+placeholders, on its **local Windows filesystem** while holding the exclusive
+worker session lease. The descriptor's latest instance is preserved, as are
+nonempty `ipc_res_*` endpoints, old request streams, links and durable journals. Native
+handle-based deletion checks file size and deletes the same object without a
+close/reopen race. Locked files are deferred. The JSON details include
+`stream_cleanup`, `stream_removed`, `stream_preserved`, `stream_deferred` and
+`stream_error_codes` (counts by native error code).
+Missing/invalid descriptors prevent Stream pruning; invalid descriptors or cleanup
+errors fail visibly. Redirected/mapped network cleanup paths are rejected.
+
 Doctor's worker/target probes and each active Bastion cleanup step allow up to
 45 seconds. Mux open, I/O, half-close and close allow up to 60 seconds by default
 (open keeps its existing five-second response allowance). Explicit caller budgets
@@ -671,13 +683,15 @@ The recognized codes follow
 Access denial, journal/policy/signature errors, singleton conflicts and exhausted
 capacity are not generic retry conditions. Files mode retains its existing behavior.
 
-After acquiring the exclusive spool lease, a new Stream instance removes old
-same-format heartbeat snapshots and **zero-length** response placeholders. Locked
-files are deferred. Nonempty responses, old request streams, transaction records,
-and unrelated names remain available for reconciliation; they are not automatically
-resubmitted. Responses already logically erased may have nonzero file length and
-are retained too. Plan retention/archival for this evidence rather than deleting
-all `ipc_*` files during a live session.
+Startup and recovery never enumerate or prune old IPC files over `\\tsclient\C`.
+A fresh instance GUID provides an independent namespace, so retained old files
+cannot collide with new endpoints. Pruning belongs to explicit Appliance-local
+`egw clean` after a verified worker exit, not to a background redirected-drive
+scan competing with command traffic. Nonempty responses, old request streams,
+transaction records and unrelated names remain available for reconciliation;
+they are not automatically resubmitted. Responses already logically erased may
+have nonzero file length and are retained too. Plan retention/archival for this
+evidence rather than deleting all `ipc_*` files during a live session.
 
 An exchange interrupted by disconnect can still return an indeterminate outcome
 or cancellation, even after the next command succeeds. Inspect the existing

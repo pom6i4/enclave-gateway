@@ -212,6 +212,15 @@ acknowledged stop/autostart removal and confirmed process exit without respawn.
 Exercise repeated autostart registration as the normal user too: creation alone
 does not cover updates to an existing protected installation.
 
+Include a backlog from several retired IPC instances before recovery. Require
+the same startup/readiness deadline and successful execution without any startup
+history pruning. After a confirmed stop, verify explicit local Appliance cleanup:
+retired empty placeholders and heartbeats disappear, while latest-instance files,
+nonempty outcomes, requests and the journal remain. Locked files must be deferred,
+links preserved, and an invalid descriptor must not authorize deletion. Test this
+on local Windows storage; redirected-drive deletion is intentionally absent from
+worker startup and recovery.
+
 Keep failed attempts, event records, source hashes and receipts outside Git.
 These checks qualify recovery on the tested Windows/RDP environment; they do not
 establish WAN latency, production PKI, Enterprise isolation or proprietary VPN

@@ -21,6 +21,12 @@
 
 ### Operations and transport
 
+- Remove redirected-drive history scans/deletion from Stream startup and recovery.
+  Prune retired heartbeats and empty response placeholders only in explicit local
+  Appliance cleanup after a verified worker exit. Use exclusive handle-based
+  deletion; preserve latest-instance files, nonempty outcomes, requests and links,
+  and report deferred files and cleanup errors.
+
 - Handle Windows PowerShell 5.1 tokenless RDPDR read cancellation during Stream
   recovery; retain the underlying exception and reject explicit token cancellation.
   Refresh existing per-user autostart without SACL privileges or empty-string
@@ -29,7 +35,7 @@
 - Recover Stream workers through the local bootstrap after classified redirected
   drive/handle failures, with capped backoff, supervisor singleton, rechecked
   trust and pinned durable storage. Preserve no-replay and normal stop behavior;
-  prune only obsolete heartbeats and unused zero-length response placeholders.
+  retain obsolete endpoints for explicit Appliance-local cleanup.
 
 - Add opt-in per-user Bastion autostart with verified local generations, retained
   security/protocol settings and one-time migration. Require explicit worker
