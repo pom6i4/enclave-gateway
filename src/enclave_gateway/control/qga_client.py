@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Iterator, Protocol
 
 from enclave_gateway.control.wire import SocketLineReader
-from enclave_gateway.operations.context import budget, checkpoint, current, mark_dispatched, timed, owned_cleanup
+from enclave_gateway.operations.context import budget, checkpoint, current, mark_dispatched, timed, owned_cleanup, OperationError
 
 try:
     import fcntl
@@ -39,6 +39,14 @@ class ExecResult:
     duration_ms: int
     tx_id: str = ""
     timings_ms: dict[str, int] = field(default_factory=dict)
+
+
+class QgaCommandError(RuntimeError):
+    """Keep command identity so read-only polling can distinguish open failures."""
+    def __init__(self, command, response):
+        self.command = command
+        self.response = response
+        super().__init__(f"QGA {command} failed: {response}")
 
 
 class ControlChannel(Protocol):
@@ -103,12 +111,8 @@ _thread_file_gates_guard=threading.Lock()
 
 @contextmanager
 def _file_lock(lock_path: Path, timeout_sec: float = 30.0) -> Iterator[None]:
-    if os.name!='nt':
-        with _os_file_lock(lock_path,timeout_sec):yield
-        return
-    # Windows byte-range locks reject concurrent handles within one process.
-    # Queue local contenders before OS locking instead of letting hot writers
-    # repeatedly win the polling race and starve other recorder instances.
+    # Queue contenders on every platform before OS locking. A hot QGA poller
+    # must not repeatedly jump ahead of a caller publishing or erasing a result.
     key=os.path.normcase(os.path.abspath(lock_path));deadline=time.monotonic()+timeout_sec
     with _thread_file_gates_guard:
         gate=_thread_file_gates.get(key)
@@ -151,25 +155,14 @@ class QgaClient:
             Path(lock_path) if lock_path else Path(f"{self.socket_path}.lock")
         )
         self.supports_direct_spool_ipc = direct_spool_ipc
-        self._thread_lock = threading.RLock()
 
     @contextmanager
     def _connect_synced(self, timeout_sec: float = 30.0) -> Iterator[tuple[socket.socket, object]]:
         timeout_sec = budget(timeout_sec, "qga.lock")
         deadline = time.monotonic() + timeout_sec
-        while True:
-            checkpoint("qga.lock")
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError("Timed out waiting for control channel thread lock")
-            if self._thread_lock.acquire(timeout=min(0.1, remaining)):
-                break
-        try:
-            with _file_lock(self.lock_path, max(0.0, deadline - time.monotonic())):
-                with self._open_synced(deadline) as connection:
-                    yield connection
-        finally:
-            self._thread_lock.release()
+        with _file_lock(self.lock_path, max(0.0, deadline-time.monotonic())):
+            with self._open_synced(deadline) as connection:
+                yield connection
 
     @contextmanager
     def _open_synced(self, deadline):
@@ -203,7 +196,7 @@ class QgaClient:
         sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
         response = json.loads(reader.readline())
         if not isinstance(response, dict) or "return" not in response:
-            raise RuntimeError(f"QGA {command} failed: {response}")
+            raise QgaCommandError(command, response)
         return response["return"]
 
     @contextmanager
@@ -311,6 +304,149 @@ class QgaClient:
         stream = io.BytesIO()
         self._read_stream(stream, guest_path)
         return stream.getvalue()
+
+    @contextmanager
+    def read_session(self, timeout_sec: float = 5.0):
+        """Bounded read-only snapshot group with one QGA synchronization.
+
+        File handles still close after each read. The control lock is held only
+        for this short group, never while waiting for remote command execution.
+        """
+        with self._connect_synced(timeout_sec) as (sock, reader):
+            def read(path, *, truncate_after_read=False):
+                if truncate_after_read:
+                    raise ValueError("Snapshot sessions are read-only")
+                try:
+                    with self._guest_file(sock, reader, path, "rb") as handle:
+                        snapshot = bytearray()
+                        while True:
+                            count = min(self.CHUNK_SIZE, self.CHUNK_SIZE-len(snapshot)+1)
+                            result = self._request(sock, reader, "guest-file-read", {"handle": handle, "count": count})
+                            data = base64.b64decode(result.get("buf-b64", ""), validate=True)
+                            if type(result.get("count")) is not int or len(data) != result["count"] or len(data) > count:
+                                raise OSError("Invalid snapshot read count")
+                            snapshot.extend(data)
+                            if len(snapshot) > self.CHUNK_SIZE:
+                                raise ValueError("Worker snapshot exceeds size limit")
+                            if result.get("eof"):
+                                return bytes(snapshot) or None
+                            # Windows agents may acknowledge a short read without
+                            # EOF; consume the following read, without a new sync.
+                            if not data:
+                                raise OSError("Snapshot read made no progress")
+                except QgaCommandError as error:
+                    if error.command == "guest-file-open" and any(
+                        token in str(error).lower() for token in ("no such file", "cannot find", "not found")
+                    ):
+                        return None
+                    raise
+            yield read
+
+    def _stream_read_on_connection(self, sock, reader, path, offset, count):
+        if type(offset) is not int or offset < 0 or not 1 <= count <= self.CHUNK_SIZE:
+            raise ValueError("Invalid stream read range")
+        with self._guest_file(sock, reader, path, "rb") as handle:
+            if offset:
+                self._request(sock, reader, "guest-file-seek", {"handle": handle, "offset": offset, "whence": 0})
+            result = self._request(sock, reader, "guest-file-read", {"handle": handle, "count": count})
+            data = base64.b64decode(result.get("buf-b64", ""), validate=True)
+            if type(result.get("count")) is not int or len(data) != result["count"] or len(data) > count:
+                raise OSError("Invalid stream read count")
+            return data
+
+    def stream_read(self, path: str, offset: int, count: int = 65536) -> bytes:
+        with self._connect_synced() as (sock, reader):
+            return self._stream_read_on_connection(sock, reader, path, offset, count)
+
+    def stream_read_committed(self, path, offset, validate):
+        """Read, validate, then erase acknowledged spans without another sync.
+
+        The callback performs no control-channel IO. Empty/incomplete and legacy
+        delivery markers return no spans. No payload or validator is retried.
+        """
+        pending=[]
+        with self._connect_synced() as (sock, reader):
+            data=self._stream_read_on_connection(sock, reader, path, offset, self.CHUNK_SIZE)
+            spans=validate(data)
+            if spans:
+                pending=self._validate_stream_spans(spans)
+                try:
+                    with timed('vfs.erase'):self._erase_stream_on_connection(sock,reader,pending)
+                except QgaCommandError as error:
+                    if error.command!='guest-file-open':
+                        raise OperationError('worker_result_cleanup_failed','vfs.erase',indeterminate=True) from error
+        if pending:
+            # An unrelated reader may briefly prevent write-open. Release the
+            # channel and retry only remaining zeroing, never response parsing.
+            try:
+                with timed('vfs.erase'):self.stream_erase_many(pending)
+            except Exception as error:
+                raise OperationError('worker_result_cleanup_failed','vfs.erase',indeterminate=True) from error
+        return data
+
+    def stream_append(self, path: str, data: bytes, *, limit: int | None = None) -> int:
+        from enclave_gateway.transports.stream_frames import MAX_FRAME, MAX_STREAM, request_block
+        limit = MAX_STREAM if limit is None else limit
+        if type(limit) is not int or not 1 <= limit <= MAX_STREAM:
+            raise ValueError("Invalid stream capacity")
+        if not 0 < len(data) <= MAX_FRAME:
+            raise ValueError("Invalid stream frame size")
+        # Canonical endpoint lock serializes producers across profiles and client
+        # instances. Hold it through flush/close, not merely one buffered fwrite.
+        lock = Path(str(self.socket_path.resolve()) + ".stream-producer.lock")
+        with _file_lock(lock), self._connect_synced() as (sock, reader):
+            with self._guest_file(sock, reader, path, "r+b") as handle:
+                result = self._request(sock, reader, "guest-file-seek", {"handle": handle, "offset": 0, "whence": 2})
+                position, data = request_block(data, int(result["position"]), limit)
+                for start in range(0, len(data), self.CHUNK_SIZE):
+                    chunk = data[start:start+self.CHUNK_SIZE]
+                    result = self._request(sock, reader, "guest-file-write", {"handle": handle, "buf-b64": base64.b64encode(chunk).decode()})
+                    # Never retry a partial publication. Caller must reconcile it;
+                    # a later complete frame is independently delimited and hashed.
+                    if result.get("count") != len(chunk):
+                        raise OSError("Short stream publication; command outcome is indeterminate")
+                self._request(sock, reader, "guest-file-flush", {"handle": handle})
+                return position
+
+    @staticmethod
+    def _validate_stream_spans(spans):
+        from enclave_gateway.transports.stream_frames import MAX_FRAME, MAX_STREAM
+        spans=list(spans)
+        if not 1 <= len(spans) <= 2:raise ValueError("Expected one or two stream spans")
+        for path, offset, count in spans:
+            if type(offset) is not int or type(count) is not int or offset < 0 or not 0 < count <= MAX_FRAME or offset+count > MAX_STREAM:
+                raise ValueError("Invalid stream erasure range")
+        return spans
+
+    def _erase_stream_on_connection(self,sock,reader,remaining):
+        while remaining:
+            path,offset,count=remaining[0]
+            with self._guest_file(sock,reader,path,"r+b") as handle:
+                if offset:self._request(sock,reader,"guest-file-seek",{"handle":handle,"offset":offset,"whence":0})
+                left=count
+                while left:
+                    chunk=bytes(min(left,self.CHUNK_SIZE))
+                    result=self._request(sock,reader,"guest-file-write",{"handle":handle,"buf-b64":base64.b64encode(chunk).decode()})
+                    wrote=result.get('count')
+                    if type(wrote) is not int or not 0<wrote<=len(chunk):raise OSError('Stream erasure made no progress')
+                    left-=wrote
+                self._request(sock,reader,'guest-file-flush',{'handle':handle})
+            remaining.pop(0)
+
+    def stream_erase(self, path: str, offset: int, count: int) -> None:
+        self.stream_erase_many([(path,offset,count)])
+
+    def stream_erase_many(self, spans) -> None:
+        remaining=self._validate_stream_spans(spans)
+        deadline=time.monotonic()+budget(5,'vfs.stream_erase')
+        while remaining:
+            before=len(remaining)
+            try:
+                with self._connect_synced() as(sock,reader):self._erase_stream_on_connection(sock,reader,remaining)
+            except QgaCommandError as error:
+                if len(remaining)<before:deadline=time.monotonic()+budget(5,'vfs.stream_erase')
+                if error.command!='guest-file-open' or time.monotonic()>=deadline:raise
+                checkpoint('vfs.stream_erase');time.sleep(.005)
 
     def publish_bytes(self, data: bytes, guest_path: str) -> None:
         from enclave_gateway.security.quoting import ps_quote
@@ -468,6 +604,49 @@ class DirectHostControlChannel:
         target = self._map_path(guest_path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
+
+    def stream_read(self, path: str, offset: int, count: int = 65536) -> bytes:
+        if type(offset) is not int or offset < 0 or not 1 <= count <= 65536:
+            raise ValueError("Invalid stream read range")
+        from enclave_gateway.control.published import read_shared
+        try:
+            # CRT fopen may expose sharing violations as EACCES without a
+            # winerror. The shared Win32 reader preserves codes 32/33 versus 5.
+            return read_shared(self._map_path(path), offset=offset, count=count)
+        except FileNotFoundError:
+            return b""
+        except OSError as error:
+            if os.name == "nt" and getattr(error, "winerror", None) in (32, 33):
+                return b""
+            raise
+
+    def stream_append(self, path: str, data: bytes, *, limit: int | None = None) -> int:
+        from enclave_gateway.transports.stream_frames import MAX_FRAME, MAX_STREAM, request_block
+        limit = MAX_STREAM if limit is None else limit
+        if type(limit) is not int or not 1 <= limit <= MAX_STREAM:
+            raise ValueError("Invalid stream capacity")
+        if not 0 < len(data) <= MAX_FRAME:
+            raise ValueError("Invalid stream frame size")
+        target = self._map_path(path)
+        with _file_lock(Path(str(target.resolve()) + ".producer.lock")):
+            with target.open("r+b", buffering=0) as stream:
+                position, data = request_block(data, stream.seek(0, 2), limit)
+                if stream.write(data) != len(data):
+                    raise OSError("Short stream publication; command outcome is indeterminate")
+                return position
+
+    def stream_erase(self, path: str, offset: int, count: int) -> None:
+        from enclave_gateway.transports.stream_frames import MAX_FRAME, MAX_STREAM
+        if type(offset) is not int or type(count) is not int or offset < 0 or not 0 < count <= MAX_FRAME or offset+count > MAX_STREAM:
+            raise ValueError("Invalid stream erasure range")
+        with self._map_path(path).open("r+b", buffering=0) as stream:
+            stream.seek(offset)
+            remaining = count
+            while remaining:
+                wrote = stream.write(bytes(min(remaining, 65536)))
+                if not wrote:
+                    raise OSError("Stream erasure made no progress")
+                remaining -= wrote
 
     def publish_bytes(self, data: bytes, guest_path: str) -> None:
         from tempfile import NamedTemporaryFile

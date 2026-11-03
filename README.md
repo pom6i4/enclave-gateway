@@ -53,6 +53,11 @@ echo hello > hello.txt
 reconnects its managed RDP session. Until the worker is started on Bastion it can
 return `SESSION_PENDING_WORKER`; staging alone does not start a remote process.
 
+For high-latency redirected drives, evaluate the explicit
+[`bastion.spool_protocol: stream` option](docs/GUIDE.md#short-command-latency-over-redirected-drives).
+The compatible file protocol remains the default; switching requires restarting
+the worker with the same configuration.
+
 ## Choose a trust model
 
 | | Standard | Enterprise |

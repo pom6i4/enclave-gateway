@@ -4,9 +4,11 @@ import os
 from pathlib import Path
 
 
-def read_shared(path: Path) -> bytes:
+def read_shared(path: Path, *, offset: int = 0, count: int = -1) -> bytes:
     if os.name != 'nt':
-        return path.read_bytes()
+        with path.open('rb') as stream:
+            if offset:stream.seek(offset)
+            return stream.read(count)
     import ctypes
     import msvcrt
     from ctypes import wintypes
@@ -24,7 +26,8 @@ def read_shared(path: Path) -> bytes:
         kernel.CloseHandle(handle)
         raise
     with os.fdopen(descriptor, 'rb') as stream:
-        return stream.read()
+        if offset:stream.seek(offset)
+        return stream.read(count)
 
 
 def try_read_published(path: Path) -> bytes | None:

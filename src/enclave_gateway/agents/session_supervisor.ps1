@@ -1,4 +1,5 @@
 param(
+    [ValidateSet('Files','Stream')][string]$SpoolProtocol = 'Files',
     [string]$BastionHost = "10.0.1.10",
     [int]$BastionPort = 3389,
     [ValidateRange(5,300)][int]$HeartbeatMaxAgeSec = 45,
@@ -48,12 +49,32 @@ $stateFile = Join-Path $SpoolDir "worker_state.json"
 $legacyHb = Join-Path $SpoolDir "heartbeat.txt"
 $conn = Get-NetTCPConnection -RemoteAddress $BastionHost -RemotePort $BastionPort -State Established -ErrorAction SilentlyContinue
 
+function Test-WorkerHeartbeat {
 $hbFresh = $false
-if (Test-Path $stateFile) {
+if($SpoolProtocol -eq 'Stream'){
+    $descriptor=Join-Path $SpoolDir 'ipc_descriptor.json';$latest=$null;$latestStamp=[DateTime]::MinValue
+    try{
+        $info=[IO.File]::ReadAllText($descriptor)|ConvertFrom-Json
+        if($info.revision -ne 3 -or $info.block_bytes -ne 4096 -or $info.instance -cnotmatch '^[a-f0-9]{32}$' -or $info.worker_sha256 -cnotmatch '^[a-f0-9]{64}$'){throw 'Invalid stream descriptor'}
+        foreach($slot in @('a','b')){
+            try{
+                $snapshot=[IO.File]::ReadAllText((Join-Path $SpoolDir ('worker_pulse_'+$info.instance+'_'+$slot+'.json')))|ConvertFrom-Json
+                $stamp=[DateTime]::Parse($snapshot.last_heartbeat_utc).ToUniversalTime();$age=([DateTime]::UtcNow-$stamp).TotalSeconds
+                if($snapshot.instance_id -cne $info.instance -or $snapshot.worker_sha256 -cne $info.worker_sha256 -or $snapshot.spool_protocol -ne 'stream' -or $snapshot.status -notin @('running','stopping','stopped') -or $age -lt 0 -or $age -ge $HeartbeatMaxAgeSec){continue}
+                if($stamp -gt $latestStamp -or ($stamp -eq $latestStamp -and $snapshot.status -ne 'running')){$latest=$snapshot;$latestStamp=$stamp}
+            }catch{}
+        }
+        $hbFresh=$null -ne $latest -and $latest.status -eq 'running'
+    }catch{}
+}elseif (Test-Path $stateFile) {
     $hbFresh = (((Get-Date) - (Get-Item $stateFile).LastWriteTime).TotalSeconds -lt $HeartbeatMaxAgeSec)
 } elseif (Test-Path $legacyHb) {
     $hbFresh = (((Get-Date) - (Get-Item $legacyHb).LastWriteTime).TotalSeconds -lt $HeartbeatMaxAgeSec)
 }
+
+return $hbFresh
+}
+$hbFresh=Test-WorkerHeartbeat
 
 if (-not $ForceReconnect -and $conn -and $hbFresh) {
     Write-Output "SESSION_ACTIVE"
@@ -71,17 +92,11 @@ Start-ScheduledTask -TaskName $ScheduledTaskName -ErrorAction SilentlyContinue
 for ($i = 0; $i -lt 30; $i++) {
     Start-Sleep -Seconds 1
     $conn = Get-NetTCPConnection -RemoteAddress $BastionHost -RemotePort $BastionPort -State Established -ErrorAction SilentlyContinue
-    if (Test-Path $stateFile) {
-        if ($conn -and (((Get-Date) - (Get-Item $stateFile).LastWriteTime).TotalSeconds -lt $HeartbeatMaxAgeSec)) {
-            Write-Output "SESSION_RECONNECTED"
-            exit 0
-        }
-    } elseif (Test-Path $legacyHb) {
-        if ($conn -and (((Get-Date) - (Get-Item $legacyHb).LastWriteTime).TotalSeconds -lt $HeartbeatMaxAgeSec)) {
-            Write-Output "SESSION_RECONNECTED"
-            exit 0
-        }
+    if ($conn -and (Test-WorkerHeartbeat)) {
+        Write-Output 'SESSION_RECONNECTED'
+        exit 0
     }
+
 }
 
 Write-Error "SESSION_PENDING_WORKER"

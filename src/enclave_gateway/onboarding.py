@@ -59,7 +59,7 @@ def configuration_summary(config):
     if config.bastion.enabled:
         next_steps=['egw agents stage (or egw heal) to deliver the worker'] if security.mode!='custom' else ['Custom defaults retained: choose a named mode for agent deployment, or keep your existing manual deployment.']
         next_steps.append('Start the printed command in the Bastion RDP session')
-    return {'valid':True,'security_mode':security.mode,'targets':list(config.targets),'ssh_execution_hops':routes,
+    return {'spool_protocol':config.bastion.spool_protocol,'valid':True,'security_mode':security.mode,'targets':list(config.targets),'ssh_execution_hops':routes,
             'execution_model':'owned-process-job' if security.require_process_isolation else 'in-process-runspace',
             'signed_agents':security.require_signed_agents,'signed_helpers':security.require_signed_helpers,
             'worker_attestation':security.enforce_worker_attestation,'owned_ssh_commands':security.owned_ssh_commands,
@@ -88,6 +88,7 @@ def agent_bundle(config, *, execution_policy='',migrate_legacy_state=False):
     remote=config.bastion.bastion_spool_dir.rstrip('\\/')+'\\'+relative+'\\bastion_bootstrap.ps1'
     command="& (Join-Path $egwLocal 'bastion_bootstrap.ps1') -Mode "+security.mode.title()+' -SourceSpool '+ps_quote(config.bastion.bastion_spool_dir)
     command+=" -WorkerPath (Join-Path $egwLocal 'bastion_worker.ps1')"
+    command+=' -SpoolProtocol '+config.bastion.spool_protocol.title()
     command+=' -ProcessIsolation:$'+str(security.require_process_isolation).lower()
     command+=' -RequireSignedAgents:$'+str(security.require_signed_agents).lower()
     if security.require_process_isolation:command+=' -RuntimeHelper '+ps_quote(security.runtime_helper_path)

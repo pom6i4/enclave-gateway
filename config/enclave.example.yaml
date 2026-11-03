@@ -26,6 +26,8 @@ provider:
   probe_port: 0                   # Follows bastion.port
 
 bastion:
+  # Optional persistent redirected-file channel; see docs/GUIDE.md latency section.
+  spool_protocol: files
   enabled: true
   host: 10.0.1.10
   port: 3389

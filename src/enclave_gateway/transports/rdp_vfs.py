@@ -21,7 +21,7 @@ from enclave_gateway.security.quoting import validate_endpoint, ps_quote
 from enclave_gateway.operations.context import budget, checkpoint, current, mark_dispatched, timed, bind_context, OperationError
 from enclave_gateway.transports.listener import TcpListener
 from enclave_gateway.config import BastionSpec
-from enclave_gateway.control.qga_client import ControlChannel, ExecResult
+from enclave_gateway.control.qga_client import ControlChannel, ExecResult, QgaCommandError
 
 
 @dataclass(slots=True)
@@ -313,6 +313,39 @@ class RdpVfsTransport:
         self._attestation_lock=threading.RLock()
         self._verified_worker=None
         self._verified_until=0.0
+        self._ready_condition=threading.Condition()
+        self._ready_wave=None
+
+    def _check_readiness(self, guard):
+        # Share only a check that was already in flight when this call arrived.
+        # The absolute heartbeat expiry is rechecked by each waiter. There is no
+        # completed-result cache, and attestation/authorization are independent.
+        with self._ready_condition:
+            wave=self._ready_wave
+            leader=wave is None or wave['done']
+            if leader:
+                wave={'done':False,'expires':None,'state':None};self._ready_wave=wave
+        if not leader:
+            deadline=time.monotonic()+budget(5,'vfs.preflight')
+            with self._ready_condition:
+                while not wave['done']:
+                    checkpoint('vfs.preflight')
+                    remaining=deadline-time.monotonic()
+                    if remaining<=0:raise TimeoutError('Timed out waiting for worker readiness')
+                    self._ready_condition.wait(min(.05,remaining))
+            expiry=wave['expires']
+            if type(expiry) in (int,float) and 0<expiry-time.time()<self.spec.heartbeat_max_age_sec:
+                return wave['state']
+            # A guard without a validated expiry runs again for each caller.
+            return guard()
+        expiry=None;result=None
+        try:
+            result=guard()
+            if isinstance(result,dict):expiry=result.get('_heartbeat_expires_unix')
+            return result
+        finally:
+            with self._ready_condition:
+                wave.update(done=True,expires=expiry,state=result);self._ready_condition.notify_all()
 
     def _verify_dispatch(self,op):
         guard=getattr(self,'attestation_guard',None)
@@ -335,7 +368,7 @@ class RdpVfsTransport:
             return evidence
         finally: self._attestation_lock.release()
 
-    def _parse_worker_response(self,raw,duration,tx_id,evidence):
+    def _parse_worker_response(self,raw,duration,tx_id,evidence,*,strict=False):
         if evidence:
             try: response=json.loads(raw.lstrip('\ufeff'))
             except ValueError: response={}
@@ -344,7 +377,7 @@ class RdpVfsTransport:
                 self._verified_worker=None;self._verified_until=0
                 if current(): current().worker_invalidated=True
                 raise OperationError('agent_instance_changed','vfs.response',tx_id=current().tx_id if current() else tx_id,indeterminate=True)
-        return self._parse_envelope_response(raw,duration,tx_id)
+        return self._parse_envelope_response(raw,duration,tx_id,strict=strict)
 
     def exec_bastion(
         self,
@@ -394,9 +427,9 @@ class RdpVfsTransport:
         self, envelope: dict[str, Any], timeout_sec: float = 120.0
     ) -> ExecResult:
         context=current()
-        ready=getattr(self,'readiness_guard',None)
+        ready=getattr(self,'readiness_guard',None);readiness=None
         if ready:
-            with timed('vfs.preflight'):ready()
+            with timed('vfs.preflight'):readiness=self._check_readiness(ready)
         evidence=self._verify_dispatch(envelope.get('op'))
         timeout_sec = budget(timeout_sec, "vfs.dispatch")
         deadline = time.monotonic() + timeout_sec
@@ -411,6 +444,9 @@ class RdpVfsTransport:
         raw_envelope = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
         spool = self.spec.appliance_spool_dir.rstrip("\\/")
         started = time.monotonic()
+
+        if self.spec.spool_protocol == "stream":
+            return self._dispatch_stream(envelope, evidence, deadline, started, readiness)
 
         try_read_fn = getattr(self.control, "try_read_bytes", None)
         if getattr(self.control, "supports_direct_spool_ipc", False) and callable(
@@ -508,6 +544,94 @@ exit 124
             )
         return self._parse_worker_response(res.stdout, res.duration_ms, tx_id,evidence)
 
+    def _check_stream_control(self):
+        for method in ("try_read_bytes", "stream_read", "stream_append", "stream_erase"):
+            if not callable(getattr(self.control, method, None)):
+                raise ValueError("Control channel does not support stream IPC; select spool_protocol: files")
+
+    def _stream_descriptor(self):
+        from enclave_gateway.transports.stream_frames import descriptor
+        self._check_stream_control()
+        path = self.spec.appliance_spool_dir.rstrip("\\/") + "\\ipc_descriptor.json"
+        raw = self.control.try_read_bytes(path, truncate_after_read=False)
+        if not raw or len(raw) > 4096:
+            raise ValueError("Stream worker is not ready; stage and start agents with spool_protocol: stream")
+        return descriptor(raw)
+
+    def _dispatch_stream(self, envelope, evidence, deadline, started, readiness=None):
+        from enclave_gateway.transports.stream_frames import Decoder, encode_frame, MAX_STREAM, CONTROL_RESERVE, BLOCK, descriptor
+        expiry=readiness.get('_heartbeat_expires_unix') if isinstance(readiness,dict) else None
+        cached=readiness.get('_stream_descriptor') if isinstance(readiness,dict) else None
+        if isinstance(cached,dict) and type(expiry) in (int,float) and 0<expiry-time.time()<self.spec.heartbeat_max_age_sec:
+            self._check_stream_control()
+            info=descriptor(json.dumps(cached,allow_nan=False).encode())
+        else:
+            info=self._stream_descriptor()
+        if evidence and (info["instance"] != evidence["instance_id"] or info["worker_sha256"] != evidence["loaded_sha256"]):
+            raise ValueError("Stream descriptor does not match the attested worker")
+        envelope["expected_worker_instance"] = info["instance"]
+        envelope["expected_worker_sha256"] = info["worker_sha256"]
+        frame = encode_frame(envelope)  # Reject unsupported size before dispatch.
+        root = self.spec.appliance_spool_dir.rstrip("\\/")
+        req = root + "\\ipc_req_" + info["instance"] + ".bin"
+        cursor = 0
+        limit = MAX_STREAM if envelope.get("op") in ("stop", "attest") else MAX_STREAM-CONTROL_RESERVE
+        decoder = Decoder(cursor)
+        mark_dispatched()
+        with timed("vfs.publish"):
+            position = self.control.stream_append(req, frame, limit=limit)
+        res = root + "\\ipc_res_" + info["instance"] + "_" + str(position // BLOCK) + ".bin"
+        while time.monotonic() < deadline:
+            checkpoint("vfs.response")
+            completed=[];matched=[]
+            def validate(data):
+                for offset,size,value in decoder.feed(data):
+                    if value.get('tx_id')!=envelope['tx_id']:continue
+                    matched.append((offset,size,value))
+                    if value.get('legacy_result') is True:return []
+                    identity={'instance_id':info['instance'],'loaded_sha256':info['worker_sha256']}
+                    result=self._parse_worker_response(json.dumps(value),int((time.monotonic()-started)*1000),envelope['tx_id'],identity,strict=True)
+                    completed.append(result)
+                    return [(req,position,len(frame)),(res,offset,size)]
+                return []
+            combined=callable(getattr(type(self.control),'stream_read_committed',None))
+            try:
+                data = self.control.stream_read_committed(res,cursor,validate) if combined else self.control.stream_read(res, cursor)
+            except QgaCommandError as error:
+                # A new result may be absent or exclusively held by its writer.
+                # Retry only this read-side open under the original deadline;
+                # never republish the request.
+                if error.command != "guest-file-open":
+                    raise
+                time.sleep(min(.015, max(0, deadline-time.monotonic())))
+                continue
+            cursor += len(data)
+            if completed:return completed[0]
+            for offset, size, value in (matched if combined else decoder.feed(data)):
+                if value.get("tx_id") != envelope["tx_id"]:
+                    continue
+                identity = {"instance_id": info["instance"], "loaded_sha256": info["worker_sha256"]}
+                raw = json.dumps(value)
+                legacy = root + "\\res_" + envelope["tx_id"] + ".json"
+                if value.get("legacy_result") is True:
+                    if value.get("worker_instance") != info["instance"] or value.get("worker_sha256") != info["worker_sha256"]:
+                        raise ValueError("Stream delivery marker identity mismatch")
+                    raw = self.control.read_bytes(legacy).decode("utf-8-sig")
+                result = self._parse_worker_response(raw, int((time.monotonic()-started)*1000), envelope["tx_id"], identity, strict=True)
+                with timed("vfs.erase"):
+                    if callable(getattr(type(self.control), "stream_erase_many", None)):
+                        self.control.stream_erase_many([(req, position, len(frame)), (res, offset, size)])
+                    else:
+                        self.control.stream_erase(req, position, len(frame))
+                        self.control.stream_erase(res, offset, size)
+                    if value.get("legacy_result") is True:
+                        self.control.consume_file(legacy)
+                return result
+            if not data:
+                time.sleep(min(.015, max(0, deadline-time.monotonic())))
+        self.request_cancel(envelope["tx_id"])
+        raise OperationError("worker_response_timeout", "vfs.response", tx_id=envelope["tx_id"], node="@bastion", indeterminate=True)
+
     def attest(self, nonce, timeout_sec=10):
         result=self.exec_bastion('',timeout_sec=timeout_sec,op='attest',extra_fields={'attestation_nonce':nonce})
         if result.exit_code: raise OperationError('agent_attestation_failed','attestation',message=result.stderr)
@@ -516,6 +640,14 @@ exit 124
     def request_cancel(self, request_id: str) -> None:
         if not re.fullmatch(r"[A-Za-z0-9_]{1,128}", request_id):
             raise ValueError("Invalid request id")
+        if self.spec.spool_protocol == "stream":
+            from enclave_gateway.transports.stream_frames import encode_frame
+            from enclave_gateway.operations.context import owned_cleanup
+            with owned_cleanup():
+                info = self._stream_descriptor()
+                path = self.spec.appliance_spool_dir.rstrip("\\/") + "\\ipc_req_" + info["instance"] + ".bin"
+                self.control.stream_append(path, encode_frame({"op": "cancel", "tx_id": request_id}))
+            return
         publisher = getattr(self.control, "publish_bytes", None)
         if callable(publisher):
             from enclave_gateway.operations.context import owned_cleanup
@@ -524,7 +656,7 @@ exit 124
                 publisher(json.dumps({"tx_id": request_id}).encode(), path)
 
     @staticmethod
-    def _parse_envelope_response(raw_stdout: str, fallback_duration_ms: int, tx_id: str | None = None) -> ExecResult:
+    def _parse_envelope_response(raw_stdout: str, fallback_duration_ms: int, tx_id: str | None = None, *, strict: bool = False) -> ExecResult:
         try:
             parsed = json.loads(raw_stdout.lstrip("\ufeff"))
             if not isinstance(parsed, dict) or any(key not in parsed for key in ("exit_code", "stdout_b64", "stderr_b64")):
@@ -557,8 +689,9 @@ exit 124
                 duration_ms=int(parsed.get("duration_ms", fallback_duration_ms)),
             )
         except (TypeError, AttributeError, KeyError, ValueError) as exc:
-            if current():
-                raise OperationError('worker_response_invalid','vfs.response',tx_id=current().tx_id,node=current().node,indeterminate=True) from exc
+            if current() or strict:
+                context=current()
+                raise OperationError('worker_response_invalid','vfs.response',tx_id=context.tx_id if context else (tx_id or ''),node=context.node if context else '@bastion',indeterminate=True) from exc
             return ExecResult(
                 exit_code=1,
                 stdout="",

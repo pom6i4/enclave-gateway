@@ -2,6 +2,7 @@ param(
     [ValidateSet('Standard','Enterprise','Custom')][string]$Mode = 'Custom',
     [string]$SpoolDir = "\\tsclient\C\EnclaveGateway\spool",
     [int]$PollIntervalMs = 20,
+    [ValidateSet('Files','Stream')][string]$SpoolProtocol = 'Files',
     [ValidateRange(250,30000)][int]$HeartbeatIntervalMs = 5000,
     [ValidateRange(100,60000)][int]$RecoveryScanIntervalMs = 5000,
     [int]$ParallelStreams = 4,
@@ -39,7 +40,16 @@ $ErrorActionPreference = 'Stop'
 
 $ProgressPreference='SilentlyContinue'
 function Move-WorkerFile([string]$Source,[string]$Destination) {
-    if([IO.File]::Exists($Destination)){[IO.File]::Replace($Source,$Destination,[NullString]::Value)}else{[IO.File]::Move($Source,$Destination)}
+    for($attempt=0;$true;$attempt++){
+        try{
+            if([IO.File]::Exists($Destination)){[IO.File]::Replace($Source,$Destination,[NullString]::Value)}else{[IO.File]::Move($Source,$Destination)}
+            return
+        }catch{
+            $cause=$_.Exception;while($cause.InnerException){$cause=$cause.InnerException}
+            if(($cause.HResult -band 65535) -notin @(32,33) -or $attempt -ge 19){throw}
+            Start-Sleep -Milliseconds 10
+        }
+    }
 }
 function Write-DurableText([string]$Path, [string]$Text) {
     $bytes=[Text.Encoding]::UTF8.GetBytes($Text)
@@ -257,6 +267,20 @@ function Write-Response {
     $result = @{ tx_id=$TxId; exit_code=$ExitCode; state=$State; worker_instance=$workerInstance; worker_sha256=$loadedWorkerHash;
         stdout_b64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Stdout));
         stderr_b64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Stderr)); duration_ms=$DurationMs }
+    if($streamTxIds.ContainsKey($TxId)){
+        try{
+            if($StoreState){Write-State $TxId $State}
+            Send-StreamResponse $result
+        }catch{
+            # Delivery/storage failure after execution is indeterminate to the
+            # caller. Never fabricate an execution failure or replay its payload.
+            $streamState.Error='Stream response publication failed; reconcile the transaction journal'
+            $streamState.Stop=$true
+        }
+        $streamTxIds.Remove($TxId)
+        $script:completedCount++;$script:lastResponseMs=$clock.ElapsedMilliseconds-$responseStarted
+        return
+    }
     $temporary = [IO.Path]::Combine($SpoolDir,"res_$TxId.tmp")
     $path = [IO.Path]::Combine($SpoolDir,"res_$TxId.json")
     [IO.File]::WriteAllText($temporary,($result | ConvertTo-Json -Compress),(New-Object Text.UTF8Encoding($false)))
@@ -267,6 +291,213 @@ function Write-Response {
     $script:lastResponseMs=$clock.ElapsedMilliseconds-$responseStarted
 }
 
+
+# EGW_STREAM_V1: keep redirected handles warm; only local durable journal
+# writes precede dispatch. Hashes seal frames, not the channel's identity.
+$streamState=$null;$streamReservedBytes=0;$streamPipes=@();$streamTxIds=@{};$streamPending=New-Object Collections.Generic.Queue[object]
+function Start-StreamPipe($Code,$Shared) {
+    $pipe=[powershell]::Create()
+    [void]$pipe.AddScript($Code).AddArgument($Shared)
+    try{$handle=$pipe.BeginInvoke()}catch{$pipe.Dispose();throw}
+    $script:streamPipes+=@{Pipe=$pipe;Handle=$handle}
+}
+function Initialize-StreamIpc {
+    $requestPath=[IO.Path]::Combine($SpoolDir,('ipc_req_'+$workerInstance+'.bin'))
+    foreach($path in @($requestPath)){
+        $file=[IO.File]::Open($path,[IO.FileMode]::CreateNew,[IO.FileAccess]::ReadWrite,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete));$file.Dispose()
+    }
+    $script:streamState=[hashtable]::Synchronized(@{Stop=$false;Error='';In=(New-Object 'Collections.Concurrent.ConcurrentQueue[object]');Out=(New-Object 'Collections.Concurrent.ConcurrentQueue[object]');RequestPath=$requestPath;Spool=$SpoolDir;Instance=$workerInstance;Heartbeat='';HighWater=[long]0;NextTicket=[long]0;Prepared=(New-Object 'Collections.Concurrent.ConcurrentDictionary[long,object]');Opening=(New-Object 'Collections.Concurrent.ConcurrentDictionary[long,bool]');Expected=(New-Object 'Collections.Concurrent.ConcurrentDictionary[long,bool]');ReadMs=0;WriteMs=0;WriteOpenMs=0;WriteIoMs=0;HeartbeatMs=0;FramesIn=0;FramesOut=0;ReaderReady=$false;WriterReady=$false})
+    Start-StreamPipe {
+        param($Shared)
+        $ErrorActionPreference='Stop';$file=$null;$sha=[Security.Cryptography.SHA256]::Create()
+        try{
+            $file=[IO.File]::Open($Shared.RequestPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+            [void]($sha.ComputeHash((New-Object byte[] 0)));[void]('{"ready":true}'|ConvertFrom-Json)
+            $Shared.ReaderReady=$true;$bytes=New-Object byte[] 65536;$buffer='';$offset=[long]0
+            while(-not $Shared.Stop){
+                if($Shared.In.Count -ge 128){Start-Sleep -Milliseconds 5;continue}
+                $timer=[Diagnostics.Stopwatch]::StartNew();$count=$file.Read($bytes,0,$bytes.Length);$Shared.ReadMs=$timer.ElapsedMilliseconds
+                if($count){$buffer += [Text.Encoding]::ASCII.GetString($bytes,0,$count)}
+                while($buffer.Length){
+                    $start=$buffer.IndexOf('EGWS1 ',[StringComparison]::Ordinal)
+                    if($start -lt 0){$drop=[Math]::Max(0,$buffer.Length-5);$offset+=$drop;$buffer=$buffer.Substring($drop);break}
+                    if($start){$offset+=$start;$buffer=$buffer.Substring($start)}
+                    $end=$buffer.IndexOf("`n")
+                    if($end -lt 0){if($buffer.Length -gt 1398176){$offset+=6;$buffer=$buffer.Substring(6);continue};break}
+                    # A producer may have died mid-frame. A fresh marker cannot
+                    # occur in Base64, so recover the next independently sealed frame.
+                    $next=$buffer.IndexOf('EGWS1 ',6,[StringComparison]::Ordinal)
+                    if($next -ge 0 -and $next -lt $end){$offset+=$next;$buffer=$buffer.Substring($next);continue}
+                    $frameStart=$offset;$offset+=$end+1;$line=$buffer.Substring(0,$end);$buffer=$buffer.Substring($end+1)
+                    if($line.Length -gt 1398175 -or $line -cnotmatch '^EGWS1 ([0-9a-f]{64}) ([A-Za-z0-9+/]*={0,2})$'){continue}
+                    $digest=$Matches[1];$encoded=$Matches[2]
+                    try{
+                        $body=[Convert]::FromBase64String($encoded)
+                        if($body.Length -gt 1048576){continue}
+                        $actual=[BitConverter]::ToString($sha.ComputeHash($body)).Replace('-','').ToLowerInvariant()
+                        if($actual -cne $digest){continue}
+                        $value=([Text.UTF8Encoding]::new($false,$true)).GetString($body)|ConvertFrom-Json
+                        if($value -isnot [Management.Automation.PSCustomObject]){continue}
+                        $compound=@($value.PSObject.Properties|Where-Object {$v=$_.Value;$null -ne $v -and ($v -is [Management.Automation.PSCustomObject] -or ($v -is [Collections.IEnumerable] -and $v -isnot [string]))})
+                        if($compound.Count -or $frameStart%4096 -ne 0){continue}
+                        $ticket=[long]($frameStart/4096)
+                        $nextBlock=[long][Math]::Ceiling($offset/4096.0)
+                        if([string]$value.tx_id -notmatch '^[A-Za-z0-9_-]{1,128}$'){continue}
+                        if($value.op -ne 'cancel'){[void]$Shared.Expected.TryAdd($ticket,$true)}
+                        $value|Add-Member -NotePropertyName __stream_ticket -NotePropertyValue $ticket -Force
+                        [Threading.Monitor]::Enter($Shared.SyncRoot)
+                        try{if($nextBlock -gt $Shared.HighWater){$Shared.HighWater=$nextBlock}}finally{[Threading.Monitor]::Exit($Shared.SyncRoot)}
+                        $Shared.In.Enqueue($value);$Shared.FramesIn++
+                    }catch{}
+                }
+                if(-not $count){Start-Sleep -Milliseconds 5}
+            }
+        }catch{$Shared.Error='Stream request reader failed';$Shared.Stop=$true}finally{if($file){$file.Dispose()};$sha.Dispose()}
+    } $streamState
+    # Bounded lookahead hides redirected CreateFile latency from command delivery.
+    # A ticket is the physical 4 KiB request block, never a mutable Host counter.
+    for($preparer=0;$preparer -lt 4;$preparer++){
+    Start-StreamPipe {
+        param($Shared)
+        $ErrorActionPreference='Stop';$file=$null
+        try{
+            while(-not $Shared.Stop){
+                foreach($key in @($Shared.Prepared.Keys)){
+                    if($key -lt $Shared.HighWater -and -not $Shared.Expected.ContainsKey($key)){
+                        $unused=$null
+                        if($Shared.Prepared.TryRemove($key,[ref]$unused)){$unused.Dispose()}
+                    }
+                }
+                $ticket=[long]-1
+                [Threading.Monitor]::Enter($Shared.SyncRoot)
+                try{
+                    if($Shared.NextTicket -lt $Shared.HighWater){$Shared.NextTicket=$Shared.HighWater}
+                    # Keep the initial reserve ready before advertising the
+                    # worker. Afterwards, avoid four metadata opens competing
+                    # with every result while the reserve is still healthy.
+                    $prepareLimit=if($Shared.HighWater -eq 0 -or $Shared.Prepared.Count -lt 8){4}else{1}
+                    if($Shared.Opening.Count -lt $prepareLimit -and $Shared.NextTicket -lt 16384 -and $Shared.NextTicket -lt $Shared.HighWater+32 -and $Shared.Prepared.Count+$Shared.Opening.Count -lt 32){
+                        $candidate=[long]$Shared.NextTicket;$Shared.NextTicket++
+                        if($Shared.Opening.TryAdd($candidate,$true)){$ticket=$candidate}
+                    }
+                }finally{[Threading.Monitor]::Exit($Shared.SyncRoot)}
+                if($ticket -lt 0){Start-Sleep -Milliseconds 5;continue}
+                try{
+                    $path=[IO.Path]::Combine($Shared.Spool,('ipc_res_'+$Shared.Instance+'_'+$ticket+'.bin'))
+                    $file=[IO.File]::Open($path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+                    if(-not $Shared.Prepared.TryAdd($ticket,$file)){throw 'Response ticket collision'}
+                    $file=$null
+                }finally{$removed=$false;[void]$Shared.Opening.TryRemove($ticket,[ref]$removed)}
+            }
+        }catch{$Shared.Error='Stream response preparation failed';$Shared.Stop=$true}finally{if($file){$file.Dispose()}}
+    } $streamState
+    }
+    for($writer=0;$writer -lt [Math]::Min(4,$ParallelStreams);$writer++){
+    Start-StreamPipe {
+        param($Shared)
+        $ErrorActionPreference='Stop';$file=$null
+        try{
+            $Shared.WriterReady=$true
+            while(-not $Shared.Stop -or $Shared.Out.Count){
+                $item=$null
+                if($Shared.Out.TryDequeue([ref]$item)){
+                    $ticket=[long]$item.Ticket
+                    if($ticket -lt 0 -or $ticket -ge 16384){throw 'Invalid response ticket'}
+                    $bytes=[Text.Encoding]::ASCII.GetBytes($item.Frame)
+                    $timer=[Diagnostics.Stopwatch]::StartNew();$deadline=[DateTime]::UtcNow.AddSeconds(30)
+                    while($null -eq $file){
+                        if($Shared.Prepared.TryRemove($ticket,[ref]$file)){break}
+                        $openHere=$false
+                        [Threading.Monitor]::Enter($Shared.SyncRoot)
+                        try{
+                            if(-not $Shared.Prepared.ContainsKey($ticket) -and -not $Shared.Opening.ContainsKey($ticket)){
+                                $openHere=$Shared.Opening.TryAdd($ticket,$true)
+                            }
+                        }finally{[Threading.Monitor]::Exit($Shared.SyncRoot)}
+                        if($openHere){
+                            try{
+                                $path=[IO.Path]::Combine($Shared.Spool,('ipc_res_'+$Shared.Instance+'_'+$ticket+'.bin'))
+                                $file=[IO.File]::Open($path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+                            }finally{$removed=$false;[void]$Shared.Opening.TryRemove($ticket,[ref]$removed)}
+                        }elseif($Shared.Stop -or [DateTime]::UtcNow -ge $deadline){throw 'Response preparation unavailable'}
+                        else{Start-Sleep -Milliseconds 5}
+                    }
+                    $removed=$false;[void]$Shared.Expected.TryRemove($ticket,[ref]$removed)
+                    $Shared.WriteOpenMs=$timer.ElapsedMilliseconds;$ioTimer=[Diagnostics.Stopwatch]::StartNew()
+                    try{$file.Write($bytes,0,$bytes.Length);$file.Flush()}finally{$file.Dispose();$file=$null}
+                    $Shared.WriteIoMs=$ioTimer.ElapsedMilliseconds;$Shared.WriteMs=$timer.ElapsedMilliseconds
+                    [Threading.Monitor]::Enter($Shared.SyncRoot)
+                    try{$Shared.FramesOut++}finally{[Threading.Monitor]::Exit($Shared.SyncRoot)}
+                }else{Start-Sleep -Milliseconds 5}
+            }
+        }catch{$Shared.Error='Stream response writer failed';$Shared.Stop=$true}finally{if($file){$file.Dispose()}}
+    } $streamState
+    }
+    Start-StreamPipe {
+        param($Shared)
+        $ErrorActionPreference='Stop';$last='';$slot='a';$initial=$true
+        try{
+            while(-not $Shared.Stop){
+                $json=$Shared.Heartbeat
+                if($json -and $json -cne $last){
+                    $timer=[Diagnostics.Stopwatch]::StartNew()
+                    # One slot remains readable while the other is published.
+                    # QGA's read-only sharing must not serialize a request behind
+                    # a redirected File.Replace of its heartbeat.
+                    $pulse=[IO.Path]::Combine($Shared.Spool,('worker_pulse_'+$Shared.Instance+'_'+$slot+'.json'))
+                    $published=$false
+                    for($attempt=0;$attempt -lt 20;$attempt++){
+                        try{[IO.File]::WriteAllText($pulse,$json,[Text.UTF8Encoding]::new($false));$published=$true;break}catch{
+                            $cause=$_.Exception;while($cause.InnerException){$cause=$cause.InnerException}
+                            if(($cause.HResult -band 65535) -notin @(32,33)){throw}
+                            Start-Sleep -Milliseconds 10
+                        }
+                    }
+                    if(-not $published){continue}
+                    if($initial){
+                        # Compatibility marker for startup observers. In stream
+                        # mode the alternating snapshots carry live telemetry.
+                        $temporary=[IO.Path]::Combine($Shared.Spool,'worker_state.tmp');$target=[IO.Path]::Combine($Shared.Spool,'worker_state.json')
+                        [IO.File]::WriteAllText($temporary,$json,[Text.UTF8Encoding]::new($false))
+                        if([IO.File]::Exists($target)){[IO.File]::Replace($temporary,$target,[NullString]::Value)}else{[IO.File]::Move($temporary,$target)}
+                        $initial=$false
+                    }
+                    $Shared.HeartbeatMs=$timer.ElapsedMilliseconds;$last=$json;$slot=if($slot -eq 'a'){'b'}else{'a'}
+                }
+                Start-Sleep -Milliseconds 25
+            }
+        }catch{$Shared.Error='Stream heartbeat publisher failed';$Shared.Stop=$true}
+    } $streamState
+    $readyDeadline=$clock.ElapsedMilliseconds+30000
+    while(-not $streamState.ReaderReady -or -not $streamState.WriterReady -or $streamState.Prepared.Count -lt 32){
+        if($streamState.Stop -or $clock.ElapsedMilliseconds -gt $readyDeadline){throw 'Stream handles did not become ready'}
+        Start-Sleep -Milliseconds 10
+    }
+    $descriptor=@{revision=3;block_bytes=4096;instance=$workerInstance;worker_sha256=$loadedWorkerHash}|ConvertTo-Json -Compress
+    $temporary=[IO.Path]::Combine($SpoolDir,'ipc_descriptor.tmp')
+    [IO.File]::WriteAllText($temporary,$descriptor,[Text.UTF8Encoding]::new($false))
+    Move-WorkerFile $temporary ([IO.Path]::Combine($SpoolDir,'ipc_descriptor.json'))
+}
+function Send-StreamResponse($Result) {
+    $json=$Result|ConvertTo-Json -Compress -Depth 8
+    $bytes=[Text.Encoding]::UTF8.GetBytes($json)
+    # Keep a bounded control reserve. Near capacity, deliver output through
+    # its existing immutable response file and enqueue only a small marker.
+    $estimatedFrame=72+4*[Math]::Ceiling($bytes.Length/3.0)
+    if($bytes.Length -gt 32768 -or $script:streamReservedBytes+$estimatedFrame -gt 66060288){
+        $path=[IO.Path]::Combine($SpoolDir,('res_'+$Result.tx_id+'.json'));$temporary=$path+'.tmp'
+        [IO.File]::WriteAllBytes($temporary,$bytes);Move-WorkerFile $temporary $path
+        $json=@{tx_id=$Result.tx_id;legacy_result=$true;worker_instance=$workerInstance;worker_sha256=$loadedWorkerHash}|ConvertTo-Json -Compress
+        $bytes=[Text.Encoding]::UTF8.GetBytes($json)
+    }
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try{$digest=[BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+    if($streamState.Out.Count -ge 256){throw 'Stream response backlog reached capacity; reconcile the Host journal'}
+    $frame='EGWS1 '+$digest+' '+[Convert]::ToBase64String($bytes)+"`n"
+    if($script:streamReservedBytes+$frame.Length -gt 67108864){throw 'Stream response capacity reached'}
+    $script:streamReservedBytes+=$frame.Length
+    $streamState.Out.Enqueue(@{Ticket=[long]$streamTxIds[$Result.tx_id];Frame=$frame})
+}
 function Close-Mux {
     param([string]$ConnectionId)
     if ($Global:EnclaveMuxSockets.ContainsKey($ConnectionId)) {
@@ -405,10 +636,24 @@ if($ProcessIsolation){
         $trustProcess.Dispose();throw
     }
 }
+    if($SpoolProtocol -eq 'Stream'){
+        # Ready means resident parsers and Standard execution slots are warm;
+        # the first request must not pay module discovery or codec JIT costs.
+        foreach($slot in @($executionSlots)+@($attestationSlot)){
+            $warm=[powershell]::Create();$warm.Runspace=$slot.Runspace
+            try{
+                [void]$warm.AddScript("[void]('{`"ready`":true}'|ConvertFrom-Json);[void](@{ready=1}|ConvertTo-Json -Compress);Write-Output 'EGW_READY'")
+                [void]$warm.Invoke();if($warm.Streams.Error.Count){throw 'Resident slot initialization failed'}
+            }finally{$warm.Dispose()}
+        }
+        Initialize-StreamIpc
+    }
     while (-not $stopRequested -and (-not $StopFile -or -not [IO.File]::Exists($StopFile))) {
         $loopStart=$clock.ElapsedMilliseconds
         Complete-WorkerJobs
+        if($streamState -and $streamState.Stop){throw $streamState.Error}
         $scanStart=$clock.ElapsedMilliseconds
+        if($SpoolProtocol -eq 'Files'){
         try{
             $hfile=[IO.File]::Open(([IO.Path]::Combine($SpoolDir,'request_index.json')),[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
             try{
@@ -435,6 +680,7 @@ if($ProcessIsolation){
             $scanCount++;$lastRecovery=$clock.ElapsedMilliseconds
         }
         $lastScanMs=$clock.ElapsedMilliseconds-$scanStart
+        }else{$spoolFiles=@()}
         # Cancellation files have priority over new work. They contain no code.
         foreach ($cancelFile in @($spoolFiles | Where-Object {[IO.Path]::GetFileName($_) -like 'cancel_*.json'} | Select-Object -First $MaxRequestsPerTick)) {
             try {
@@ -525,7 +771,45 @@ if($ProcessIsolation){
             }
         }
 
-        foreach ($file in @($spoolFiles | Where-Object {[IO.Path]::GetFileName($_) -like 'req_*.json'} | Sort-Object | Select-Object -First $MaxRequestsPerTick)) {
+        $dispatchItems=New-Object Collections.Generic.List[object]
+        if($SpoolProtocol -eq 'Stream'){
+            # Read new control messages before revisiting occupied execution
+            # slots. A full pending batch must never starve cancellation.
+            $incoming=$null;$incomingCount=0
+            while($incomingCount -lt 128 -and $streamState.In.TryDequeue([ref]$incoming)){
+                $incomingCount++
+                if($incoming.op -eq 'cancel'){$dispatchItems.Add(@{Stream=$true;Value=$incoming})}
+                elseif($streamPending.Count -lt 128){$streamPending.Enqueue($incoming)}
+                else{
+                    $busyId=[string]$incoming.tx_id
+                    if($busyId -match '^[A-Za-z0-9_-]{1,128}$'){
+                        $streamTxIds[$busyId]=[long]$incoming.__stream_ticket
+                        if([IO.File]::Exists(([IO.Path]::Combine($stateDir,($busyId+'.json'))))){Write-Response $busyId 125 '' 'Existing transaction; query the Host journal' 0 'indeterminate' $false}
+                        else{Write-Response $busyId 75 '' 'WORKER_BUSY: bounded stream queue is full; request was not executed' 0 'failed' $false}
+                    }
+                }
+                $incoming=$null
+            }
+            $requestsThisTick=0
+            while($streamPending.Count -and $requestsThisTick -lt $MaxRequestsPerTick){
+                $dispatchItems.Add(@{Stream=$true;Value=$streamPending.Dequeue()});$requestsThisTick++
+            }
+        }else{
+            foreach($path in @($spoolFiles | Where-Object {[IO.Path]::GetFileName($_) -like 'req_*.json'} | Sort-Object | Select-Object -First $MaxRequestsPerTick)){$dispatchItems.Add(@{Stream=$false;Path=$path})}
+        }
+        foreach ($item in $dispatchItems) {
+            $file=$item.Path
+            if($item.Stream){
+                $request=$item.Value;$txId=[string]$request.tx_id
+                if($txId -notmatch '^[A-Za-z0-9_-]{1,128}$'){continue}
+                if($request.op -eq 'cancel'){
+                    Write-DurableText ([IO.Path]::Combine($stateDir,"$txId.cancel")) ''
+                    foreach($job in @($activeTxJobs.ToArray())){if($job.TxId -eq $txId -and -not $job.Cancelled){Stop-Execution $job}}
+                    foreach($job in @($pendingMux.ToArray())){if($job.TxId -eq $txId){$job.Cancelled=$true}}
+                    continue
+                }
+                $streamTxIds[$txId]=[long]$request.__stream_ticket;$claim=$null;$requestPath=$null;$requeued=$false
+            }else{
             # Capture identity before rename; FileInfo metadata can be refreshed
             # against the now-missing original pathname on Windows PowerShell.
             $requestPath=$file
@@ -534,8 +818,10 @@ if($ProcessIsolation){
             $claim="$requestPath.processing";$requeued=$false
             $claimStart=$clock.ElapsedMilliseconds
             try { [IO.File]::Move($requestPath,$claim);$lastClaimMs=$clock.ElapsedMilliseconds-$claimStart } catch [IO.FileNotFoundException] {$pendingHints.Remove($requestPath);continue} catch {continue}
+            }
             try {
                 if ($txId -notmatch '^[A-Za-z0-9_-]{1,128}$') {throw 'Invalid transaction filename'}
+                if(-not $item.Stream){
                 try {
                     $readStart=$clock.ElapsedMilliseconds
                     $stream=[IO.File]::Open($claim,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
@@ -555,6 +841,7 @@ if($ProcessIsolation){
                         continue
                     }
                     throw
+                }
                 }
                 if ([string]$request.tx_id -ne $txId) {throw 'Transaction identifier does not match filename'}
                 if ($request.expected_worker_instance -and ($request.expected_worker_instance -ne $workerInstance -or $request.expected_worker_sha256 -ne $loadedWorkerHash)) {
@@ -599,7 +886,7 @@ if($ProcessIsolation){
                 if ((-not $action -or $request.op -eq 'attest') -and $null -eq $slot) {
                     # Leave queued requests unexecuted until a slot is free;
                     # their original absolute deadline remains authoritative.
-                    [IO.File]::Move($claim,$requestPath);$requeued=$true
+                    if($item.Stream){$streamPending.Enqueue($request)}else{[IO.File]::Move($claim,$requestPath)};$requeued=$true
                     continue
                 }
                 Write-State $txId 'running'
@@ -707,7 +994,7 @@ $e | ConvertTo-Json -Compress -Depth 5
                 }
             } catch {
                 if ($txId -match '^[A-Za-z0-9_-]{1,128}$') { Write-Response $txId 1 '' ($_ | Out-String) 0 'failed' }
-            } finally { try{[IO.File]::Delete($claim)}catch{};if(-not $requeued){$pendingHints.Remove($requestPath)};Complete-WorkerJobs }
+            } finally { if(-not $item.Stream){try{[IO.File]::Delete($claim)}catch{};if(-not $requeued){$pendingHints.Remove($requestPath)}};Complete-WorkerJobs }
         }
 
         if ($clock.ElapsedMilliseconds-$lastHeartbeat -ge $HeartbeatIntervalMs) {
@@ -726,7 +1013,7 @@ $e | ConvertTo-Json -Compress -Depth 5
             $nativeStages=@{}
             foreach($job in $activeTxJobs.ToArray()) {if($job.Native) {$stage=[string]$job.NativeState.Stage; $nativeStages[$stage]=1+[int]$nativeStages[$stage]}}
             $self=[Diagnostics.Process]::GetCurrentProcess()
-            $heartbeatState=@{ status='running';protocol_revision=2;heartbeat_interval_ms=$HeartbeatIntervalMs;last_heartbeat_ms=$lastHeartbeatMs;last_hint_ms=$lastHintMs;last_directory_ms=$lastDirectoryMs;last_journal_ms=$lastJournalMs;last_response_ms=$lastResponseMs;last_claim_ms=$lastClaimMs;last_read_ms=$lastReadMs;journal_location=$journalLocation;directory_scans=$scanCount;last_scan_ms=$lastScanMs;last_loop_ms=$lastLoopMs;trust_initialization_ms=$trustState.InitializationMs; read_retry_count=$readRetryCount; native_stages=$nativeStages; working_set_bytes=$self.WorkingSet64; handles=$self.HandleCount; threads=$self.Threads.Count; pid=$PID; language_mode=[string]$ExecutionContext.SessionState.LanguageMode; powershell_edition=[string]$PSVersionTable.PSEdition; uptime_sec=[int]$clock.Elapsed.TotalSeconds;
+            $heartbeatState=@{ status='running';instance_id=$workerInstance;worker_sha256=$loadedWorkerHash;spool_protocol=$SpoolProtocol.ToLowerInvariant();protocol_revision=2;heartbeat_interval_ms=$HeartbeatIntervalMs;last_heartbeat_ms=$lastHeartbeatMs;last_hint_ms=$lastHintMs;last_directory_ms=$lastDirectoryMs;last_journal_ms=$lastJournalMs;last_response_ms=$lastResponseMs;last_claim_ms=$lastClaimMs;last_read_ms=$lastReadMs;journal_location=$journalLocation;directory_scans=$scanCount;last_scan_ms=$lastScanMs;last_loop_ms=$lastLoopMs;trust_initialization_ms=$trustState.InitializationMs; read_retry_count=$readRetryCount; native_stages=$nativeStages; working_set_bytes=$self.WorkingSet64; handles=$self.HandleCount; threads=$self.Threads.Count; pid=$PID; language_mode=[string]$ExecutionContext.SessionState.LanguageMode; powershell_edition=[string]$PSVersionTable.PSEdition; uptime_sec=[int]$clock.Elapsed.TotalSeconds;
                 security_mode=$Mode.ToLowerInvariant(); execution_model=if ($ProcessIsolation) {"owned-process-job"} else {"runspace"}; parallel_streams=$ParallelStreams; active_mux_streams=$Global:EnclaveMuxSockets.Count; active_tx_jobs=$activeTxJobs.Count;
                 pending_mux=$pendingMux.Count; completed_transactions=$completedCount; native_cleanup_cycles=$nativeCleanupCycles; transaction_records=$transactionCount; transaction_capacity=$MaxTransactionRecords; last_heartbeat_utc=(Get-Date).ToUniversalTime().ToString('o') }
             $self.Dispose()
@@ -734,9 +1021,11 @@ $e | ConvertTo-Json -Compress -Depth 5
                 $heartbeatState.pending_mux_details=@($pendingMux.ToArray() | ForEach-Object {@{tx_id=$_.TxId;action=$_.Action;elapsed_ms=$_.Timer.ElapsedMilliseconds;offset=$_.Offset;bytes=$_.Bytes.Length;read_started=$_.ReadStarted;wait_ms=$_.WaitMs;received=$_.Receive.Length}})
             }
             $heartbeatStart=$clock.ElapsedMilliseconds
+            if($SpoolProtocol -eq 'Stream'){$heartbeatState.stream=@{request_read_ms=$streamState.ReadMs;response_write_ms=$streamState.WriteMs;response_open_ms=$streamState.WriteOpenMs;response_io_ms=$streamState.WriteIoMs;heartbeat_ms=$streamState.HeartbeatMs;frames_in=$streamState.FramesIn;frames_out=$streamState.FramesOut;prepared_responses=$streamState.Prepared.Count;preparing_responses=$streamState.Opening.Count};$streamState.Heartbeat=$heartbeatState|ConvertTo-Json -Compress -Depth 5}else{
             $temporary=[IO.Path]::Combine($SpoolDir,'worker_state.tmp')
             [IO.File]::WriteAllText($temporary, ($heartbeatState | ConvertTo-Json -Compress -Depth 5), (New-Object Text.UTF8Encoding($false)))
             try{Move-WorkerFile $temporary ([IO.Path]::Combine($SpoolDir,'worker_state.json'))}catch{}
+            }
             $lastHeartbeat=$clock.ElapsedMilliseconds
             $lastHeartbeatMs=$lastHeartbeat-$heartbeatStart
         }
@@ -745,6 +1034,19 @@ $e | ConvertTo-Json -Compress -Depth 5
     }
 } finally {
     try {
+    if($streamState){
+        $streamState.Stop=$true
+        try{
+            foreach($job in $streamPipes){
+                try{[void]$job.Pipe.EndInvoke($job.Handle)}finally{$job.Pipe.Dispose()}
+            }
+        }finally{
+            foreach($prepared in @($streamState.Prepared.Values)){$prepared.Dispose()}
+            $streamState.Prepared.Clear()
+        }
+        # Endpoints are immutable per instance; retain them for reconciliation.
+        # A stopped descriptor cannot authorize a new worker instance.
+    }
     if($trustProcess){
         try{if(-not $trustProcess.HasExited){$trustProcess.Kill();$trustProcess.WaitForExit()}}catch{}
         foreach($name in @('StandardInput','StandardOutput','StandardError')){try{$trustProcess.$name.Dispose()}catch{}}
@@ -772,8 +1074,13 @@ $e | ConvertTo-Json -Compress -Depth 5
     try {
         if($instanceLease){
             if($heartbeatState -isnot [hashtable]){$heartbeatState=@{}}
-            $heartbeatState.status='stopped';$heartbeatState.protocol_revision=2;$heartbeatState.last_heartbeat_utc=[DateTime]::UtcNow.ToString('o');$heartbeatState.instance_id=$workerInstance
+            $heartbeatState.status='stopped';if($streamState -and $streamState.Error){$heartbeatState.stream_error=$streamState.Error};$heartbeatState.protocol_revision=2;$heartbeatState.last_heartbeat_utc=[DateTime]::UtcNow.ToString('o');$heartbeatState.instance_id=$workerInstance
             $stoppedJson=$heartbeatState|ConvertTo-Json -Compress -Depth 5
+            if($streamState){
+                foreach($slot in @('a','b')){
+                    try{[IO.File]::WriteAllText(([IO.Path]::Combine($SpoolDir,('worker_pulse_'+$workerInstance+'_'+$slot+'.json'))),$stoppedJson,[Text.UTF8Encoding]::new($false))}catch{}
+                }
+            }
             $temporary=[IO.Path]::Combine($SpoolDir,('worker_state.'+[Guid]::NewGuid().ToString('N')+'.tmp'))
             try{[IO.File]::WriteAllText($temporary,$stoppedJson,(New-Object Text.UTF8Encoding($false)));Move-WorkerFile $temporary ([IO.Path]::Combine($SpoolDir,'worker_state.json'))}catch{}
         }

@@ -219,8 +219,9 @@ class EnclaveEngine:
     def _assert_worker_ready(self):
         from enclave_gateway.worker_channel import require_running_worker
         if time.monotonic()-self._worker_ready_at<1:return
-        require_running_worker(self.control,self.config.bastion)
+        state=require_running_worker(self.control,self.config.bastion)
         self._worker_ready_at=time.monotonic()
+        return state
 
     @tracked('stop_worker')
     def stop_worker(self, *, actor='cli', timeout_sec=45):
@@ -320,6 +321,12 @@ ConvertTo-Json $out -Compress -Depth 8
         except Exception as exc:
             report["provider"]["details"] = f"Status probe error: {exc}"
 
+        if self.config.bastion.enabled and self.config.bastion.spool_protocol=='stream':
+            from enclave_gateway.worker_channel import stream_worker_state
+            try:snapshot=stream_worker_state(self.control,self.config.bastion)
+            except Exception:snapshot=None
+            report['bastion']['worker_state']=snapshot or {}
+            report['bastion']['worker_healthy']=bool(snapshot and snapshot.get('status')=='running')
         return report
 
     @tracked("heal")
@@ -362,7 +369,7 @@ ConvertTo-Json $out -Compress -Depth 8
             combined_ps+=f"""
 & {{
 {sup_script}
-}} -BastionHost {ps_quote(self.config.bastion.host)} -BastionPort {self.config.bastion.port} -SpoolDir {ps_quote(self.config.bastion.appliance_spool_dir)} -ScheduledTaskName {ps_quote(self.config.bastion.scheduled_task_name)} -HeartbeatMaxAgeSec {self.config.bastion.heartbeat_max_age_sec} {cred_args} -ForceReconnect
+}} -BastionHost {ps_quote(self.config.bastion.host)} -BastionPort {self.config.bastion.port} -SpoolDir {ps_quote(self.config.bastion.appliance_spool_dir)} -ScheduledTaskName {ps_quote(self.config.bastion.scheduled_task_name)} -HeartbeatMaxAgeSec {self.config.bastion.heartbeat_max_age_sec} -SpoolProtocol {self.config.bastion.spool_protocol.title()} {cred_args} -ForceReconnect
 """
         res = self._scrub_result(self.control.exec_powershell(combined_ps, timeout_sec=60.0))
         if deployment:

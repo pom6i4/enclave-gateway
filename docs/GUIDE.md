@@ -367,3 +367,96 @@ samples and tails under the same RDP conditions. Do not infer WAN latency from a
 local or delayed-loopback sample. Test tunnels, long transfers and controlled RDP
 loss/recovery separately before replacing an operational bridge; this probe does
 not disconnect a session or switch the environment automatically.
+
+### Short-command latency over redirected drives
+
+`bastion.spool_protocol: files` remains the compatible default. To evaluate the
+persistent stream channel, select `bastion.spool_protocol: stream`, stop the old
+worker, run `egw agents stage`, then start its new command in the Bastion session.
+Host and worker must select the same protocol; readiness rejects a mismatch.
+Stream mode requires direct file IPC through QGA or Windows Direct control.
+It requires no compiler or additional executable in Standard mode. Enterprise
+keeps its signed package, native isolation and fresh attestation requirements.
+
+Stream mode keeps the redirected request reader open and publishes
+heartbeats on a separate runspace. Short requests avoid directory enumeration,
+claim renames and response renames. Up to four response writers create an
+independent framed result for each transaction and close it before readback.
+A bounded lookahead prepares up to 32 response handles before requests arrive;
+up to four more can be delivering results. Request starts are aligned to 4 KiB
+blocks, which select immutable response tickets without a separate Host counter.
+The initial reserve is filled before readiness. Replenishment uses one
+preparer while at least eight handles remain and up to four below that level,
+so metadata preparation does not continuously compete with responses.
+Preparation uses ordinary .NET APIs and never executes a payload.
+[Windows QGA](https://github.com/qemu/qemu/blob/master/qga/commands-win32.c)
+opens files with read sharing only, so a persistent redirected writer cannot
+coexist with its QGA reader. Independent results also avoid repeatedly opening
+an existing shared UNC file. The local durable transaction journal still
+commits before execution and before response delivery. Concurrent Host processes
+serialize complete request frames using a lock derived from the canonical QGA
+endpoint. QGA calls use a FIFO thread gate so a hot poller cannot starve
+other callers. A complete short reply is validated and both acknowledged spans
+are erased within the same QGA synchronization. Legacy delivery keeps its
+existing separate readback; no command or response validator is replayed.
+Concurrent calls may share an in-flight readiness snapshot after checking its
+absolute heartbeat expiry. The validated descriptor from that check is reused
+within dispatch, and still compared with attested identity. The transport does
+not cache completed checks; the existing engine readiness cache stays bounded
+to one second. Attestation is independent.
+Do not share one endpoint through independent remote socket relays.
+
+Stream liveness uses alternating same-instance heartbeat snapshots. Status,
+doctor and the session supervisor select the newest fresh snapshot, including
+stopped snapshots. Readers reject foreign instances and prefer a readable stopped snapshot over
+older or equally timed running data. A locked slot may leave the previous fresh
+snapshot in use; heartbeat data remains a liveness hint, not proof of process life. `worker_state.json` is only a
+startup/stopped compatibility marker in this mode; use `egw status` for live
+telemetry. The configured heartbeat age limit is unchanged.
+
+Each frame contains a delimiter, SHA-256 and Base64 JSON. Incomplete/corrupt
+frames cannot execute. This checksum establishes completeness, not authenticity.
+The request JSON limit is 1 MiB; select `files` before dispatching larger commands.
+Responses above 32 KiB use the existing response-file delivery, without executing the
+command again. There is no automatic protocol fallback after publication.
+Each worker instance owns a new request endpoint and result namespace. The
+request stream (including block padding) and total framed responses are capped at 64 MiB each,
+including a 1 MiB reserve for stop, cancellation and attestation. Ordinary requests stop
+before consuming this reserve; responses near capacity use response-file delivery.
+The request stream therefore holds at most 16,384 minimum-size requests,
+including reserved control blocks; larger requests consume more blocks. Successful
+exchanges erase their own request/response spans before returning. Failed or
+interrupted exchanges retain evidence for transaction reconciliation. Zeroing is
+logical erasure, not a guarantee against filesystem snapshots or SSD recovery.
+
+Stop the worker before archiving exhausted stream endpoints. Preserve the
+Bastion journal and `worker_storage.json`: restarting must never reset replay
+protection. `egw clean` is not an archive/reset command for stream endpoints.
+An accepted stop is distinct from confirmed worker exit.
+
+Measure the complete CLI invocation, including publication, result readback and
+erasure, with a fixed safe output marker. Keep cold startup, warmed Standard,
+Enterprise/native isolation, parallel load and large transfers as separate
+cohorts. Record source hashes, QGA/client/server versions, redirection direction,
+network delay method and measured RTT. Compare a simple bridge on the identical
+route; a delay per TCP `recv` chunk is not a fixed network RTT. LAN results do not
+qualify customer WAN latency.
+
+`scripts/qualification/latency_gate.py` accepts a receipt with a `scope` and a
+`cohorts` mapping. Each cohort contains the complete list of
+`{"elapsed_ms": 500, "ok": true}` samples. Run it with `--input receipt.json
+--output gate.json`. Every cohort needs at least 30 samples, every sample must
+succeed, and every sample must be at most **800 ms**. It has no threshold override
+and refuses to overwrite earlier results. Preserve failed runs, including
+observer/setup failures, separately from valid performance measurements.
+
+On newer Windows clients, the first `.rdp` launch may ask for account-level
+permission to open RDP files and a separate resource-forwarding confirmation.
+Review the destination and publisher, and enable the requested **Drives**
+forwarding for the spool. Unrelated WebAuthn/security-key forwarding is not
+needed by egw. These prompts happen before the worker can see `\\tsclient\C`.
+
+For a lab with two Windows guests, use independently installed or correctly
+Sysprep-generalized images. Duplicate machine SIDs can cause RDP authentication
+to fail even with the correct password. Keep Windows identity checks enabled;
+see [Microsoft's duplicate SID guidance](https://support.microsoft.com/en-au/servicing/os/windows/docs/2025/10/kerberos-and-ntlm-authentication-failures-due-to-duplicate-sids).

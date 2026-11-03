@@ -159,3 +159,18 @@ application-control rules, and local copies retain Internet zone markers. Signed
 profiles require the approved signing workflow. Staged source generations may be
 pruned after a verified local copy is running because the local copy is independent;
 source leases protect the copy itself, and current/rollback retention still applies.
+
+### Optional committed stream IPC
+
+The explicitly selected stream spool protocol changes transport framing only.
+It does not authenticate the redirected share: retain private spool ACLs, the
+RDP session trust boundary and Enterprise nonce/release/SID attestation. Both
+protocols use the same durable Bastion transaction journal and absolute request
+deadlines. Stream frames bind replies to the selected worker instance and
+release hash; corrupt or incomplete frames are discarded without execution.
+A lost acknowledgement is indeterminate and never triggers command replay or
+fallback to another protocol. Endpoint files are bounded and unique per worker
+instance. Successful request/result spans are zeroed before return; interrupted
+spans remain private reconciliation evidence. The resident worker retains its redirected
+request reader until exit, so confirm its exit before disconnecting or
+archiving those endpoints.

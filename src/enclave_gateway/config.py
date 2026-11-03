@@ -144,8 +144,11 @@ class BastionSpec:
     compress: bool = True
     block_size_bytes: int = 4 * 1024 * 1024
     heartbeat_max_age_sec: int = 45
+    spool_protocol: str = "files"
 
     def __post_init__(self):
+        if self.spool_protocol not in ("files", "stream"):
+            raise ValueError("spool_protocol must be files or stream")
         if type(self.heartbeat_max_age_sec) is not int or not 5<=self.heartbeat_max_age_sec<=300:
             raise ValueError('heartbeat_max_age_sec must be in 5..300')
         # A binary block is embedded in a script, then in the 8 MiB envelope.
