@@ -1,6 +1,7 @@
 """POSIX command supervisor with an authenticated private cancellation socket."""
 from __future__ import annotations
 import base64
+import errno
 import hashlib
 import hmac
 import json
@@ -51,7 +52,13 @@ def cancel(token):
         client.settimeout(2)
         try: client.connect(str(endpoint(token)))
         except FileNotFoundError: return {'cancel_requested':False,'reason':'supervisor_not_present'}
-        client.sendall(token.encode()); client.shutdown(socket.SHUT_WR)
+        client.sendall(token.encode())
+        try:client.shutdown(socket.SHUT_WR)
+        except OSError as error:
+            # A supervisor may acknowledge and close immediately after the
+            # complete token arrives. Its authenticated acknowledgement, not
+            # the local half-close outcome, decides whether cancellation won.
+            if error.errno!=errno.ENOTCONN:raise
         return {'cancel_requested':client.recv(16)==b'accepted'}
 
 

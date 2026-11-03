@@ -89,23 +89,101 @@ only container metadata is canonicalized. Inspect both PE machine values, exerci
 host-native helper behavior separately and validate `sbom.cdx.json` against the
 pinned CycloneDX 1.6 schema. Restore/audit failures must remain failures.
 
-Assemble the reviewed kit from the matching artifact tree:
+## Execute the exact artifacts on Windows and Linux
 
-- Python sdist and wheel, and a separate exact-commit source archive containing
-  native sources, tests, configuration and maintainer tools.
-- Unsigned Windows x64/ARM64 packages with their unsigned manifests.
-- Project MIT license and the embedded runtime packages' license/notices, copied
-  from the hash-verified dependency archives. SDK/build-only tools are not shipped.
-- CycloneDX SBOM, component compatibility table, changelog and candidate README
-  stating that signing, Windows execution and production acceptance are separate.
-- `SHA256SUMS` covering all delivered files and a provenance receipt naming the
-  source commit, artifact hashes, toolchain and test/history-audit evidence hashes.
+Use a disposable Windows x64 VM, a disposable Windows ARM64 VM and an isolated
+Linux environment. Match OS architecture to the delivered native helper target;
+process emulation is recorded separately from the native OS architecture. Keep
+network access disabled or restricted and do not attach customer shares or keys.
+Use an approved full Python installation with `venv`; an embedded Python with
+custom `_pth` entries is not a clean client installation.
 
-Reject symlinks and unlisted files when checking the final kit. Verify every listed
-hash again after packaging. Record private machine paths only in private build
-reports, never in the distributable provenance. Checksums establish integrity;
-they do not authenticate an untrusted download or replace the approved signing
-procedure. A later signed package needs newly computed signed manifests/hashes.
+Run the following on each Windows VM, replacing paths with that VM's matching
+artifact directory from the successful comparison:
+
+```powershell
+python scripts/qualification/artifact_acceptance.py `
+  --wheel C:\Acceptance\enclave_gateway-0.2.0-py3-none-any.whl `
+  --pip-wheel C:\Acceptance\pip-approved-py3-none-any.whl `
+  --runtime C:\Acceptance\egw-runtime.exe --askpass C:\Acceptance\egw-askpass.exe `
+  --allow-unsigned-lab --work-dir C:\Acceptance\new-client `
+  --output C:\Acceptance\new-result.json
+```
+
+The explicit unsigned flag is laboratory-only. Run with permission to create and
+remove a temporary, nonexportable machine code-signing key. The checker retains
+the original trust-store inventory, adds only its own temporary certificate,
+checks the installed signature verifier and AllSigned positive/negative cases,
+then removes its own key and trust entries. It must leave the original stores
+unchanged. Do not use a shared or production machine. No certificate is exported.
+Native checks run without SDK discovery, at timing scale 1 and the existing
+15-second signature cap. They exercise filesystem containment, binary/Unicode
+round trips, argument quoting and descendant cancellation. The cancellation
+handshake uses a small Python parent and a real PowerShell descendant; it measures
+Job cancellation without waiting for two PowerShell interpreters to initialize. An absent symlink
+privilege is an incomplete acceptance, not a passing skip.
+
+On Linux, use the same wheel and checker in a fresh offline container or VM
+with `pidfd_open` support (Linux 5.3 or newer) for PID-safe cancellation checks:
+
+```sh
+python3 scripts/qualification/artifact_acceptance.py \
+  --wheel /input/enclave_gateway-0.2.0-py3-none-any.whl \
+  --pip-wheel /input/pip-approved-py3-none-any.whl \
+  --work-dir /work/new-client --output /work/new-result.json
+```
+
+`--pip-wheel` runs an approved local pip wheel directly without network access
+or installing build tools into the client; omit it only when the approved Python
+already supplies `ensurepip`. The product
+wheel always installs with `--no-index --no-deps` in a new venv. Linux checks run
+the installed CLI, descriptor-relative filesystem, link/traversal denials,
+owned-process cancellation and MCP read-only denial. Container results qualify
+that Linux userspace/kernel environment, not physical hardware or a proprietary
+provider. Failed logs and reports remain under their original names. Reports publish
+atomically with a bounded Windows sharing-conflict retry. Read them after the
+checker exits, or use an observer that permits file deletion/replacement.
+
+## Assemble and verify with the public local command
+
+Install the optional build-time schema validator (`pip install '.[release]'`) in
+your private build venv. The ordinary CLI still has no required third-party
+Python dependencies. Fill the private manifest from
+[the assembly example](../contrib/qualification/plans/candidate-assembly.json).
+Pin every input file by absolute path and SHA-256; placeholder zero hashes are
+unusable. Use the exact clean source commit, the passed two-build comparison,
+its pinned toolchain, three locally approved CycloneDX 1.6 schemas, and passed
+artifact receipts. Require both delivered Windows architectures and at least
+one Linux architecture. Keep qualified platform scopes explicit.
+
+```sh
+python scripts/release/assemble_candidate.py assemble \
+  --manifest /private/candidate-assembly.json --output /private/new-candidate
+python scripts/release/assemble_candidate.py verify --candidate /private/new-candidate
+```
+
+Assembly binds every build input to committed Git bytes, including cases hidden
+by ignore rules or index flags, and takes delivered notices/guidance from that
+commit. It fails closed on dirty/uncommitted source, stale build inputs, missing
+platform checks, mismatched artifact or qualifier hashes, changed dependency
+archives, invalid SBOMs and extra/linked package files. It requires complete
+Windows laboratory trust cleanup. Optional evidence identifiers export only
+hashes; private input paths never enter distributable provenance.
+
+The command assembles Python sdist/wheel, an exact-commit source archive,
+unsigned Windows x64/ARM64 ZIPs, project/runtime licenses and notices, CycloneDX
+SBOM, compatibility table, changelog, README, sanitized provenance and
+`SHA256SUMS`. Runtime notices come from the hash-verified NuGet archives. SDK
+and build-only tools are not shipped. Output directories must be absolute and outside the source, build and dependency
+cache trees. New output directories preserve previous attempts. The verify subcommand checks the exact delivered inventory and rejects
+changed, missing or unlisted files. Both commands work locally without hosted
+workflows, tags, uploads or repository-setting changes.
+
+Checksums establish integrity; they do not authenticate an untrusted download or
+replace approved publisher signing. A signed package needs newly computed
+signed manifests and independent production signing acceptance. These platform
+checks do not establish RDP/WAN performance, proprietary VPN behavior, real keys,
+production PKI or physical TPM qualification.
 
 ## Maintainer publication decisions
 

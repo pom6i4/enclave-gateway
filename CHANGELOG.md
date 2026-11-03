@@ -14,6 +14,9 @@
 
 ### Operations and transport
 
+- Preserve authenticated POSIX cancellation acknowledgement when an already closed
+  peer makes the client half-close report ENOTCONN; other errors still fail.
+
 - Add opt-in bounded stream IPC over RDP drive redirection, with independent
   heartbeat publication, fair QGA access, committed response readback and logical
   erasure. Durable transaction outcomes and no-replay behavior remain authoritative.
@@ -25,6 +28,13 @@
   cleanup. Allow WAN control budgets without changing latency acceptance limits.
 
 ### Public distribution
+
+- Add a public local candidate assembly/verification command with exact source,
+  build, schema and artifact acceptance bindings, complete checksum inventory,
+  runtime notices and sanitized provenance. Hosted workflows are not required.
+- Add offline installed-artifact acceptance on Windows x64/ARM64 and Linux,
+  including SDK-independent native execution, filesystem/cancellation checks,
+  read-only MCP denial and temporary laboratory signing with trust/key cleanup.
 
 - Document first connection, six provider adapters, explicit lifecycle approval,
   SSH trust and Standard/Enterprise deployment boundaries.

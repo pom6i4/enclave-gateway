@@ -1,0 +1,54 @@
+{
+  "revision": 1,
+  "source_commit": "0000000000000000000000000000000000000000",
+  "comparison": {
+    "path": "/private/acceptance/comparison/result.json",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "toolchain": {
+    "path": "/private/acceptance/toolchain.json",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "schemas": [
+    {
+      "path": "/private/acceptance/schemas/bom-1.6.schema.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "/private/acceptance/schemas/spdx.schema.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "/private/acceptance/schemas/jsf-0.82.schema.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ],
+  "acceptance": [
+    {
+      "path": "/private/acceptance/windows-x64-result.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "/private/acceptance/windows-arm64-result.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "path": "/private/acceptance/linux-arm64-result.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ],
+  "required_platforms": [
+    "windows:x86_64",
+    "windows:arm64",
+    "linux:arm64"
+  ],
+  "evidence": [
+    {
+      "name": "source-checks",
+      "file": {
+        "path": "/private/acceptance/source-checks.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    }
+  ]
+}

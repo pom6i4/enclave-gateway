@@ -76,6 +76,20 @@ class IsolationTests(unittest.TestCase):
         self.assertEqual(base64.b64decode(result['stdout_b64']).decode(),'start\nтест\n')
         self.assertTrue(result['owned_tree_stopped'])
 
+    def test_cancel_half_close_race_still_requires_exact_acknowledgement(self):
+        import errno
+        from enclave_gateway.agents import owned_command
+        token='a'*64
+        with patch.object(owned_command,'endpoint',return_value=Path('/tmp/fixture.sock')),patch.object(owned_command.socket,'socket') as factory:
+            client=factory.return_value.__enter__.return_value
+            client.shutdown.side_effect=OSError(errno.ENOTCONN,'peer already closed')
+            for acknowledgement,accepted in ((b'accepted',True),(b'',False),(b'rejected',False)):
+                client.recv.return_value=acknowledgement
+                self.assertEqual(owned_command.cancel(token)['cancel_requested'],accepted)
+            client.sendall.assert_called_with(token.encode())
+            client.shutdown.side_effect=OSError(errno.EPERM,'unexpected failure')
+            with self.assertRaises(OSError):owned_command.cancel(token)
+
     def test_owned_remote_supervisor_cancels_descendants(self):
         token=secrets.token_hex(32)
         process=subprocess.Popen(['sh','-c',script({'action':'exec','token':token,'script':'sleep 30 & wait','timeout_sec':10})],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)

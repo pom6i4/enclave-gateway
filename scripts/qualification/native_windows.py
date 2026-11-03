@@ -73,11 +73,12 @@ def run(runtime,time_scale=1):
         # turn an exit check into a claim about an unrelated process.
         token=secrets.token_hex(32)
         sleep_seconds=30*time_scale
-        script="$child=Start-Process -FilePath '"+shell.replace("'","''")+"' -ArgumentList '-NoProfile -NonInteractive -Command Start-Sleep -Seconds 30' -PassThru -NoNewWindow; [Console]::Out.WriteLine($child.Id); Start-Sleep -Seconds 30"
-        script=script.replace('Seconds 30','Seconds '+str(sleep_seconds))
-        encoded=base64.b64encode(script.encode('utf-16le')).decode()
+        # Isolate the Job cancellation handshake from PowerShell interpreter
+        # initialization. The retained descendant is still a real PowerShell
+        # process, created beneath an owned Python parent in the same Job.
+        parent_code="import subprocess,sys,time; child=subprocess.Popen([sys.argv[1],'-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds '+sys.argv[2]]); print(child.pid,flush=True); time.sleep(int(sys.argv[2]))"
         process=subprocess.Popen([runtime,'run'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,encoding='utf-8')
-        process.stdin.write(json.dumps({'command':[shell,'-NoProfile','-NonInteractive','-EncodedCommand',encoded],'timeout_ms':10000*time_scale,'cancel_token':token})); process.stdin.close()
+        process.stdin.write(json.dumps({'command':[sys.executable,'-I','-c',parent_code,shell,str(sleep_seconds)],'timeout_ms':10000*time_scale,'cancel_token':token})); process.stdin.close()
         handle=None
         kernel=ctypes.WinDLL('kernel32',use_last_error=True)
         kernel.OpenProcess.argtypes=[ctypes.c_uint,ctypes.c_int,ctypes.c_uint];kernel.OpenProcess.restype=ctypes.c_void_p
