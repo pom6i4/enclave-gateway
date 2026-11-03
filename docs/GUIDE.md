@@ -165,6 +165,13 @@ not automatically uploaded Host files. Only whole argument placeholders such as
 or shell fragments are not evaluated. `source` records the approved procedure's
 provenance; it is not downloaded or executed.
 
+Manifests are limited to 1 MiB. Revision must be the integer `1`; versions and
+architectures must be nonempty unique string lists, with architectures limited to
+`arm64`, `x86_64`, `x86`. Duplicate JSON keys, non-finite values, unknown actions
+and malformed steps are rejected, including steps in unselected actions. Each
+action contains 1–16 steps. Runtime hash/signature checks still apply after a valid
+plan; passing the schema does not authorize execution.
+
 ```sh
 egw provider --help
 egw provider connect

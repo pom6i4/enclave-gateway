@@ -68,7 +68,9 @@ def run(output: Path,pip_wheel: Path|None=None):
                            for path in (ROOT/'src/enclave_gateway/agents').glob('*') if path.suffix in ('.ps1','.py')}
                 for name,digest in resources.items():
                     if name not in names or hashlib.sha256(bundle.read(name)).hexdigest()!=digest:raise ValueError('Missing or changed runtime resource: '+name)
-            venv.EnvBuilder(with_pip=pip_wheel is None).create(work/'venv')
+            # POSIX symlinks retain the base interpreter location in nested
+            # environments, including standalone Python 3.10 distributions.
+            venv.EnvBuilder(with_pip=pip_wheel is None,symlinks=os.name!='nt').create(work/'venv')
             binary=work/'venv'/('Scripts' if os.name=='nt' else 'bin');python=binary/('python.exe' if os.name=='nt' else 'python')
             clean=work/'outside-source';clean.mkdir()
             if pip_wheel:

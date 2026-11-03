@@ -26,6 +26,16 @@ evidence=load('qualification/evidence.py')
 
 
 class ReproducibleQualificationTests(unittest.TestCase):
+    def test_sbom_required_materials_follow_delivered_targets_not_restore_host(self):
+        targets=['win-x64','win-arm64']
+        for name in ('Microsoft.NETCore.App.Runtime.win-x64','Microsoft.NETCore.App.Runtime.win-arm64',
+                     'Microsoft.NETCore.App.Host.win-x64','Microsoft.NETCore.App.Host.win-arm64'):
+            self.assertTrue(release.embedded_dependency(name,targets))
+        for name in ('Microsoft.NETCore.App.Runtime.osx-arm64','Microsoft.NETCore.App.Runtime.linux-x64',
+                     'Microsoft.AspNetCore.App.Runtime.win-x64','Microsoft.NET.ILLink.Tasks'):
+            self.assertFalse(release.embedded_dependency(name,targets))
+        self.assertFalse(release.embedded_dependency('Microsoft.NETCore.App.Runtime.win-arm64',['win-x64']))
+
     def test_real_socket_coalescence_and_sync_keep_per_frame_limit(self):
         from enclave_gateway.control.wire import SocketLineReader
         frame=b'{"fixture":"value"}\r\n'

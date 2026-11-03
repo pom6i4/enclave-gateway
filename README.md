@@ -123,6 +123,8 @@ Standard; migrating an existing deployment is an operator decision.
 - [Security architecture and Enterprise deployment](docs/SECURITY.md): trust
   boundaries, signing, attestation, roles and operational limits.
 - [Contributing](CONTRIBUTING.md): code layout, tests and extension points.
+- [Release preparation and component compatibility](docs/RELEASING.md), with
+  [unreleased changes](CHANGELOG.md): source-bound unsigned candidates and checks.
 - [Maintainer qualification](contrib/qualification/README.md): disposable lab
   tooling and historical evidence, separate from product configuration.
 

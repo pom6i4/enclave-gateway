@@ -111,6 +111,12 @@ def checked_tool(item,args,env):
     return str(path)
 
 
+def embedded_dependency(package,runtimes):
+    """Cross-target restore also downloads host/build-only runtime materials."""
+    return package.lower() in {prefix+rid for rid in runtimes for prefix in
+                              ('microsoft.netcore.app.runtime.','microsoft.netcore.app.host.')}
+
+
 def build(manifest_path,output):
     manifest_path=manifest_path.resolve();output=output.resolve()
     manifest=json.loads(manifest_path.read_text());epoch=manifest['epoch']
@@ -177,7 +183,7 @@ def build(manifest_path,output):
         components=[{'type':'file','bom-ref':'file:'+name,'name':name,'hashes':[{'alg':'SHA-256','content':value}]} for name,value in sorted(files.items())]
         for name,sha512 in sorted(dependencies.items()):
             package,version_=name.rsplit('/',1)
-            embedded=package.lower().startswith(('microsoft.netcore.app.runtime.','microsoft.netcore.app.host.'))
+            embedded=embedded_dependency(package,manifest['runtimes'])
             components.append({'type':'library','bom-ref':'nuget:'+name,'name':package,'version':version_,'purl':'pkg:nuget/'+package+'@'+version_,
                                'scope':'required' if embedded else 'excluded','hashes':[{'alg':'SHA-512','content':base64.b64decode(sha512,validate=True).hex()}],
                                'properties':[{'name':'release:role','value':'embedded-runtime-material' if embedded else 'restore-only-material'}]})
