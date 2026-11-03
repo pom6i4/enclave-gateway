@@ -8,7 +8,7 @@
       .tier-title { font-size: 12.5px; font-weight: 700; fill: #F4F4F5; letter-spacing: 0.6px; }
       .tier-sub { font-size: 10.8px; font-weight: 500; fill: #A1A1AA; }
       .card-title { font-size: 12px; font-weight: 700; fill: #E4E4E7; }
-      .card-line { font-size: 10.8px; fill: #71717A; }
+      .card-line { font-size: 10.8px; fill: #A1A1AA; }
       .card-code { font-size: 10.3px; fill: #D4D4D8; }
       .pill-text { font-size: 10.6px; font-weight: 500; fill: #E4E4E7; }
       .pill-text-pinhole { font-size: 10.6px; font-weight: 600; fill: #FDE68A; }
@@ -35,7 +35,7 @@
   <rect x="2" y="2" width="836" height="48" rx="6" fill="#111114"/>
   <line x1="2" y1="50" x2="838" y2="50" stroke="#27272A" stroke-width="1.2"/>
   <rect x="20" y="21" width="8" height="8" fill="#E4E4E7"/>
-  <text x="38" y="30" class="font-mono title-main">ENCLAVE GATEWAY (egw) // L3–L7 ARCHITECTURE</text>
+  <text x="38" y="30" class="font-mono title-main">ENCLAVE GATEWAY 0.2.0 // ARCHITECTURE</text>
   <rect x="556" y="13" width="260" height="24" rx="3" fill="#18181B" stroke="#3F3F46" stroke-width="1"/>
   <text x="686" y="29" text-anchor="middle" class="font-mono badge-top">HVF / KVM / WHPX • [MS-RDPEFS] • MCP</text>
 
@@ -46,39 +46,39 @@
   <rect x="24" y="64" width="792" height="30" rx="4" fill="#18181B"/>
   <line x1="24" y1="94" x2="816" y2="94" stroke="#27272A" stroke-width="1"/>
   <text x="40" y="84" class="font-mono tier-title">01 / HOST WORKSTATION</text>
-  <text x="800" y="84" text-anchor="end" class="font-mono tier-sub">macOS arm64 (HVF) • Linux 6.8+ (KVM) • Windows (WHPX)</text>
+  <text x="800" y="84" text-anchor="end" class="font-mono tier-sub">macOS (HVF) • Linux (KVM) • Windows (WHPX / Direct)</text>
 
   <!-- Card 1.1: CLI -->
   <rect x="40" y="106" width="242" height="82" rx="3" fill="#141418" stroke="#27272A" stroke-width="1"/>
   <text x="54" y="125" class="font-sans card-title">CLI Orchestrator (egw)</text>
-  <text x="54" y="145" class="font-mono card-code">init | up | status | doctor | top</text>
-  <text x="54" y="163" class="font-mono card-code">exec | cp --sudo | tunnel | socks5</text>
-  <text x="54" y="179" class="font-sans card-line">Unified multi-tier command router</text>
+  <text x="54" y="145" class="font-mono card-code">config | agents | status | doctor</text>
+  <text x="54" y="163" class="font-mono card-code">exec | cp | sync | tunnel | socks5</text>
+  <text x="54" y="179" class="font-sans card-line">Global XDG config &amp; private state</text>
 
   <!-- Card 1.2: MCP Server -->
   <rect x="299" y="106" width="242" height="82" rx="3" fill="#141418" stroke="#27272A" stroke-width="1"/>
-  <text x="313" y="125" class="font-sans card-title">MCP Server (JSON-RPC 2.0)</text>
-  <text x="313" y="145" class="font-mono card-code">enclave_status | enclave_doctor</text>
-  <text x="313" y="163" class="font-mono card-code">node_exec | node_transfer | db</text>
-  <text x="313" y="179" class="font-sans card-line">Zero-dependency stdio protocol</text>
+  <text x="313" y="125" class="font-sans card-title">Governed MCP Server</text>
+  <text x="313" y="145" class="font-mono card-code">stdio &amp; HTTP JSON-RPC 2.0</text>
+  <text x="313" y="163" class="font-mono card-code">AccessPolicy / PrincipalRouter</text>
+  <text x="313" y="179" class="font-sans card-line">Controls when configured</text>
 
   <!-- Card 1.3: Security & Audit -->
   <rect x="558" y="106" width="242" height="82" rx="3" fill="#141418" stroke="#27272A" stroke-width="1"/>
-  <text x="572" y="125" class="font-sans card-title">Security &amp; FlightRecorder</text>
+  <text x="572" y="125" class="font-sans card-title">Security, Vault &amp; Journal</text>
   <text x="572" y="145" class="font-mono card-code">SecretVault (OS Keychain + .env)</text>
-  <text x="572" y="163" class="font-mono card-code">SecretScrubber + SQL/RM Guard</text>
-  <text x="572" y="179" class="font-sans card-line">Audit trail in audit.jsonl</text>
+  <text x="572" y="163" class="font-mono card-code">audit.transactions.sqlite3</text>
+  <text x="572" y="179" class="font-sans card-line">SecretScrubber + hash-linked audit</text>
 
   <!-- ===================================================================== -->
   <!-- CONNECTORS: HOST <-> APPLIANCE                                        -->
   <!-- ===================================================================== -->
   <line x1="230" y1="200" x2="230" y2="254" stroke="#A1A1AA" stroke-width="1.5" marker-start="url(#arrow-mono)" marker-end="url(#arrow-mono)"/>
   <rect x="68" y="215" width="324" height="24" rx="3" fill="#111114" stroke="#52525B" stroke-width="1"/>
-  <text x="230" y="231" text-anchor="middle" class="font-mono pill-text">virtio-serial (QGA + QMP ControlChannel)</text>
+  <text x="230" y="231" text-anchor="middle" class="font-mono pill-text">QMP control / QGA over virtio-serial</text>
 
   <line x1="610" y1="200" x2="610" y2="254" stroke="#A1A1AA" stroke-width="1.5" marker-start="url(#arrow-mono)" marker-end="url(#arrow-mono)"/>
   <rect x="442" y="215" width="336" height="24" rx="3" fill="#111114" stroke="#52525B" stroke-width="1"/>
-  <text x="610" y="231" text-anchor="middle" class="font-mono pill-text">TCP 127.0.0.1 (:1080 SOCKS5 / :13389 RDP)</text>
+  <text x="610" y="231" text-anchor="middle" class="font-mono pill-text">Optional VM RDP: 127.0.0.1:13390</text>
 
   <!-- ===================================================================== -->
   <!-- TIER 2: CRYPTOGRAPHIC APPLIANCE VM                                    -->
@@ -86,36 +86,36 @@
   <rect x="24" y="256" width="792" height="140" rx="4" fill="#111114" stroke="#3F3F46" stroke-width="1.2"/>
   <rect x="24" y="256" width="792" height="30" rx="4" fill="#18181B"/>
   <line x1="24" y1="286" x2="816" y2="286" stroke="#27272A" stroke-width="1"/>
-  <text x="40" y="276" class="font-mono tier-title">02 / CRYPTOGRAPHIC APPLIANCE VM (@appliance)</text>
-  <text x="800" y="276" text-anchor="end" class="font-mono tier-sub">Isolated Guest OS • Golden qcow2 Snapshot</text>
+  <text x="40" y="276" class="font-mono tier-title">02 / WINDOWS APPLIANCE (@appliance)</text>
+  <text x="800" y="276" text-anchor="end" class="font-mono tier-sub">QEMU guest shown • Direct skips VM</text>
 
   <!-- Card 2.1: VPN Provider -->
   <rect x="40" y="298" width="242" height="86" rx="3" fill="#141418" stroke="#27272A" stroke-width="1"/>
-  <text x="54" y="317" class="font-sans card-title">VPN Crypto Provider</text>
-  <text x="54" y="337" class="font-mono card-code">InfoTeCS ViPNet Client 5 / Custom</text>
-  <text x="54" y="355" class="font-mono card-code">WINTUN-ARM64.SYS / x86_64 NDIS</text>
-  <text x="54" y="372" class="font-sans card-line">Host kernel stays 100% clean</text>
+  <text x="54" y="317" class="font-sans card-title">6 VPN Provider Adapters</text>
+  <text x="54" y="337" class="font-mono card-code">vipnet | kontinent | anyconnect</text>
+  <text x="54" y="355" class="font-mono card-code">openvpn | wireguard | custom</text>
+  <text x="54" y="372" class="font-sans card-line">PE / Authenticode probe &amp; lifecycle</text>
 
   <!-- Card 2.2: Network & PMTUD Fix -->
   <rect x="299" y="298" width="242" height="86" rx="3" fill="#141418" stroke="#27272A" stroke-width="1"/>
-  <text x="313" y="317" class="font-sans card-title">PMTUD, Clock &amp; RDP Guard</text>
-  <text x="313" y="337" class="font-mono card-code">MTU = 1350 + fClientDisableUDP = 1</text>
-  <text x="313" y="355" class="font-mono card-code">guest-set-time (Anti-NLA Skew)</text>
-  <text x="313" y="372" class="font-sans card-line">Fixes 60s drops &amp; snapshot drift</text>
+  <text x="313" y="317" class="font-sans card-title">Clock, MTU &amp; RDP Settings</text>
+  <text x="313" y="337" class="font-mono card-code">MTU 1350 default / RDP TCP</text>
+  <text x="313" y="355" class="font-mono card-code">guest-set-time / fClientDisableUDP</text>
+  <text x="313" y="372" class="font-sans card-line">Applied by heal on managed sessions</text>
 
   <!-- Card 2.3: Session Supervisor -->
   <rect x="558" y="298" width="242" height="86" rx="3" fill="#141418" stroke="#27272A" stroke-width="1"/>
-  <text x="572" y="317" class="font-sans card-title">SessionSupervisor &amp; Spool</text>
-  <text x="572" y="337" class="font-mono card-code">Interactive /it cmdkey Injector</text>
+  <text x="572" y="317" class="font-sans card-title">Managed RDP Session &amp; Spool</text>
+  <text x="572" y="337" class="font-mono card-code">$ egw agents stage</text>
   <text x="572" y="355" class="font-mono card-code">C:\EnclaveGateway\spool</text>
-  <text x="572" y="372" class="font-sans card-line">Auto-reconnects mstsc.exe</text>
+  <text x="572" y="372" class="font-sans card-line">Windows RDP client (mstsc.exe)</text>
 
   <!-- ===================================================================== -->
-  <!-- CONNECTOR: APPLIANCE <-> BASTION (SEMANTIC FIREWALL BOUNDARY)         -->
+  <!-- CONNECTOR: APPLIANCE <-> BASTION (SEMANTIC C: DRIVE REDIRECTED)         -->
   <!-- ===================================================================== -->
   <line x1="28" y1="426" x2="812" y2="426" stroke="#DC2626" stroke-width="1.2" stroke-dasharray="4,4" stroke-opacity="0.8"/>
-  <text x="34" y="419" class="font-mono fw-text">FIREWALL BOUNDARY</text>
-  <text x="806" y="419" text-anchor="end" class="font-mono fw-text">ONLY TCP 3389 OPEN</text>
+  <text x="34" y="418" class="font-mono fw-text">C: DRIVE REDIRECTED</text>
+  <text x="806" y="419" text-anchor="end" class="font-mono fw-text">RDP TCP 3389 (EXAMPLE)</text>
 
   <line x1="420" y1="396" x2="420" y2="456" stroke="#D97706" stroke-width="1.8" marker-start="url(#arrow-pinhole)" marker-end="url(#arrow-pinhole)"/>
   <rect x="200" y="414" width="440" height="24" rx="3" fill="#111114" stroke="#B45309" stroke-width="1.2"/>
@@ -127,40 +127,40 @@
   <rect x="24" y="458" width="792" height="140" rx="4" fill="#111114" stroke="#3F3F46" stroke-width="1.2"/>
   <rect x="24" y="458" width="792" height="30" rx="4" fill="#18181B"/>
   <line x1="24" y1="488" x2="816" y2="488" stroke="#27272A" stroke-width="1"/>
-  <text x="40" y="478" class="font-mono tier-title">03 / BASTION JUMP HOST (@bastion — 10.0.1.10:3389)</text>
-  <text x="800" y="478" text-anchor="end" class="font-mono tier-sub">BastionWorker • Warm In-Process Runspace</text>
+  <text x="40" y="478" class="font-mono tier-title">03 / BASTION (@bastion)</text>
+  <text x="800" y="478" text-anchor="end" class="font-mono tier-sub">Standard: trusted runspace • Enterprise: signed jobs + attestation</text>
 
-  <!-- Card 3.1: Transactional Envelopes -->
+  <!-- Card 3.1: Transactional Envelopes & Stream -->
   <rect x="40" y="500" width="242" height="86" rx="3" fill="#141418" stroke="#27272A" stroke-width="1"/>
-  <text x="54" y="519" class="font-sans card-title">RdpVfsTransport IPC</text>
-  <text x="54" y="539" class="font-mono card-code">req_&lt;id&gt;.json ↔ res_&lt;id&gt;.json</text>
-  <text x="54" y="557" class="font-mono card-code">SetThreadExecutionState KeepAlive</text>
-  <text x="54" y="574" class="font-sans card-line">~200ms latency, prevents idle lock</text>
+  <text x="54" y="519" class="font-sans card-title">RDP VFS &amp; Bastion Journal</text>
+  <text x="54" y="539" class="font-mono card-code">files: JSON / stream: EGWS1</text>
+  <text x="54" y="557" class="font-mono card-code">Stream: up to 32 response handles</text>
+  <text x="54" y="574" class="font-sans card-line">Durable journal on Bastion</text>
 
   <!-- Card 3.2: Parallel Striped I/O -->
   <rect x="299" y="500" width="242" height="86" rx="3" fill="#141418" stroke="#27272A" stroke-width="1"/>
   <text x="313" y="519" class="font-sans card-title">Parallel Striped I/O</text>
-  <text x="313" y="539" class="font-mono card-code">4 MB SHA-256 Block Delta Sync</text>
-  <text x="313" y="557" class="font-mono card-code">RunspacePool + zlib DeflateStream</text>
+  <text x="313" y="539" class="font-mono card-code">4 MiB block deltas / SHA-256</text>
+  <text x="313" y="557" class="font-mono card-code">RunspacePool / Deflate</text>
   <text x="313" y="574" class="font-sans card-line">Concurrent random-access stripes</text>
 
   <!-- Card 3.3: SOCKS5 / TCP Multiplexer -->
   <rect x="558" y="500" width="242" height="86" rx="3" fill="#141418" stroke="#27272A" stroke-width="1"/>
-  <text x="572" y="519" class="font-sans card-title">SOCKS5 &amp; TCP Multiplexer</text>
-  <text x="572" y="539" class="font-mono card-code">$Global:EnclaveMuxSockets Table</text>
+  <text x="572" y="519" class="font-sans card-title">Bastion TCP Multiplexer</text>
+  <text x="572" y="539" class="font-mono card-code">Socket state per worker</text>
   <text x="572" y="557" class="font-mono card-code">mux_open | mux_io | mux_close</text>
-  <text x="572" y="574" class="font-sans card-line">Stateful bidirectional streams</text>
+  <text x="572" y="574" class="font-sans card-line">Stateful bidirectional TCP streams</text>
 
   <!-- ===================================================================== -->
   <!-- CONNECTORS: BASTION <-> TARGET NODES                                  -->
   <!-- ===================================================================== -->
   <line x1="220" y1="598" x2="220" y2="656" stroke="#A1A1AA" stroke-width="1.5" marker-start="url(#arrow-mono)" marker-end="url(#arrow-mono)"/>
   <rect x="40" y="615" width="360" height="24" rx="3" fill="#111114" stroke="#52525B" stroke-width="1"/>
-  <text x="220" y="631" text-anchor="middle" class="font-mono pill-text">OpenSSH / SCP (Base64 + ASKPASS + sudo -S)</text>
+  <text x="220" y="631" text-anchor="middle" class="font-mono pill-text">OpenSSH / SCP • StrictHostKeyChecking</text>
 
   <line x1="620" y1="598" x2="620" y2="656" stroke="#A1A1AA" stroke-width="1.5" marker-start="url(#arrow-mono)" marker-end="url(#arrow-mono)"/>
   <rect x="440" y="615" width="360" height="24" rx="3" fill="#111114" stroke="#52525B" stroke-width="1"/>
-  <text x="620" y="631" text-anchor="middle" class="font-mono pill-text">Multiplexed SOCKS5 (RFC 1928) &amp; TCP Relay</text>
+  <text x="620" y="631" text-anchor="middle" class="font-mono pill-text">TCP relay for host SOCKS5 / tunnels</text>
 
   <!-- ===================================================================== -->
   <!-- TIER 4: UPSTREAM TARGET NODES                                         -->
@@ -172,18 +172,18 @@
   <circle cx="38" cy="672" r="3.5" fill="#10B981"/>
   <text x="48" y="677" class="font-mono tier-title">04A / TARGET NODE: app01</text>
   <text x="394" y="677" text-anchor="end" class="font-mono tier-sub">10.0.20.11:22</text>
-  <text x="40" y="706" class="font-sans card-line">Linux Application Host • Docker • PostgreSQL / MySQL</text>
-  <text x="40" y="727" class="font-mono card-code">$ egw exec app01 --sudo "systemctl status docker"</text>
-  <text x="40" y="747" class="font-mono card-code">$ egw cp ./release.tar.gz app01:/tmp/release.tar.gz</text>
+  <text x="40" y="706" class="font-sans card-line">Linux SSH target • known_hosts on the SSH client hop</text>
+  <text x="40" y="727" class="font-mono card-code">$ egw exec app01 'id'</text>
+  <text x="40" y="747" class="font-mono card-code">$ egw cp hello.txt app01:/tmp/hello.txt</text>
 
   <!-- Target 2: auth01 -->
   <rect x="432" y="658" width="384" height="112" rx="4" fill="#111114" stroke="#3F3F46" stroke-width="1.2"/>
   <rect x="432" y="658" width="384" height="28" rx="4" fill="#18181B"/>
   <line x1="432" y1="686" x2="816" y2="686" stroke="#27272A" stroke-width="1"/>
   <circle cx="446" cy="672" r="3.5" fill="#10B981"/>
-  <text x="456" y="677" class="font-mono tier-title">04B / TARGET NODE: auth01</text>
+  <text x="456" y="677" class="font-mono tier-title">04B / TCP SERVICE: auth01</text>
   <text x="802" y="677" text-anchor="end" class="font-mono tier-sub">10.0.20.12:443</text>
-  <text x="448" y="706" class="font-sans card-line">Internal Web / IAM / API Services • Isolated Subnets</text>
+  <text x="448" y="706" class="font-sans card-line">Example HTTPS endpoint reachable from Bastion</text>
   <text x="448" y="727" class="font-mono card-code">$ egw socks5 --port 1080</text>
   <text x="448" y="747" class="font-mono card-code">$ egw tunnel 8443:auth01:443</text>
 </svg>

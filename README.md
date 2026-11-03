@@ -18,6 +18,14 @@ provider. `egw` connects a local CLI or MCP client to the enclave's TargetNodes.
 Host → QGA → Windows Appliance → RDP redirected drive → Bastion worker → SSH → TargetNode
 ```
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/architecture-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/architecture-light.svg">
+    <img alt="Enclave Gateway architecture from host through Windows appliance and RDP Bastion to SSH and TCP targets" src="docs/assets/architecture-light.svg" width="100%">
+  </picture>
+</p>
+
 **Beta software.** Standard mode is for a trusted operator and RDP session.
 Enterprise adds signed native isolation and verified identities. Neither mode
 replaces the organization's endpoint policy, VPN entitlement or host-key approval.

@@ -13,6 +13,7 @@ import tempfile
 import time
 import unittest
 from unittest.mock import Mock,patch
+from xml.etree import ElementTree
 from enclave_gateway.cli import main,build_parser
 from enclave_gateway.config import EnclaveConfig,ProviderSpec,SecuritySpec,TargetNodeSpec,parse_yaml_or_json
 from enclave_gateway.onboarding import starter_configuration,configuration_summary,agent_bundle,stage_agents
@@ -43,6 +44,59 @@ class ConfigurationTests(unittest.TestCase):
                             except SystemExit as error:self.assertEqual(error.code,0)
                         break
             self.assertGreater(examples,0)
+
+    def test_readme_architecture_themes_match_and_examples_parse(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        picture = re.search(r"<picture>(.*?)</picture>", readme, re.S)
+        self.assertIsNotNone(picture)
+        sources = {}
+        fallback = None
+        for tag, attributes in re.findall(r"<(source|img)\b([^>]+)>", picture[1]):
+            attrs = dict(re.findall(r'([\w-]+)="([^"]+)"', attributes))
+            if tag == "source":
+                sources[attrs["media"]] = attrs["srcset"]
+            else:
+                self.assertTrue(attrs["alt"].strip())
+                fallback = attrs["src"]
+        expected = {
+            f"(prefers-color-scheme: {theme})": f"docs/assets/architecture-{theme}.svg"
+            for theme in ("dark", "light")
+        }
+        self.assertEqual(sources, expected)
+        self.assertEqual(fallback, expected["(prefers-color-scheme: light)"])
+
+        namespace = "{http://www.w3.org/2000/svg}"
+        parser = build_parser()
+        normalized = []
+        for path in sources.values():
+            with self.subTest(asset=path):
+                svg = ElementTree.parse(ROOT / path).getroot()
+                self.assertEqual(svg.tag, namespace + "svg")
+                commands = [
+                    text.removeprefix("$ egw ")
+                    for node in svg.iter(namespace + "text")
+                    if (text := "".join(node.itertext()).strip()).startswith("$ egw ")
+                ]
+                self.assertTrue(commands)
+                for command in commands:
+                    with self.subTest(command=command):
+                        parser.parse_args(shlex.split(command))
+
+                ids = [node.attrib["id"] for node in svg.iter() if "id" in node.attrib]
+                self.assertEqual(len(ids), len(set(ids)))
+                aliases = {value: f"definition-{i}" for i, value in enumerate(ids)}
+                for node in svg.iter():
+                    for key, value in node.attrib.items():
+                        if key == "id":
+                            node.set(key, aliases[value])
+                        elif value.startswith("url(#"):
+                            node.set(key, f"url(#{aliases[value[5:-1]]})")
+                        elif key in ("fill", "stroke") and re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+                            node.set(key, "#000000")
+                    if node.tag == namespace + "style":
+                        node.text = re.sub(r"#[0-9a-fA-F]{6}\b", "#000000", node.text)
+                normalized.append(ElementTree.tostring(svg))
+        self.assertEqual(*normalized)
 
     def test_provider_type_is_validated_before_engine_creation(self):
         for value in ('unknown','','ViPNet'):
