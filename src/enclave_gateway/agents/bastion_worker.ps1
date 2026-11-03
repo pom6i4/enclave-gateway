@@ -348,18 +348,23 @@ $streamState=$null;$streamReservedBytes=0;$streamPipes=@();$streamTxIds=@{};$str
 function Set-StreamFailure($Shared,$Failure,[string]$Message){
     $cause=$Failure.Exception;while($cause.InnerException){$cause=$cause.InnerException}
     $code=$cause.HResult -band 65535
+    # .NET Framework FileStream.Read on a revoked RDPDR handle can surface
+    # ERROR_OPERATION_ABORTED as OperationCanceledException, without a token.
+    # Explicit token cancellation and teardown must never authorize a restart.
+    $redirectedAbort=$cause -is [OperationCanceledException] -and -not $cause.CancellationToken.CanBeCanceled
+    if($redirectedAbort){$code=995}
     # Only recognized missing/invalid redirected-path/handle errors qualify.
     # Access denial, sharing conflicts, capacity and arbitrary script errors do not.
-    $retry=($cause -is [IO.IOException] -or $cause -is [ComponentModel.Win32Exception]) -and $code -in @(2,3,6,53,55,59,64,67,1167,1231,2250)
+    $retry=$redirectedAbort -or (($cause -is [IO.IOException] -or $cause -is [ComponentModel.Win32Exception]) -and $code -in @(2,3,6,53,55,59,64,67,1167,1231,2250))
     [Threading.Monitor]::Enter($Shared.SyncRoot)
-    try{if(-not $Shared.Stop){$Shared.Error=$Message;$Shared.Retryable=$retry;$Shared.FaultCode=$code;$Shared.Stop=$true}}finally{[Threading.Monitor]::Exit($Shared.SyncRoot)}
+    try{if(-not $Shared.Stop){$Shared.Error=$Message+' ('+$cause.GetType().FullName+', win32_code='+$code+'): '+$cause.Message;$Shared.Retryable=$retry;$Shared.FaultCode=$code;$Shared.Stop=$true}}finally{[Threading.Monitor]::Exit($Shared.SyncRoot)}
 }
 function Throw-StreamFailure {
     $failure=[IO.IOException]::new([string]$streamState.Error)
+    $failure.Data['EGW.ChannelError']=$streamState.FaultCode
     if($streamState.Retryable -and $storageBindingHash){
         $failure.Data['EGW.StreamDisconnected']=$true
         $failure.Data['EGW.StorageBinding']=$storageBindingHash
-        $failure.Data['EGW.ChannelError']=$streamState.FaultCode
     }
     throw $failure
 }

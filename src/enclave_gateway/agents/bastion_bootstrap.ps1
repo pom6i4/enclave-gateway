@@ -34,7 +34,7 @@ function Write-AutostartFile([string]$Path,[byte[]]$Bytes,[string]$CopyFrom='') 
             $stream=[IO.File]::Open($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
             try{$stream.Write($Bytes,0,$Bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
         }
-        if([IO.File]::Exists($Path)){[IO.File]::Replace($temporary,$Path,$null)}else{[IO.File]::Move($temporary,$Path)}
+        if([IO.File]::Exists($Path)){[IO.File]::Replace($temporary,$Path,[NullString]::Value)}else{[IO.File]::Move($temporary,$Path)}
     }finally{if([IO.File]::Exists($temporary)){[IO.File]::Delete($temporary)}}
 }
 function Register-UserAutostart {
@@ -58,7 +58,10 @@ function Register-UserAutostart {
     foreach($owner in @($sid,(New-Object Security.Principal.SecurityIdentifier('S-1-5-18')))){
         $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($owner,'FullControl','ContainerInherit,ObjectInherit','None','Allow')))
     }
-    Set-Acl -LiteralPath $InstallDir -AclObject $acl
+    # Persist only the owner/DACL sections changed above. PowerShell's Set-Acl
+    # also requests SACL access on an existing directory, which unnecessarily
+    # requires SeSecurityPrivilege for a normal per-user registration refresh.
+    [IO.Directory]::SetAccessControl($InstallDir,$acl)
     $workerHash=(Get-FileHash -LiteralPath $workerSrc -Algorithm SHA256).Hash.ToLowerInvariant()
     $bootstrapHash=(Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()
     $sha=[Security.Cryptography.SHA256]::Create()

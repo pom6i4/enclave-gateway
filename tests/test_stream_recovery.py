@@ -23,7 +23,7 @@ AGENTS = ROOT / 'src/enclave_gateway/agents'
 @unittest.skipUnless(os.environ.get('EGW_TEST_POWERSHELL'), 'Real PowerShell recovery fixture is opt-in')
 class StreamRecoveryTests(unittest.TestCase):
     @contextmanager
-    def worker(self, code=6):
+    def worker(self, code=6, cancellation=None):
         with tempfile.TemporaryDirectory(prefix='egw-recovery-') as name:
             root = Path(name).resolve()
             spool = root / 'spool'
@@ -38,6 +38,9 @@ class StreamRecoveryTests(unittest.TestCase):
             # to a private reviewed test copy; the product exposes no fault hook.
             quoted = str(fault).replace("'", "''")
             injection = "if([IO.File]::Exists('" + quoted + "')){[IO.File]::Delete('" + quoted + "');throw [IO.IOException]::new('Fixture redirected handle revoked'," + str(0x80070000 + code - 2**32) + ")};"
+            if cancellation:
+                token = ",([Threading.CancellationToken]::new($true))" if cancellation == 'token' else ''
+                injection = "if([IO.File]::Exists('" + quoted + "')){[IO.File]::Delete('" + quoted + "');throw [OperationCanceledException]::new('Fixture redirected I/O aborted'" + token + ")};"
             worker.write_text(source.replace(needle, injection + needle))
             class Channel(DirectHostControlChannel):
                 def _map_path(self, path):
@@ -174,6 +177,19 @@ class StreamRecoveryTests(unittest.TestCase):
 
     def test_unrecognized_io_failure_never_enters_recovery(self):
         with self.worker(code=5) as (root, process, transport, fault):
+            fault.touch()
+            self.assertNotEqual(process.wait(timeout=10), 0)
+            self.assertNotIn('STREAM_RECOVERING', (root / 'bootstrap.log').read_text(errors='replace'))
+
+    def test_native_read_abort_recovers_but_explicit_token_cancellation_is_fatal(self):
+        with self.worker(cancellation='native') as (root, process, transport, fault):
+            first = json.loads((root / 'spool/ipc_descriptor.json').read_text())['instance']
+            fault.touch()
+            self.ready(root, process, first)
+            self.assertEqual(transport.exec_bastion("Write-Output 'READ_ABORT_RECOVERED'", timeout_sec=8).stdout,
+                             'READ_ABORT_RECOVERED')
+            self.assertIn('win32_code=995', (root / 'bootstrap.log').read_text(errors='replace'))
+        with self.worker(cancellation='token') as (root, process, transport, fault):
             fault.touch()
             self.assertNotEqual(process.wait(timeout=10), 0)
             self.assertNotIn('STREAM_RECOVERING', (root / 'bootstrap.log').read_text(errors='replace'))

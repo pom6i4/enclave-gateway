@@ -662,7 +662,11 @@ is pinned from the failed instance; a missing/changed binding or local journal
 fails closed. Migration is permitted only on the initial invocation. Before every
 restart bootstrap checks unchanged worker bytes and the configured signature and
 runtime requirements. `STREAM_RECOVERING` reports the failed phase and Win32 code;
-the recognized codes follow
+it also retains the underlying exception type and message. Windows PowerShell
+5.1 can report an aborted redirected read as a tokenless
+`OperationCanceledException`; the Stream I/O handler classifies this as native
+I/O cancellation (995). Explicit cancellation tokens do not authorize recovery.
+The recognized codes follow
 [Microsoft's error definitions](https://learn.microsoft.com/openspecs/windows_protocols/ms-erref/18d8fbe8-a967-4f1c-ae50-99ca8e491d2d).
 Access denial, journal/policy/signature errors, singleton conflicts and exhausted
 capacity are not generic retry conditions. Files mode retains its existing behavior.

@@ -185,6 +185,38 @@ signed manifests and independent production signing acceptance. These platform
 checks do not establish RDP/WAN performance, proprietary VPN behavior, real keys,
 production PKI or physical TPM qualification.
 
+## Verify an actual RDP reconnect
+
+Use two disposable Windows machines with distinct machine identities, synthetic
+accounts and isolated networking. Connect the Appliance to Bastion with native
+`mstsc.exe`, redirect only the laboratory drive, validate the server certificate,
+and retain NLA. A local spool, injected exception or revoked SMB handle exercises
+regression paths but does not qualify actual RDP reconnection.
+
+Stage the exact candidate agents, start the local bootstrap inside the ordinary
+Bastion user session, and record its Windows session ID, SID, PID, worker hash,
+instance ID, storage binding, fresh attestation and startup invocation count.
+Any initial logon task must have no reconnect trigger or restart policy.
+
+Interrupt only the owned laboratory RDP connection and let the same native client
+reconnect automatically. Require Windows LocalSessionManager events 24 and 25
+for the same session, a new ready IPC descriptor, unchanged SID/bootstrap PID,
+unchanged startup invocation count and task LastRunTime, the original journal
+binding, fresh nonce attestation and successful command execution. Do not manually
+launch a worker to make this check pass.
+
+Repeat with an in-flight side effect. Preserve the failed/indeterminate request,
+reconcile its effect, and resend both completed and interrupted transaction IDs:
+neither may execute again. Require exactly one side effect for each. End with
+acknowledged stop/autostart removal and confirmed process exit without respawn.
+Exercise repeated autostart registration as the normal user too: creation alone
+does not cover updates to an existing protected installation.
+
+Keep failed attempts, event records, source hashes and receipts outside Git.
+These checks qualify recovery on the tested Windows/RDP environment; they do not
+establish WAN latency, production PKI, Enterprise isolation or proprietary VPN
+acceptance. Preserve all existing readiness, attestation and performance gates.
+
 ## Maintainer publication decisions
 
 Version/tag, repository visibility, package registry upload, a working private

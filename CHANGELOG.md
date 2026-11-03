@@ -21,6 +21,11 @@
 
 ### Operations and transport
 
+- Handle Windows PowerShell 5.1 tokenless RDPDR read cancellation during Stream
+  recovery; retain the underlying exception and reject explicit token cancellation.
+  Refresh existing per-user autostart without SACL privileges or empty-string
+  backup paths in atomic file replacement.
+
 - Recover Stream workers through the local bootstrap after classified redirected
   drive/handle failures, with capped backoff, supervisor singleton, rechecked
   trust and pinned durable storage. Preserve no-replay and normal stop behavior;

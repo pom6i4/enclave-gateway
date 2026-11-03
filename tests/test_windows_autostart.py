@@ -71,11 +71,12 @@ class WindowsAutostartTests(unittest.TestCase):
 
                 with winreg.CreateKey(winreg.HKEY_CURRENT_USER, run_path) as key:
                     winreg.SetValueEx(key, unrelated, 0, winreg.REG_SZ, 'preserve')
-                first = launch([shell, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'RemoteSigned',
+                registration = [shell, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'RemoteSigned',
                                 '-File', str(agents / 'bastion_bootstrap.ps1'), '-Mode', 'Standard',
                                 '-WorkerPath', str(agents / 'bastion_worker.ps1'), '-SourceSpool', str(spool),
                                 '-InstallDir', str(install), '-StateRoot', str(root / 'state'),
-                                '-SpoolProtocol', 'Stream', '-MigrateLegacyState', '-RegisterAutostart'], 'first')
+                                '-SpoolProtocol', 'Stream', '-RegisterAutostart']
+                first = launch(registration + ['-MigrateLegacyState'], 'first')
                 before = ready(first)
                 with winreg.OpenKey(winreg.HKEY_CURRENT_USER, run_path) as key:
                     command, kind = winreg.QueryValueEx(key, value)
@@ -93,6 +94,14 @@ class WindowsAutostartTests(unittest.TestCase):
                 self.assertEqual(engine.exec_node('@bastion', "Write-Output 'FIRST_OK'", timeout_sec=30).stdout.strip(), 'FIRST_OK')
                 self.assertEqual(engine.stop_worker(timeout_sec=30).exit_code, 0)
                 self.assertEqual(first.wait(timeout=15), 0)
+                # Refresh the existing protected per-user installation without
+                # requiring elevation, SACL privileges, or another migration.
+                refreshed = launch(registration, 'refresh')
+                refreshed_state = ready(refreshed)
+                self.assertNotEqual(before['instance_id'], refreshed_state['instance_id'])
+                self.assertEqual(engine.exec_node('@bastion', "Write-Output 'REFRESH_OK'", timeout_sec=30).stdout.strip(), 'REFRESH_OK')
+                self.assertEqual(engine.stop_worker(timeout_sec=30).exit_code, 0)
+                self.assertEqual(refreshed.wait(timeout=15), 0)
                 replay = launch(command, 'replay')
                 after = ready(replay)
                 self.assertNotEqual(before['instance_id'], after['instance_id'])
