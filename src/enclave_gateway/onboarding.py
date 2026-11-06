@@ -31,23 +31,30 @@ try {
 } finally {if($key){$key.Dispose()}}'''
 
 
-def starter_configuration(mode='standard'):
+def starter_configuration(mode='standard',route='rdp_vfs'):
     if mode not in ('standard','enterprise'):raise ValueError('Select standard or enterprise')
+    if route not in ('ssh','rdp_vfs'):raise ValueError('Select ssh or rdp_vfs')
     security={'mode':mode}
     if mode=='enterprise':
         security.update(trusted_signers=[],worker_sha256='',runtime_sha256='',worker_account='',
                         bootstrap_sha256='',agent_package_dir='')
     from enclave_gateway.config import ApplianceSpec
     app=ApplianceSpec()
-    return {'profile':'default','security':security,
+    result={'profile':'default','security':security,
             'appliance':{name:getattr(app,name) for name in ('name','hypervisor','runtime_dir','disk_path','efi_vars_path','qga_socket_path','qmp_socket_path','pid_file_path')},
             'provider':{'type':'custom','installer_path':'','dst_key_path':'','probe_host':'','probe_port':0},
             'bastion':{'enabled':True,'host':'10.0.1.10'},
             'forwards':{'app_https':'18443:app01:443'},
             'targets':{'app01':{'host':'10.0.20.11','user':'deploy','via':'bastion','ssh_key_path':'~/.ssh/id_ed25519'}}}
+    if route=='ssh':
+        result['bastion']={'enabled':False}
+        result['provider'].update(probe_host='10.0.20.11',probe_port=22)
+        result['forwards']={}
+        result['targets']['app01'].update(via='appliance',ssh_known_hosts_path='~/.ssh/known_hosts')
+    return result
 
 
-def starter_yaml(mode='standard'):
+def starter_yaml(mode='standard',route='rdp_vfs'):
     notes={'appliance':'Existing VM: name is the QMP identity, control paths can use any verified filenames.',
            'runtime_dir':'Keep UNIX control socket paths short and private.',
            'qga_socket_path':'Optional existing QGA socket; empty uses runtime_dir/name-qga.sock.',
@@ -65,7 +72,7 @@ def starter_yaml(mode='standard'):
                 lines.append(pad+key+':');lines.extend(emit(value,level+1))
             else:lines.append(pad+key+': '+json.dumps(value,ensure_ascii=False))
         return lines
-    return '# Edit topology, then run egw config check and egw doctor --preflight.\n'+'\n'.join(emit(starter_configuration(mode)))+'\n'
+    return '# Edit topology, then run egw config check and egw doctor --preflight.\n'+'\n'.join(emit(starter_configuration(mode,route)))+'\n'
 
 
 def key_only_authentication(config,node):
@@ -86,14 +93,9 @@ def authentication_warnings(config):
 
 def configuration_summary(config):
     security=config.security
-    routes={}
-    for name in config.targets:
-        seen=set();node=name
-        while node not in ('bastion','appliance',''):
-            if node in seen or node not in config.targets:raise ValueError('Invalid or circular target route: '+name)
-            seen.add(node);node=config.targets[node].via.lstrip('@')
-        routes[name]='appliance' if node=='appliance' else 'bastion'
-        if routes[name]=='bastion' and not config.bastion.enabled:raise ValueError('Target route needs bastion.enabled: true: '+name)
+    from enclave_gateway.routing import route_summary
+    resolved=route_summary(config)
+    routes={name:value['execution_hop'] for name,value in resolved.items()}
     next_steps=[]
     if config.bastion.enabled:
         next_steps=['egw agents stage (or egw heal) to deliver the worker'] if security.mode!='custom' else ['Custom defaults retained: choose a named mode for agent deployment, or keep your existing manual deployment.']
@@ -102,15 +104,16 @@ def configuration_summary(config):
             'warnings':authentication_warnings(config),
             'ssh_authentication':{name:('key-only' if key_only_authentication(config,node) else 'password-helper' if node.password_env else 'key-or-agent') for name,node in config.targets.items()},
             'provider_type':config.provider.type,'provider_lifecycle_configured':bool(config.provider.lifecycle_manifest),
-            'spool_protocol':config.bastion.spool_protocol,'valid':True,'security_mode':security.mode,'targets':list(config.targets),'ssh_execution_hops':routes,
-            'execution_profile':config.bastion.execution_profile,
-            'execution_model':'foreground-openssh' if config.bastion.execution_profile=='structured_only' else 'owned-process-job' if security.require_process_isolation else 'in-process-runspace',
+            'routes':resolved,'automatic_route_fallback':False,'bastion_worker_required':config.bastion.enabled,
+            'spool_protocol':config.bastion.spool_protocol if config.bastion.enabled else None,'valid':True,'security_mode':security.mode,'targets':list(config.targets),'ssh_execution_hops':routes,
+            'execution_profile':config.bastion.execution_profile if config.bastion.enabled else None,
+            'execution_model':'agentless-ssh' if not config.bastion.enabled else 'foreground-openssh' if config.bastion.execution_profile=='structured_only' else 'owned-process-job' if security.require_process_isolation else 'in-process-runspace',
             'signed_agents':security.require_signed_agents,'signed_helpers':security.require_signed_helpers,
             'worker_attestation':security.enforce_worker_attestation,'owned_ssh_commands':security.owned_ssh_commands,
             'next_steps':next_steps+[
                           'Provision verified known_hosts and SSH keys on the executing hop',
                           'egw doctor --probe-targets'],
-            'trust_boundary':'Standard trusts the local operator and RDP session; it does not isolate hostile commands.'
+            'trust_boundary':('Standard trusts the controller operator and configured SSH accounts; no Bastion worker is used.' if not config.bastion.enabled else 'Standard trusts the local operator and RDP session; it does not isolate hostile commands.')
                 if security.mode=='standard' else 'See docs/SECURITY.md for deployment requirements.'}
 
 

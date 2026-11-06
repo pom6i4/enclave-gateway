@@ -31,7 +31,7 @@ def enterprise(**extra):
 class ConfigurationTests(unittest.TestCase):
     def test_public_shell_recipes_match_the_cli_parser_without_dispatch(self):
         parser=build_parser()
-        for name in ('README.md','docs/GUIDE.md'):
+        for name in ('README.md','docs/GUIDE.md','docs/ROUTING.md','docs/ru/ROUTING.md'):
             examples=0
             for block in re.findall(r'```(?:sh|powershell)\n(.*?)```',(ROOT/name).read_text(encoding="utf-8"),re.S):
                 for line in block.replace('\\\n',' ').splitlines():

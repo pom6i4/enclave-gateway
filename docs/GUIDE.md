@@ -2,6 +2,11 @@
 
 English · [Русское руководство](ru/GUIDE.md)
 
+Choose the administrator-approved route before connecting. See
+[explicit SSH and RDP routes](ROUTING.md). `config init --route ssh` creates
+an agentless starter; the default `--route rdp_vfs` retains the RDP workflow.
+Failures never change transports automatically.
+
 ## Installation
 
 The Python CLI requires Python 3.10 or newer and has no mandatory third-party

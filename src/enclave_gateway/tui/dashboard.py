@@ -45,7 +45,7 @@ def render_dashboard_text(
 
     app_badge = "[ONLINE]" if vm_up else "[OFFLINE]"
     tun_badge = "[TUNNEL UP]" if tun_up else "[TUNNEL DOWN]"
-    wrk_badge = "[WORKER HEALTHY]" if wrk_up else "[WORKER STALE]"
+    wrk_badge = "[WORKER NOT REQUIRED]" if not cfg.bastion.enabled else "[WORKER HEALTHY]" if wrk_up else "[WORKER STALE]"
 
     top_border = "┌" + "─" * (width - 2) + "┐"
     sep_border = "├" + "─" * (width - 2) + "┤"
@@ -58,7 +58,8 @@ def render_dashboard_text(
             width,
         ),
         _box_line(
-            f"Chain: Host ──> Appliance {app_badge} ──> VPN {tun_badge} ──> Bastion {wrk_badge} ──> Targets ({len(cfg.targets)})",
+            (f"Chain: Host ──> Appliance {app_badge} ──> VPN {tun_badge} ──> Bastion {wrk_badge} ──> Targets ({len(cfg.targets)})"
+             if cfg.bastion.enabled else f"Chain: Host ──> Appliance {app_badge} ──> VPN {tun_badge} ──> SSH routes ──> Targets ({len(cfg.targets)})"),
             width,
         ),
         sep_border,
@@ -85,13 +86,15 @@ def render_dashboard_text(
     lines.extend(
         [
             sep_border,
-            _box_line("3. BASTION RDP VFS RELAY (@bastion)", width),
+            _box_line("3. BASTION RDP VFS RELAY (@bastion)" if cfg.bastion.enabled else "3. AGENTLESS SSH ROUTE (NO RDP WORKER)", width),
             _box_line(
-                f"   Bastion: {bast_st.get('host', cfg.bastion.host)}:{cfg.bastion.port}   Transport: {cfg.bastion.transport} ([MS-RDPEFS])   State: {wrk_badge}",
+                (f"   Bastion: {bast_st.get('host', cfg.bastion.host)}:{cfg.bastion.port}   Transport: {cfg.bastion.transport} ([MS-RDPEFS])   State: {wrk_badge}"
+                 if cfg.bastion.enabled else "   SSH starts on Appliance. Only explicitly configured jump nodes are used."),
                 width,
             ),
             _box_line(
-                f"   Worker PID: {w_state.get('pid', '-')}   Uptime: {w_state.get('uptime_sec', '-')}s   Parallel Streams: {w_state.get('parallel_streams', cfg.bastion.parallel_streams)}   Active Mux: {w_state.get('active_mux_streams', 0)}",
+                (f"   Worker PID: {w_state.get('pid', '-')}   Uptime: {w_state.get('uptime_sec', '-')}s   Parallel Streams: {w_state.get('parallel_streams', cfg.bastion.parallel_streams)}   Active Mux: {w_state.get('active_mux_streams', 0)}"
+                 if cfg.bastion.enabled else "   Worker state is not applicable. Automatic transport fallback is disabled."),
                 width,
             ),
             sep_border,

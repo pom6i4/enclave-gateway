@@ -163,7 +163,7 @@ class AccessPolicy:
             self.require(grant.allow_provider_management and grant.permits_node('@appliance'),'Provider management requires an explicit administrative grant')
         if tool=='enclave_agent': self.require(grant.permits_node('@bastion'),'Worker verification requires the Bastion grant')
         if tool in ("enclave_status", "enclave_doctor"):
-            self.require(grant.permits_node("@appliance") and grant.permits_node("@bastion"), "Diagnostics access Appliance and Bastion")
+            self.require(grant.permits_node("@appliance") and (not config.bastion.enabled or grant.permits_node("@bastion")), "Diagnostics require grants for the configured control hops")
         if tool == "enclave_audit":
             self.require("*" in grant.nodes, "The shared audit requires an explicit all-nodes grant")
         node = canonical_node(str(args.get("node", "")))
@@ -198,7 +198,7 @@ class AccessPolicy:
             self.authorize_destination(grant, url.hostname or "", url.port or (443 if url.scheme == "https" else 80))
         if tool in ("enclave_heal", "enclave_clean") or (tool == "enclave_doctor" and args.get("fix")):
             self.require(grant.allow_repair,'Controller repair requires an explicit grant')
-            self.require(grant.permits_node("@appliance") and grant.permits_node("@bastion"), "Repair requires Appliance and Bastion grants")
+            self.require(grant.permits_node("@appliance") and (not config.bastion.enabled or grant.permits_node("@bastion")), "Repair requires grants for the configured control hops")
         return grant
 
 

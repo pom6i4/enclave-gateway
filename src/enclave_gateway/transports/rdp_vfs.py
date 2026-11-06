@@ -316,6 +316,17 @@ class RdpVfsTransport:
         self._ready_condition=threading.Condition()
         self._ready_wave=None
 
+    def require_worker(self):
+        if not self.spec.enabled:
+            raise OperationError('bastion_disabled','route',node='@bastion',
+                                 message='Selected SSH route has no RDP transport. Use exec/cp/sync for configured TargetNodes. A different route requires explicit approved configuration; no fallback was attempted.')
+
+    def require_tcp_mux(self):
+        self.require_worker()
+        if self.spec.execution_profile=='structured_only':
+            raise OperationError('structured_operation_denied','route',node='@bastion',
+                                 message='TCP mux and Host SSH ProxyCommand are unavailable in structured_only. Use exec/cp/sync for approved TargetNodes; no legacy fallback is permitted.')
+
     def _check_readiness(self, guard):
         # Share only a check that was already in flight when this call arrived.
         # The absolute heartbeat expiry is rechecked by each waiter. There is no
@@ -388,6 +399,7 @@ class RdpVfsTransport:
         extra_fields: dict[str, Any] | None = None,
     ) -> ExecResult:
         """Dispatch a PowerShell script to BastionWorker via transactional JSON envelope."""
+        self.require_worker()
         timeout_sec = budget(timeout_sec, "vfs.dispatch")
         tx_id = generate_tx_id()
         request_data=dict(getattr(ps_script,'request_data',{}))
@@ -417,6 +429,7 @@ class RdpVfsTransport:
     def _dispatch_envelope(
         self, envelope: dict[str, Any], timeout_sec: float = 120.0
     ) -> ExecResult:
+        self.require_worker()
         context = current()
         if not context:
             return self._dispatch_envelope_impl(envelope, timeout_sec)
@@ -647,6 +660,7 @@ exit 124
         return json.loads(result.stdout)
 
     def request_cancel(self, request_id: str) -> None:
+        self.require_worker()
         if not re.fullmatch(r"[A-Za-z0-9_]{1,128}", request_id):
             raise ValueError("Invalid request id")
         if self.spec.spool_protocol == "stream":
@@ -717,6 +731,7 @@ exit 124
         timeout_sec: float = 900.0,
     ) -> str:
         """Push a file from Host to Bastion with SHA-256 verification, block delta sync, and Parallel Striped I/O."""
+        self.require_worker()
         bastion_dest_literal = bastion_dest_path.replace("'", "''")
         file_sha = compute_file_sha256(local_path)
         file_size = local_path.stat().st_size
@@ -835,6 +850,7 @@ Write-Output 'MISS'
         self, bastion_src_path: str, local_dest_path: Path, timeout_sec: float = 600.0
     ) -> str:
         """Pull a file from Bastion to Host with Parallel Striped I/O and SHA-256 verification."""
+        self.require_worker()
         tx_id = generate_tx_id()
         stage_ps = build_parallel_striped_stage_ps(
             bastion_src_path=bastion_src_path,
@@ -1185,6 +1201,8 @@ class RdpVfsTunnelServer(TcpListener):
         multiplexed: bool = True,
         bind_host: str = "127.0.0.1",
     ) -> None:
+        guard=getattr(transport,'require_tcp_mux',None)
+        if callable(guard):guard()
         self.transport = transport
         self.local_port = local_port
         self.target_host = target_host

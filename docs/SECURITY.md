@@ -4,6 +4,10 @@ English · [Русский](ru/SECURITY.md)
 
 ## Trust boundaries
 
+See [explicit route selection](ROUTING.md) for SSH-permitted deployments.
+Disabling Bastion prevents RDP worker operations. It does not create a new
+Enterprise isolation guarantee or authorize another route after a failure.
+
 The Host operator controls the CLI and QGA/QMP channel. QGA commonly executes as
 SYSTEM in the Windows Appliance. A Bastion worker accepts commands through an
 RDP redirected spool and executes as the RDP user. SSH grants access to a separate

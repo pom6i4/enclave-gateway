@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Explicit policy-approved routes
+
+- Add `config init --route ssh` for an agentless Appliance SSH route.
+- Resolve each configured SSH jump chain consistently in setup and execution.
+  Report the route and disabled fallback in capabilities.
+- Reject RDP operations when Bastion is disabled. Reject unavailable TCP mux
+  before opening listeners. Do not stage workers or clean old RDP state in
+  the agentless route.
+- Keep diagnostics and repair grants scoped to the configured control hops.
+  Provide separate SSH and RDP operator guides in English and Russian.
+
 ### Endpoint policy hardening
 
 - Remove command-history suppression from worker execution and SSH wrappers.

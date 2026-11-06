@@ -38,6 +38,7 @@ from enclave_gateway.operations.journal import TransactionJournal, TERMINAL
 from enclave_gateway.operations.runner import tracked
 from enclave_gateway.providers import provider_adapter
 from enclave_gateway.config import EnclaveConfig, TargetNodeSpec
+from enclave_gateway.routing import resolve_target_route
 from enclave_gateway.control.qga_client import (
     ControlChannel,
     DirectHostControlChannel,
@@ -275,11 +276,14 @@ class EnclaveEngine:
             },
             "bastion": {
                 "enabled": self.config.bastion.enabled,
-                "host": self.config.bastion.host,
-                "worker_healthy": False,
+                "worker_required": self.config.bastion.enabled,
+                "transport":'rdp_vfs' if self.config.bastion.enabled else 'disabled',
+                "host": self.config.bastion.host if self.config.bastion.enabled else None,
+                "worker_healthy": False if self.config.bastion.enabled else None,
                 "worker_state": None,
             },
             "targets": list(self.config.targets.keys()),
+            "automatic_route_fallback":False,
         }
 
         if not vm_running and self.config.appliance.hypervisor != "direct":
@@ -296,18 +300,20 @@ class EnclaveEngine:
             return report
 
         provider = self.config.provider
+        worker_probe=(f"""
+$statePath = Join-Path {ps_quote(self.config.bastion.appliance_spool_dir)} 'worker_state.json'
+if (Test-Path -LiteralPath $statePath) {{
+    $age = ((Get-Date) - (Get-Item -LiteralPath $statePath).LastWriteTime).TotalSeconds
+    if ($age -ge 0 -and $age -lt {self.config.bastion.heartbeat_max_age_sec}) {{ $stateJson = [IO.File]::ReadAllText($statePath).Trim() }}
+}}
+""" if self.config.bastion.enabled else '')
         adapter = provider_adapter(provider.type)
         probe_ps = adapter.probe_script(provider) + f"""
 $adapterName = {ps_quote(provider.adapter_name)}
 $adapter = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {{ $_.Name -eq $adapterName -or $_.InterfaceDescription -like "*$adapterName*" }})
 $tcp = Test-NetConnection -ComputerName {ps_quote(provider.probe_host)} -Port {provider.probe_port} -WarningAction SilentlyContinue
-$spool = {ps_quote(self.config.bastion.appliance_spool_dir)}
 $stateJson = ""
-$statePath = Join-Path $spool 'worker_state.json'
-if (Test-Path -LiteralPath $statePath) {{
-    $age = ((Get-Date) - (Get-Item -LiteralPath $statePath).LastWriteTime).TotalSeconds
-    if ($age -ge 0 -and $age -lt {self.config.bastion.heartbeat_max_age_sec}) {{ $stateJson = [IO.File]::ReadAllText($statePath).Trim() }}
-}}
+{worker_probe}
 $vpnRoute = @($adapter | Where-Object {{ $_.Status -eq 'Up' -and $_.Name -eq $tcp.InterfaceAlias }}).Count -gt 0
 $out = @{{
     tunnel_up = [bool]($tcp.TcpTestSucceeded -and $vpnRoute)
@@ -334,7 +340,7 @@ ConvertTo-Json $out -Compress -Depth 8
                     str(data.get("vpn_info", ""))
                 )
                 worker_raw = data.get("worker")
-                if worker_raw:
+                if self.config.bastion.enabled and worker_raw:
                     try:
                         report["bastion"]["worker_state"] = json.loads(worker_raw)
                         report["bastion"]["worker_healthy"] = report["bastion"]["worker_state"].get('status','running')=='running'
@@ -388,6 +394,8 @@ ConvertTo-Json $out -Compress -Depth 8
     @tracked("heal")
     def heal(self, *, update_credentials: bool = False, actor: str = "cli") -> ExecResult:
         """Self-heal clock drift, MTU, RDP UDP policy, interactive credentials, and Bastion RDP session."""
+        if update_credentials and not self.config.bastion.enabled:
+            self.rdp_vfs.require_worker()
         if self._direct_posix:
             return ExecResult(0,'No managed Windows settings to repair in POSIX Direct mode. Run egw doctor --probe-targets.','',0)
         tx_id = current().tx_id if current() else generate_tx_id()
@@ -446,6 +454,7 @@ ConvertTo-Json $out -Compress -Depth 8
 
     @tracked('prune_agents')
     def prune_agents(self, *, actor='cli', **options):
+        self.rdp_vfs.require_worker()
         from enclave_gateway.agent_maintenance import prune_agent_bundles
         return prune_agent_bundles(self.control,self.config,**options)
 
@@ -1117,6 +1126,12 @@ Write-Output ("DIAG_CLOCK:"+$epoch+":UDP:"+[int]$udp)
         tx_id = current().tx_id if current() else generate_tx_id()
         started = time.monotonic()
 
+        if not self.config.bastion.enabled:
+            self.recorder.record(tx_id=tx_id,actor=actor,operation='clean',node='@appliance',
+                                 summary='SSH route selected; no RDP spool cleanup is applicable',exit_code=0,duration_ms=0)
+            return {'tx_id':tx_id,'ok':True,'appliance_cleaned':False,'bastion_cleaned':False,
+                    'bastion_cleanup':'disabled','applicable':False,'duration_ms':0,'details':{},'errors':[]}
+
         from enclave_gateway.spool_cleanup import cleanup_script
         errors=[];app_ok=False;bastion_ok=not self.config.bastion.enabled;details={}
         # The controller can clean expired unclaimed requests even when the
@@ -1169,6 +1184,7 @@ Write-Output 'BASTION_CLEAN_OK'
         nodes: set[str] | None = None,
     ) -> str:
         """Generate an OpenSSH ~/.ssh/config block using `egw stdio-proxy %h %p`."""
+        self.rdp_vfs.require_tcp_mux()
         cfg_flag = f" -c {shlex.quote(config_path)}" if config_path else ""
         lines = [
             f"# Enclave Gateway OpenSSH ProxyCommand Configuration (profile: {self.config.profile})"
@@ -1212,6 +1228,7 @@ Write-Output 'BASTION_CLEAN_OK'
         config_path: str | None = None,
     ) -> list[str]:
         """Build a host OpenSSH client command line that tunnels directly via `egw stdio-proxy`."""
+        self.rdp_vfs.require_tcp_mux()
         target = self._resolve_target(node)
         import subprocess
         join = subprocess.list2cmdline if os.name == "nt" else shlex.join
@@ -1521,13 +1538,14 @@ Write-Output 'PATH_GRANT_OK'
                 "tools": {name: bool(shutil.which(name)) for name in ("ssh", "pwsh", "powershell.exe", "qemu-img")},
                 "provider": provider_adapter(self.config.provider.type).capabilities(),
                 "virtualization":ApplianceHypervisor.tpm_capabilities(),
-                "bastion_execution": {"profile":self.config.bastion.execution_profile,"arbitrary_powershell":self.config.bastion.execution_profile!='structured_only',"tcp_mux":self.config.bastion.execution_profile!='structured_only',"edr_qualified":False},
+                "bastion_execution": {"enabled":self.config.bastion.enabled,"profile":self.config.bastion.execution_profile if self.config.bastion.enabled else None,"arbitrary_powershell":self.config.bastion.enabled and self.config.bastion.execution_profile!='structured_only',"tcp_mux":self.config.bastion.enabled and self.config.bastion.execution_profile!='structured_only',"edr_qualified":False},
+                "automatic_route_fallback":False,
                 "transactions": {"durable": True, "replay_ambiguous": False, "cancellation": "requested-until-confirmed"},
                 "security": {"signed_helper_required": self.config.security.require_signed_helpers,
                              "signed_agents_required": self.config.security.require_signed_agents,
                              "trusted_publishers_configured": bool(self.config.security.trusted_signers)},
                 "retention": {"automatic_archiving":True,"payload_bytes":self.journal.retention.max_payload_bytes,"archive_bytes":self.journal.retention.max_archive_bytes,"identity_capacity":self.journal.retention.max_identities},
-                "worker_verification": {"configured":bool(self.config.security.worker_sha256),"enforced":self.config.security.enforce_worker_attestation,"running_worker":"query-enclave_agent"},
+                "worker_verification": {"applicable":self.config.bastion.enabled,"configured":bool(self.config.security.worker_sha256),"enforced":self.config.bastion.enabled and self.config.security.enforce_worker_attestation,"running_worker":"query-enclave_agent" if self.config.bastion.enabled else "not_applicable"},
                 "qualification": {"windows_guest": "not_verified", "rdpdr": "not_verified", "vendor_driver": "not_verified"}}
 
     def transaction_status(self, tx_id: str | None = None, *, limit: int = 25):
@@ -1574,22 +1592,6 @@ Write-Output 'PATH_GRANT_OK'
     def _resolve_hop_and_jump(
         self, target: TargetNodeSpec
     ) -> tuple[SshHopExecutor, list[TargetNodeSpec] | None]:
-        chain: list[TargetNodeSpec] = []
-        visited: set[str] = {target.name}
-        curr = target
-        while True:
-            via = curr.via.lstrip("@")
-            if via == "appliance":
-                return self.appliance_ssh, ( list(reversed(chain)) if chain else None )
-            if via in ("bastion", ""):
-                return self.bastion_ssh, ( list(reversed(chain)) if chain else None )
-            if via in visited:
-                raise ValueError(
-                    f"Circular TargetNode 'via' routing cycle detected involving '{via}'"
-                )
-            if via not in self.config.targets:
-                raise ValueError(f"Unknown hop in TargetNode routing: {via}")
-            visited.add(via)
-            jump_spec = self.config.targets[via]
-            chain.append(jump_spec)
-            curr = jump_spec
+        route=resolve_target_route(self.config,target)
+        return (self.appliance_ssh if route.execution_hop=='appliance' else self.bastion_ssh,
+                list(route.jumps) if route.jumps else None)

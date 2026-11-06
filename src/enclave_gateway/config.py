@@ -154,6 +154,8 @@ class BastionSpec:
     worker_policy_sha256: str = ''
 
     def __post_init__(self):
+        if self.transport!='rdp_vfs':
+            raise ValueError('bastion.transport supports rdp_vfs only. For an approved SSH route set bastion.enabled: false and route targets via appliance or explicit SSH jump nodes.')
         if self.execution_profile not in ('legacy','structured_only'):
             raise ValueError('execution_profile must be legacy or structured_only')
         if self.execution_profile=='structured_only':

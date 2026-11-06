@@ -20,6 +20,9 @@ provider. `egw` connects a local CLI or MCP client to the enclave's TargetNodes.
 Host → QGA → Windows Appliance → RDP redirected drive → Bastion worker → SSH → TargetNode
 ```
 
+The diagram shows the RDP route. When policy permits SSH, use the
+[agentless route](docs/ROUTING.md#approved-ssh-route) without a Bastion worker.
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/architecture-dark.svg">
@@ -141,6 +144,8 @@ Standard; migrating an existing deployment is an operator decision.
   boundaries, signing, attestation, roles and operational limits.
 - [Managed endpoint policies](docs/ENDPOINT-POLICY.md): the unreleased approved
   foreground OpenSSH profile and its qualification limits.
+- [Explicit SSH and RDP routes](docs/ROUTING.md): choose the approved route;
+  transport failures never select an alternative.
 - [Contributing](CONTRIBUTING.md): code layout, tests and extension points.
 - [Release preparation and component compatibility](docs/RELEASING.md), with
   [unreleased changes](CHANGELOG.md): source-bound unsigned candidates and checks.

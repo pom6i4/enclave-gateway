@@ -45,6 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     config_actions=config.add_subparsers(dest='config_action',required=True)
     create=config_actions.add_parser('init',help='Write a starter configuration; never overwrite a file.')
     create.add_argument('--mode',choices=['standard','enterprise'],default='standard')
+    create.add_argument('--route',choices=['ssh','rdp_vfs'],default='rdp_vfs',help='Explicit approved route; ssh disables the RDP worker and starts SSH on Appliance.')
     destination=create.add_mutually_exclusive_group()
     destination.add_argument('--output',type=Path)
     destination.add_argument('--global',dest='global_config',action='store_true',help='Create the private XDG user configuration.')
@@ -529,10 +530,10 @@ def _main(argv: list[str] | None = None) -> int:
             from enclave_gateway.operations.retention import private_directory
             args.output=global_config_path();private_directory(args.output.parent)
         else:args.output=(args.output or Path('enclave.yaml')).expanduser()
-        data=starter_yaml(args.mode).encode()
+        data=starter_yaml(args.mode,args.route).encode()
         descriptor=os.open(args.output,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0),0o600)
         with os.fdopen(descriptor,'wb') as output:output.write(data)
-        print(json.dumps({'created':str(args.output),'mode':args.mode,'next_step':'Edit topology, then run egw config check. Enterprise placeholders must be replaced with approved release pins.'}))
+        print(json.dumps({'created':str(args.output),'mode':args.mode,'route':args.route,'next_step':'Edit topology, then run egw config check. Enterprise placeholders must be replaced with approved release pins.'}))
         return 0
 
     if args.command=='agents' and args.agents_action=='unregister-autostart-command':
@@ -936,6 +937,7 @@ def _main(argv: list[str] | None = None) -> int:
         return res.exit_code
 
     if args.command == "tunnel":
+        engine.rdp_vfs.require_tcp_mux()
         parts = args.spec.split(":")
         if len(parts) != 3:
             print(
@@ -968,6 +970,7 @@ def _main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "socks5":
+        engine.rdp_vfs.require_tcp_mux()
         from enclave_gateway.transports.socks5_mux import Socks5VfsServer
 
         port = args.port if args.port is not None else cfg.appliance.socks5_port
@@ -988,6 +991,7 @@ def _main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "forward":
+        engine.rdp_vfs.require_tcp_mux()
         from enclave_gateway.transports.socks5_mux import MultiPortForwardSupervisor
 
         if not cfg.forwards and not args.with_socks5:
@@ -1025,6 +1029,7 @@ def _main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "stdio-proxy":
+        engine.rdp_vfs.require_tcp_mux()
         from enclave_gateway.transports.socks5_mux import pump_stdio_mux
 
         resolved_host = (

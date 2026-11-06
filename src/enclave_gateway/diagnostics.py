@@ -8,6 +8,7 @@ import shutil
 def diagnostic_code(detail, exit_code=None):
     """Stable guidance categories; SSH 255 cannot prove transport versus remote exit."""
     value=str(detail).lower()
+    if 'selected ssh route' in value or 'disabled rdp bastion' in value:return 'route_unavailable'
     if exit_code is not None and exit_code not in (0,255):return 'remote_command_failed'
     if any(s in value for s in ('host key verification failed','remote host identification has changed','no ed25519 host key','no rsa host key')):return 'ssh_host_key'
     if 'permission denied' in value or 'publickey' in value:return 'ssh_authentication'
@@ -57,6 +58,8 @@ def save_support(config,output,expected_sha256):
 
 def remediation(detail):
     value=str(detail).lower()
+    if 'selected ssh route' in value or 'disabled rdp bastion' in value:
+        return 'Review the explicit target via chain in egw config check. An SSH route starts on Appliance and requires no RDP worker. Route changes require administrator approval; no transport fallback is attempted. See docs/ROUTING.md.'
     if any(s in value for s in ('host key verification failed','remote host identification has changed','no ed25519 host key','no rsa host key')):
         return 'Verify the TargetNode host-key fingerprint with its administrator, then provision known_hosts on the SSH hop (Bastion or Appliance). Do not disable StrictHostKeyChecking or delete a changed key blindly. See docs/GUIDE.md#ssh-trust.'
     if 'permission denied' in value or 'publickey' in value:

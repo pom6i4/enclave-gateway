@@ -233,6 +233,8 @@ class Socks5VfsServer(TcpListener):
         *,
         target_aliases: dict[str, str] | None = None,
     ) -> None:
+        guard=getattr(transport,'require_tcp_mux',None)
+        if callable(guard):guard()
         self.transport = transport
         self.bind_host = bind_host
         self.bind_port = bind_port

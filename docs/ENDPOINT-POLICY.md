@@ -7,6 +7,9 @@ incident must be resolved through the organization's incident process first.
 
 ## Choose an approved route
 
+Both policy scenarios are supported through [explicit route selection](ROUTING.md).
+For an agentless SSH starter use `egw config init --route ssh`.
+
 Use an existing approved SSH or WinRM route when it removes the need for a
 Bastion worker. A redirected RDP filesystem alone cannot execute commands.
 When RDP is the only route, `bastion.execution_profile: structured_only` selects

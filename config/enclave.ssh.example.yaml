@@ -1,0 +1,20 @@
+# Approved agentless SSH route. No RDP session or Bastion worker is used.
+# Keys and verified known_hosts live on Appliance, where ssh.exe starts.
+# In POSIX Direct mode they live on Host instead.
+security:
+  mode: standard
+bastion:
+  enabled: false
+provider:
+  type: custom
+  installer_path: ''
+  dst_key_path: ''
+  probe_host: '10.0.20.11'
+  probe_port: 22
+targets:
+  app01:
+    host: '10.0.20.11'
+    user: deploy
+    via: appliance
+    ssh_key_path: '~/.ssh/id_ed25519'
+    ssh_known_hosts_path: '~/.ssh/known_hosts'
