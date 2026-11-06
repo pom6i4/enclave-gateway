@@ -246,8 +246,30 @@ recovery or remote rollback is claimed. The test used synthetic trust and keys.
 It did not include a proprietary VPN or additional WAN delay. Its Files timings
 are not the legacy Stream performance baseline.
 
-Acceptance under the exact KES version and approved protection policy remains
-separate.
+A disposable Windows Server 2022 x64 test with KES 14.1.0.423 did **not** pass.
+The trial license was active and the definitions were updated. These components
+reported running:
+
+- AMSI Protection.
+- Behavior Detection.
+- File Threat Protection.
+
+KSN was disabled. No product exclusions were added and protection was not
+disabled. The signed foreground worker passed local NTFS startup and fresh
+attestation, but its first real Linux SSH request exceeded the unchanged
+15-second limit. KESCLI reported `PDM:Trojan.Win32.Generic` for that worker
+with action `Blocked`. A separate lab PowerShell scenario invoking system SSH
+was also reported as blocked. The test stopped and retained the failed evidence.
+Signing and the reduced operation set therefore do not establish KES
+compatibility.
+
+The actual redirected RDP Files trial separately exceeded the same limit during
+attestation and cancelled before dispatch. Reconnecting reached the existing
+desktop and the foreground worker exited on the disconnected drive; this is
+not successful end-to-end acceptance. Remaining operations were not qualified
+under KES. Deployment requires administrator review of the detection and an
+approved route. Acceptance under the organization's exact protection policy
+remains open.
 
 A passing local-spool test is not RDP or KES acceptance. Keep failed runs and
 versioned evidence. Do not disable protection or add broad exclusions to obtain
