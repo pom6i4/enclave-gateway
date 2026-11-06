@@ -81,11 +81,13 @@ class LoopbackControlChannel:
             self.last_script = script
             if 'EGW_WORKER_READINESS' in script:
                 return ExecResult(0,json.dumps({'running':True,'age_sec':0}),'',1)
-            if "[Convert]::FromBase64String('" in script and "req_" in script:
-                b64_part = script.split("[Convert]::FromBase64String('", 1)[1].split("')", 1)[0]
+            if getattr(script,"request_data",{}).get("envelope_b64") and "req_" in script:
+                b64_part = script.request_data["envelope_b64"]
                 env_json = json.loads(base64.b64decode(b64_part).decode("utf-8"))
                 tx_id = env_json["tx_id"]
                 inner_cmd = base64.b64decode(env_json["payload_b64"]).decode("utf-8")
+                from enclave_gateway.operations.request import PowerShellRequest
+                inner_cmd=PowerShellRequest(inner_cmd,json.loads(env_json.get("request_data_json","{}")))
                 out_str = self._simulate_bastion_worker(inner_cmd)
                 res_payload = {
                     "tx_id": tx_id,
@@ -245,14 +247,8 @@ class LoopbackControlChannel:
 
         # 7. SSH hop execution with base64-encoded bash script
         decoded_sh = None
-        for encoded in re.findall(r"[A-Za-z0-9+/]{24,}={0,2}", inner_cmd):
-            try:
-                candidate = base64.b64decode(encoded, validate=True).decode("utf-8")
-            except (ValueError, UnicodeError):
-                continue
-            if candidate.startswith("unset HISTFILE;") or "unset HISTFILE\n" in candidate:
-                decoded_sh = candidate[candidate.index('unset HISTFILE'): ]
-                break
+        if getattr(inner_cmd,'request_data',{}).get('ssh_stdin_b64'):
+            decoded_sh=base64.b64decode(inner_cmd.request_data['ssh_stdin_b64']).decode('utf-8')
         if decoded_sh is not None:
             m_ver = re.search(r"if \[ \"\$sha\" != '([0-9a-f]{64})' \]", decoded_sh)
             if m_ver:
@@ -270,6 +266,8 @@ class LoopbackControlChannel:
                 env_json = json.loads(data.decode("utf-8"))
                 tx_id = env_json["tx_id"]
                 inner_cmd = base64.b64decode(env_json["payload_b64"]).decode("utf-8")
+                from enclave_gateway.operations.request import PowerShellRequest
+                inner_cmd=PowerShellRequest(inner_cmd,json.loads(env_json.get("request_data_json","{}")))
                 out_str = self._simulate_bastion_worker(inner_cmd)
                 res_payload = {
                     "tx_id": tx_id,
@@ -874,7 +872,7 @@ targets:
             self.assertIn("deploy@10.0.20.11", ssh_cmd)
             self.assertEqual(ssh_cmd[-3:-1], ["-L", "5432:127.0.0.1:5432"])
 
-    def test_zero_disk_stealth_direct_spool_ipc_polyglot_and_heuristic_scrubber(self) -> None:
+    def test_direct_spool_ipc_polyglot_and_heuristic_scrubber(self) -> None:
         with TemporaryDirectory() as tmp:
             env_file = Path(tmp) / ".env"
             env_file.write_text(
@@ -894,13 +892,13 @@ targets:
             self.assertIn("postgresql://admin:[REDACTED]@10.0.20.11:5432/enclave", scrubbed_text)
             self.assertNotIn("MyDbSecret!99", scrubbed_text)
 
-            # 2. Verify POSIX shell polyglot + zero history + UserKnownHostsFile=NUL + VFS askpass staging
+            # 2. POSIX shell selection preserves normal endpoint logging.
             inv = build_remote_bash_invocation("id", as_root=False)
             self.assertIn("command -v bash >/dev/null 2>&1 && exec bash || exec sh", inv)
             m_b64 = re.search(r"echo '([A-Za-z0-9+/=]+)' \| base64 -d", inv)
             self.assertIsNotNone(m_b64)
             decoded_inv = base64.b64decode(m_b64.group(1)).decode("utf-8")  # type: ignore[union-attr]
-            self.assertIn("unset HISTFILE; export HISTFILE=/dev/null;", decoded_inv)
+            self.assertEqual(decoded_inv, "id")
 
             cfg = EnclaveConfig.from_dict(
                 {
@@ -940,9 +938,10 @@ targets:
                 "Expected Direct Spool File IPC to exchange envelopes without spawning powershell.exe on Appliance",
             )
 
-            # 4. Verify Zero-CLI-Password (-RdpPasswordB64) in heal(update_credentials=True)
-            engine.heal(update_credentials=True)
-            self.assertIn("-RdpPasswordB64", control.last_script)
+            # 4. Credential refresh rejects channels that cannot carry native stdin data.
+            with self.assertRaisesRegex(Exception,"native stdin control channel"):
+                engine.heal(update_credentials=True)
+            self.assertNotIn("-RdpPasswordB64", control.last_script)
             self.assertNotIn("BastionPass#2026", control.last_script)
 
             # 5. Verify query_database with container="" (host-direct) and env-based password (PGPASSWORD / MYSQL_PWD)

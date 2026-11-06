@@ -23,7 +23,7 @@ AGENTS = ROOT / 'src/enclave_gateway/agents'
 @unittest.skipUnless(os.environ.get('EGW_TEST_POWERSHELL'), 'Real PowerShell recovery fixture is opt-in')
 class StreamRecoveryTests(unittest.TestCase):
     @contextmanager
-    def worker(self, code=6, cancellation=None):
+    def worker(self, code=6, cancellation=None, recovery_timeout=60):
         with tempfile.TemporaryDirectory(prefix='egw-recovery-') as name:
             root = Path(name).resolve()
             spool = root / 'spool'
@@ -53,6 +53,7 @@ class StreamRecoveryTests(unittest.TestCase):
                        str(AGENTS / 'bastion_bootstrap.ps1'), '-Mode', 'Standard', '-WorkerPath', str(worker),
                        '-SourceSpool', str(spool), '-StateRoot', str(root / 'state'),
                        '-SpoolProtocol', 'Stream', '-HeartbeatIntervalMs', '250',
+                       '-RecoveryTimeoutSec',str(recovery_timeout),
                        '-MigrateLegacyState', '-StopFile', str(stop)]
             with (root / 'bootstrap.log').open('wb') as log:
                 process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=log)
@@ -96,6 +97,16 @@ class StreamRecoveryTests(unittest.TestCase):
                 return
             time.sleep(.01)
         self.fail('Supervisor did not observe the revoked handle')
+
+    def test_unavailable_channel_exhausts_retry_budget_without_replay(self):
+        with self.worker(recovery_timeout=1) as (root,process,transport,fault):
+            self.assertEqual(transport.exec_bastion('Write-Output "BEFORE_FAULT"',timeout_sec=10).exit_code,0)
+            fault.touch()
+            self.recovering(root,process)
+            (root/'spool').rename(root/'preserved-spool')
+            self.assertNotEqual(process.wait(timeout=8),0)
+            self.assertIn('STREAM_RECOVERY_EXHAUSTED',(root/'bootstrap.log').read_text(errors='replace'))
+            self.assertTrue((root/'state').exists())
 
     def test_recovery_preserves_completed_and_inflight_identities_and_nonempty_responses(self):
         with self.worker() as (root, process, transport, fault):

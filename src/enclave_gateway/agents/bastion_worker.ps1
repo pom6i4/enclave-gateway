@@ -165,7 +165,6 @@ $heartbeatState=$null;$lastHeartbeatMs=0;$lastHintMs=0;$lastDirectoryMs=0;$lastJ
 $stopRequested=$false;$lastMaintenance=-60000;$scanCount=0;$lastScanMs=0;$lastLoopMs=0
 
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
-Set-PSReadLineOption -HistorySaveStyle SaveNothing -ErrorAction SilentlyContinue
 try{[void][IO.Directory]::CreateDirectory($SpoolDir)}catch{Throw-SpoolFailure $_ $storageBindingHash}
 # The selected durable journal has already been opened before allocating runspaces.
 $Global:EnclaveMuxSockets = @{}
@@ -580,7 +579,7 @@ function Close-Mux {
 }
 
 $execute = {
-    param([string]$ScriptText)
+    param([string]$ScriptText,$RequestData)
     $ErrorActionPreference = 'Stop'
     $global:LASTEXITCODE = 0
     try {
@@ -598,7 +597,7 @@ $execute = {
 # Native process creation and pipe writes can block on OS policy or backpressure.
 # Keep them in bounded runspaces so the dispatcher continues mux/cancellation turns.
 $nativeExecute={
-    param($Runtime,$PowerShell,$Child,$Timeout,$State,$Mode='run')
+    param($Runtime,$PowerShell,$Child,$Timeout,$State,$Mode='run',$RequestData=$null)
     $ErrorActionPreference='Stop'
     $proc=New-Object Diagnostics.Process
     try {
@@ -613,6 +612,7 @@ $nativeExecute={
         if ($State.Cancelled) {$proc.Kill();return @{ExitCode=125;Stdout='';Stderr='Cancelled during native launch';Indeterminate=$true}}
         $output=$proc.StandardOutput.ReadToEndAsync(); $errorOutput=$proc.StandardError.ReadToEndAsync()
         $bootstrap='[Console]::InputEncoding=New-Object Text.UTF8Encoding($false); & ([scriptblock]::Create([Console]::In.ReadToEnd()))'
+        if($RequestData){$bootstrap='[Console]::InputEncoding=[Text.UTF8Encoding]::new($false);$RequestData=[Console]::In.ReadLine()|ConvertFrom-Json; & ([scriptblock]::Create([Console]::In.ReadToEnd()))';$Child=($RequestData|ConvertTo-Json -Depth 8 -Compress)+"`n"+$Child}
         $query=@{command=@($PowerShell,'-NoProfile','-NonInteractive','-Command',$bootstrap);timeout_ms=$Timeout;stdin_b64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Child))}|ConvertTo-Json -Compress
         if($Mode -eq 'attest'){$query=$Child}
         $State.Stage='writing'
@@ -1055,21 +1055,23 @@ $e | ConvertTo-Json -Compress -Depth 5
                         Write-Response $txId 0 'MUX_SHUTDOWN_OK'
                     } else { throw 'Unsupported mux action' }
                 } else {
+                    $requestData=$null
+                    if($request.request_data_json){$requestData=[string]$request.request_data_json|ConvertFrom-Json}
                     $scriptText=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$request.payload_b64))
                     if ($scriptText -match '\$Global:EnclaveMuxSockets|\$Global:EnclaveRunspacePool') { throw 'Worker state is accessible only through structured mux operations' }
                     if ($ProcessIsolation) {
                         $encodedScript=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($scriptText))
-                        $child="[Console]::OutputEncoding=New-Object Text.UTF8Encoding(`$false); & { $($execute.ToString()) } ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$encodedScript'))) | ConvertTo-Json -Compress"
+                        $child="[Console]::OutputEncoding=New-Object Text.UTF8Encoding(`$false); & { $($execute.ToString()) } ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$encodedScript'))) `$RequestData | ConvertTo-Json -Compress"
                         $state=[hashtable]::Synchronized(@{Process=$null;Cancelled=$false;Stage='queued'})
                         $pipe=[powershell]::Create(); $pipe.Runspace=$slot.Runspace
-                        [void]$pipe.AddScript($nativeExecute).AddArgument($RuntimeHelper).AddArgument($powerShellPath).AddArgument($child).AddArgument($timeout).AddArgument($state)
+                        [void]$pipe.AddScript($nativeExecute).AddArgument($RuntimeHelper).AddArgument($powerShellPath).AddArgument($child).AddArgument($timeout).AddArgument($state).AddArgument('run').AddArgument($requestData)
                         try {$invocation=Start-WorkerPipeline $pipe} catch {$pipe.Dispose();throw}
                         $slot.Busy=$true
                         $activeTxJobs.Add(@{Slot=$slot;TxId=$txId;Native=$true;NativeState=$state;Pipe=$pipe;Handle=$invocation.Handle;Input=$invocation.Input;Output=$invocation.Output;StopHandle=$null;Timer=[Diagnostics.Stopwatch]::StartNew();TimeoutMs=$timeout;Cancelled=$false})
                     } else {
                         $pipe=[powershell]::Create()
                         $pipe.Runspace=$slot.Runspace
-                        [void]$pipe.AddScript($execute).AddArgument($scriptText)
+                        [void]$pipe.AddScript($execute).AddArgument($scriptText).AddArgument($requestData)
                         try {$invocation=Start-WorkerPipeline $pipe} catch {$pipe.Dispose();throw}
                         $slot.Busy=$true
                         $activeTxJobs.Add(@{ Slot=$slot; TxId=$txId; Pipe=$pipe; Handle=$invocation.Handle; Input=$invocation.Input; Output=$invocation.Output; StopHandle=$null; Timer=[Diagnostics.Stopwatch]::StartNew(); TimeoutMs=$timeout; Cancelled=$false })

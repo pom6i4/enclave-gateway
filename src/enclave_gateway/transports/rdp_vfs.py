@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from enclave_gateway.security.quoting import validate_endpoint, ps_quote
+from enclave_gateway.operations.request import PowerShellRequest
 from enclave_gateway.operations.context import budget, checkpoint, current, mark_dispatched, timed, bind_context, OperationError
 from enclave_gateway.transports.listener import TcpListener
 from enclave_gateway.config import BastionSpec
@@ -389,12 +390,21 @@ class RdpVfsTransport:
         """Dispatch a PowerShell script to BastionWorker via transactional JSON envelope."""
         timeout_sec = budget(timeout_sec, "vfs.dispatch")
         tx_id = generate_tx_id()
+        request_data=dict(getattr(ps_script,'request_data',{}))
+        source=str(ps_script)
+        if request_data:
+            nonce=secrets.token_hex(16)
+            request_data['egw_request_nonce']=nonce
+            source=("if($null -eq $RequestData -or $RequestData.egw_request_nonce -cne '"+nonce+
+                    "'){throw 'WORKER_REQUEST_DATA_UNSUPPORTED: stage and restart the matching worker before retrying'};\n"+source)
         envelope: dict[str, Any] = {
             "tx_id": tx_id,
             "op": op,
-            "payload_b64": base64.b64encode(ps_script.encode("utf-8")).decode("ascii"),
+            "payload_b64": base64.b64encode(source.encode("utf-8")).decode("ascii"),
             "timeout_ms": int(timeout_sec * 1000),
         }
+        if request_data:
+            envelope["request_data_json"]=json.dumps(request_data,ensure_ascii=False)
         context = current()
         if context:
             envelope["operation_id"] = context.tx_id
@@ -506,7 +516,7 @@ $resFile = Join-Path $spool 'res_{tx_id}.json'
 Remove-Item $reqTmp, $reqFile, $resFile -Force -ErrorAction SilentlyContinue
 $fsw = New-Object System.IO.FileSystemWatcher($spool, 'res_{tx_id}.json')
 try {{
-    [IO.File]::WriteAllBytes($reqTmp, [Convert]::FromBase64String('{envelope_b64}'))
+    [IO.File]::WriteAllBytes($reqTmp, [Convert]::FromBase64String([string]$RequestData.envelope_b64))
     Move-Item $reqTmp $reqFile -Force
     for ($i = 0; $i -lt {iters}; $i++) {{
         if (-not (Test-Path -LiteralPath $resFile)) {{
@@ -531,7 +541,7 @@ Write-Error 'Timed out waiting for BastionWorker response for {tx_id}'
 exit 124
 """
         mark_dispatched()
-        res = self.control.exec_powershell(appliance_ps, timeout_sec=budget(max(0.001, deadline - time.monotonic()), "vfs.response"))
+        res = self.control.exec_powershell(PowerShellRequest(appliance_ps,{"envelope_b64":envelope_b64}), timeout_sec=budget(max(0.001, deadline - time.monotonic()), "vfs.response"))
         if res.exit_code != 0:
             if context:
                 raise OperationError('worker_response_unavailable','vfs.response',tx_id=context.tx_id,node=context.node,indeterminate=True)

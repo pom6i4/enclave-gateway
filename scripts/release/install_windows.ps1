@@ -53,7 +53,7 @@ function Assert-Version([string]$Version) {
     $manifest=Get-Content (Join-Path $release 'signature-manifest.json') -Raw -Encoding UTF8|ConvertFrom-Json
     foreach($item in $manifest.files) {
         if ($item.file -in @('egw-runtime.exe','egw-askpass.exe')) {$deployed=Join-Path (Join-Path $directory 'bin') $item.file}
-        elseif($item.file -in @('bastion_worker.ps1','bastion_bootstrap.ps1','appliance_init.ps1','session_supervisor.ps1')) {$deployed=Join-Path (Join-Path $directory 'agents') $item.file}
+        elseif($item.file -in @('bastion_worker.ps1','bastion_structured.ps1','bastion_bootstrap.ps1','appliance_init.ps1','session_supervisor.ps1')) {$deployed=Join-Path (Join-Path $directory 'agents') $item.file}
         else {continue}
         Assert-NoReparse $deployed
         if ((Get-FileHash -LiteralPath $deployed -Algorithm SHA256).Hash.ToLowerInvariant() -ne $item.sha256) {throw 'Installed payload hash mismatch'}
@@ -163,11 +163,11 @@ try {
             $stage=Join-Path $versions ('.stage-'+[Guid]::NewGuid().ToString('N'))
             [void][IO.Directory]::CreateDirectory($stage);Protect-Directory $stage
             foreach($name in @('release','bin','agents')) {[void][IO.Directory]::CreateDirectory((Join-Path $stage $name))}
-            foreach($name in @('bastion_worker.ps1','bastion_bootstrap.ps1','appliance_init.ps1','session_supervisor.ps1','verify_windows.ps1','install_windows.ps1','egw-runtime.exe','egw-askpass.exe','signature-manifest.json','signature-manifest.p7s')) {
+            foreach($name in @('bastion_worker.ps1','bastion_structured.ps1','bastion_bootstrap.ps1','appliance_init.ps1','session_supervisor.ps1','verify_windows.ps1','install_windows.ps1','egw-runtime.exe','egw-askpass.exe','signature-manifest.json','signature-manifest.p7s')) {
                 Copy-Item -LiteralPath (Join-Path $PackageDir $name) -Destination (Join-Path (Join-Path $stage 'release') $name)
             }
             & (Join-Path $PSScriptRoot 'verify_windows.ps1') -PackageDir (Join-Path $stage 'release') -TrustedThumbprints $TrustedThumbprints | Out-Null
-            foreach($name in @('bastion_worker.ps1','bastion_bootstrap.ps1','appliance_init.ps1','session_supervisor.ps1')) {Copy-Item -LiteralPath (Join-Path (Join-Path $stage 'release') $name) -Destination (Join-Path (Join-Path $stage 'agents') $name)}
+            foreach($name in @('bastion_worker.ps1','bastion_structured.ps1','bastion_bootstrap.ps1','appliance_init.ps1','session_supervisor.ps1')) {Copy-Item -LiteralPath (Join-Path (Join-Path $stage 'release') $name) -Destination (Join-Path (Join-Path $stage 'agents') $name)}
             foreach($name in @('egw-runtime.exe','egw-askpass.exe')) {Copy-Item -LiteralPath (Join-Path (Join-Path $stage 'release') $name) -Destination (Join-Path (Join-Path $stage 'bin') $name)}
             [IO.Directory]::Move($stage,$destination);$stage=$null
         }

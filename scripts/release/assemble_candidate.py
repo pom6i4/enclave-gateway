@@ -178,7 +178,7 @@ def assemble(manifest_path,output,root=ROOT):
             or len(set(targets))!=len(targets)):raise ValueError('Invalid candidate Windows targets')
     python_files={name for name in artifacts if '/' not in name}
     from_types=[name for name in python_files if name.endswith('.whl') or name.endswith('.tar.gz')]
-    package_files={'egw-askpass.exe','egw-runtime.exe','bastion_worker.ps1','bastion_bootstrap.ps1',
+    package_files={'egw-askpass.exe','egw-runtime.exe','bastion_worker.ps1','bastion_structured.ps1','bastion_bootstrap.ps1',
                    'appliance_init.ps1','session_supervisor.ps1','verify_windows.ps1','install_windows.ps1','unsigned-manifest.json'}
     expected_files=python_files|{rid+'/'+name for rid in targets for name in package_files}
     if len(python_files)!=2 or len(from_types)!=2 or sum(name.endswith('.whl') for name in python_files)!=1 or set(artifacts)!=expected_files:

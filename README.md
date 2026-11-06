@@ -139,6 +139,8 @@ Standard; migrating an existing deployment is an operator decision.
   keys, CLI recipes, existing VM prerequisites and troubleshooting.
 - [Security architecture and Enterprise deployment](docs/SECURITY.md): trust
   boundaries, signing, attestation, roles and operational limits.
+- [Managed endpoint policies](docs/ENDPOINT-POLICY.md): the unreleased approved
+  foreground OpenSSH profile and its qualification limits.
 - [Contributing](CONTRIBUTING.md): code layout, tests and extension points.
 - [Release preparation and component compatibility](docs/RELEASING.md), with
   [unreleased changes](CHANGELOG.md): source-bound unsigned candidates and checks.

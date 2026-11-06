@@ -256,9 +256,13 @@ class QgaClient:
             sock.sendall((json.dumps({'execute':'guest-shutdown','arguments':{'mode':'powerdown'}})+'\n').encode())
 
     def exec_powershell(self, script: str, timeout_sec: float = 120.0) -> ExecResult:
+        request_data=getattr(script,"request_data",None)
         script="$ProgressPreference='SilentlyContinue';\n"+script
+        if request_data:
+            script="[Console]::InputEncoding=[Text.UTF8Encoding]::new($false);$RequestData=[Console]::In.ReadLine()|ConvertFrom-Json;\n"+script
         encoded_cmd=base64.b64encode(script.encode('utf-16le')).decode('ascii')
-        return self.exec_guest('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',encoded_cmd],timeout_sec=timeout_sec)
+        return self.exec_guest('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',encoded_cmd],
+                               input_data=(json.dumps(request_data)+'\n').encode() if request_data else None,timeout_sec=timeout_sec)
 
     def exec_guest(self,path: str,arguments=(),*,input_data: bytes | None=None,timeout_sec: float=120.0) -> ExecResult:
         if not isinstance(arguments,(list,tuple)) or not isinstance(path,str) or not path or '\0' in path or any(not isinstance(item,str) or '\0' in item for item in arguments):
@@ -545,6 +549,15 @@ class DirectHostControlChannel:
             raise ValueError("Guest path escapes direct control root")
         return target
 
+    def exec_guest(self, path, arguments=(), *, input_data=None, timeout_sec=120.0):
+        if os.name != 'nt' or not Path(path).is_absolute():
+            raise ValueError('Native guest execution requires an absolute Windows application path')
+        started=time.monotonic()
+        mark_dispatched()
+        result=subprocess.run([path,*arguments],input=input_data,capture_output=True,timeout=budget(timeout_sec,'direct.native'))
+        return ExecResult(result.returncode,result.stdout.decode('utf-8','replace').strip(),
+                          result.stderr.decode('utf-8','replace').strip(),int((time.monotonic()-started)*1000))
+
     def exec_powershell(self, script: str, timeout_sec: float = 120.0) -> ExecResult:
         started = time.monotonic()
         shell_cmd = (
@@ -552,16 +565,22 @@ class DirectHostControlChannel:
             if os.name == "nt"
             else ["sh", "-c", 'eval "$(cat)"']
         )
+        request_data=getattr(script,"request_data",None)
         request_input=script if os.name!='nt' else None
+        if request_data and os.name!='nt':
+            raise ValueError("PowerShell request data requires a Windows control channel")
         if os.name=='nt':
             bootstrap='[Console]::InputEncoding=New-Object Text.UTF8Encoding($false); & ([scriptblock]::Create([Console]::In.ReadToEnd()))'
             shell_cmd=shell_cmd[:-2]+['-Command',bootstrap]
             request_input=script
+            if request_data:
+                shell_cmd[-1]="[Console]::InputEncoding=[Text.UTF8Encoding]::new($false);$RequestData=[Console]::In.ReadLine()|ConvertFrom-Json; & ([scriptblock]::Create([Console]::In.ReadToEnd()))"
+                request_input=json.dumps(request_data)+"\n"+script
         if os.name=='nt' and self.use_native_runtime:
             from enclave_gateway.security.native import verified_runtime
             helper=verified_runtime(self.runtime_helper_path,self.trusted_signers,self.require_signed)
             shell_cmd[0]=str(Path(os.environ['SystemRoot'])/'System32/WindowsPowerShell/v1.0/powershell.exe')
-            request_input=json.dumps({'command':shell_cmd,'stdin_b64':base64.b64encode(script.encode()).decode(),'timeout_ms':max(1,int(budget(timeout_sec)*1000))})
+            request_input=json.dumps({'command':shell_cmd,'stdin_b64':base64.b64encode(request_input.encode()).decode(),'timeout_ms':max(1,int(budget(timeout_sec)*1000))})
             shell_cmd=[helper,'run']
         timeout_sec = budget(timeout_sec, "direct.exec")
         deadline = time.monotonic() + timeout_sec

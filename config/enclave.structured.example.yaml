@@ -1,0 +1,23 @@
+# Unreleased foreground profile. Administrator approval and real pins are required.
+security:
+  mode: standard
+  require_signed_agents: true
+  enforce_worker_attestation: true
+  agent_package_dir: './approved-agents'
+  worker_sha256: ''
+  trusted_signers: []
+bastion:
+  host: '10.0.1.10'
+  execution_profile: structured_only
+  spool_protocol: files
+  worker_policy_path: 'C:\ProgramData\EnclaveGateway\worker-policy.json'
+  worker_policy_sha256: ''
+provider:
+  type: custom
+  installer_path: ''
+  dst_key_path: ''
+targets:
+  app01:
+    host: '10.0.20.11'
+    user: deploy
+    via: bastion

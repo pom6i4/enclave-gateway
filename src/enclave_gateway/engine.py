@@ -141,6 +141,13 @@ class EnclaveEngine:
             owned_commands=self.config.security.owned_ssh_commands,
             runtime_helper_path=self.config.security.runtime_helper_path,
         )
+        if self.config.bastion.execution_profile=='structured_only':
+            from enclave_gateway.transports.structured import StructuredTransport,StructuredSshExecutor
+            self.rdp_vfs=StructuredTransport(self.control,self.config.bastion)
+            self.rdp_vfs.readiness_guard=self._assert_worker_ready
+            if self.config.security.enforce_worker_attestation:
+                self.rdp_vfs.attestation_guard=lambda:self.attest_worker(timeout_sec=budget(10))
+            self.bastion_ssh=StructuredSshExecutor(self.rdp_vfs,self.control,self.config.bastion,owned_commands=self.config.security.owned_ssh_commands)
         local_posix=self.config.appliance.hypervisor=='direct' and os.name!='nt' and isinstance(self.control,DirectHostControlChannel)
         self._direct_posix=local_posix
         if local_posix:
@@ -344,6 +351,40 @@ ConvertTo-Json $out -Compress -Depth 8
             report['bastion']['worker_healthy']=bool(snapshot and snapshot.get('status')=='running')
         return report
 
+    def _refresh_rdp_credentials(self, domain_user, password):
+        native=getattr(type(self.control),'exec_guest',None)
+        if not callable(native):
+            raise OperationError('credential_channel_unavailable','heal.credentials',
+                                 message='Credential refresh requires a native stdin control channel. Provision Windows Credential Manager in the approved user session.')
+        security=self.config.security
+        trusted=','.join(ps_quote(item.replace(' ','').upper()) for item in security.trusted_signers)
+        check=(f"$s=Get-AuthenticodeSignature -LiteralPath $helper;if($s.Status -ne 'Valid' -or $s.SignerCertificate.Thumbprint -notin @({trusted})){{throw 'Credential runtime publisher is not trusted'}};"
+               if security.require_signed_helpers else '')
+        if security.runtime_sha256:
+            check+=f"if((Get-FileHash -LiteralPath $helper -Algorithm SHA256).Hash.ToLowerInvariant() -cne '{security.runtime_sha256.lower()}'){{throw 'Credential runtime hash mismatch'}};"
+        probe=("$ErrorActionPreference='Stop';$helper=[Environment]::ExpandEnvironmentVariables("+ps_quote(security.runtime_helper_path)+
+               ");if(-not [IO.Path]::IsPathRooted($helper) -or -not [IO.File]::Exists($helper)){throw 'Install the approved credential runtime'};"+check+
+               "$task=Get-ScheduledTask -TaskName "+ps_quote(self.config.bastion.scheduled_task_name)+
+               ";$sid=if($task.Principal.UserId -match '^S-1-'){$task.Principal.UserId}else{([Security.Principal.NTAccount]::new($task.Principal.UserId)).Translate([Security.Principal.SecurityIdentifier]).Value};"+
+               "@{runtime=$helper;expected_sid=$sid}|ConvertTo-Json -Compress")
+        result=self.control.exec_powershell(probe,timeout_sec=budget(15,'heal.credentials'))
+        try:
+            info=json.loads(result.stdout)
+            if result.exit_code or not isinstance(info,dict) or not isinstance(info.get('runtime'),str) or not re.fullmatch(r'S-1-(?:[0-9]+-)*[0-9]+',info['expected_sid']):
+                raise ValueError('Invalid credential runtime identity')
+        except (ValueError,KeyError,TypeError) as error:
+            raise OperationError('credential_runtime_unavailable','heal.credentials',message='Approve the native credential runtime and the managed RDP task user before refreshing credentials.') from error
+        request={'expected_sid':info['expected_sid'],'target':'TERMSRV/'+self.config.bastion.host,
+                 'username':domain_user,'password':password}
+        try:
+            result=native(self.control,info['runtime'],['credentials'],input_data=json.dumps(request).encode(),timeout_sec=budget(15,'heal.credentials'))
+            acknowledgement=json.loads(result.stdout)
+            if result.exit_code or not isinstance(acknowledgement,dict) or set(acknowledgement)!={'credential_updated'} or acknowledgement['credential_updated'] is not True:
+                raise ValueError('Credential update was not acknowledged')
+        except Exception as error:
+            raise OperationError('credential_update_failed','heal.credentials',indeterminate=True,
+                                 message='Native credential update was not acknowledged. Verify the managed user session and stored credential before retrying; no script fallback was used.') from error
+
     @tracked("heal")
     def heal(self, *, update_credentials: bool = False, actor: str = "cli") -> ExecResult:
         """Self-heal clock drift, MTU, RDP UDP policy, interactive credentials, and Bastion RDP session."""
@@ -366,10 +407,8 @@ ConvertTo-Json $out -Compress -Depth 8
         password = self.vault.get(self.config.bastion.password_env) if self.config.bastion.enabled else ''
         domain_user = f"{domain}\\{user}" if domain and user else user
 
-        cred_args = ""
         if update_credentials and domain_user and password:
-            pw_b64 = base64.b64encode(password.encode("utf-8")).decode("ascii")
-            cred_args = f"-RdpDomainUser {ps_quote(domain_user)} -RdpPasswordB64 '{pw_b64}'"
+            self._refresh_rdp_credentials(domain_user,password)
 
         host_epoch = int(time.time())
         routes_csv = ",".join(self.config.provider.routes)
@@ -384,7 +423,7 @@ ConvertTo-Json $out -Compress -Depth 8
             combined_ps+=f"""
 & {{
 {sup_script}
-}} -BastionHost {ps_quote(self.config.bastion.host)} -BastionPort {self.config.bastion.port} -SpoolDir {ps_quote(self.config.bastion.appliance_spool_dir)} -ScheduledTaskName {ps_quote(self.config.bastion.scheduled_task_name)} -HeartbeatMaxAgeSec {self.config.bastion.heartbeat_max_age_sec} -SpoolProtocol {self.config.bastion.spool_protocol.title()} {cred_args} -ForceReconnect
+}} -BastionHost {ps_quote(self.config.bastion.host)} -BastionPort {self.config.bastion.port} -SpoolDir {ps_quote(self.config.bastion.appliance_spool_dir)} -ScheduledTaskName {ps_quote(self.config.bastion.scheduled_task_name)} -HeartbeatMaxAgeSec {self.config.bastion.heartbeat_max_age_sec} -SpoolProtocol {self.config.bastion.spool_protocol.title()} -ForceReconnect
 """
         res = self._scrub_result(self.control.exec_powershell(combined_ps, timeout_sec=60.0))
         if deployment:
@@ -1046,7 +1085,8 @@ Write-Output ("DIAG_CLOCK:"+$epoch+":UDP:"+[int]$udp)
                 try:
                     if self.config.security.enforce_worker_attestation:
                         self.attest_worker();add('worker_attestation',True,'Fresh signed worker/runtime/SID evidence verified')
-                    ping=self.rdp_vfs.exec_bastion("Write-Output 'VFS_PONG'",timeout_sec=45)
+                    ping=(self.rdp_vfs.ping(timeout_sec=45) if self.config.bastion.execution_profile=='structured_only'
+                          else self.rdp_vfs.exec_bastion("Write-Output 'VFS_PONG'",timeout_sec=45))
                     wrk_ok=ping.exit_code==0 and 'VFS_PONG' in ping.stdout
                     detail='VFS round trip='+str(ping.duration_ms)+'ms' if wrk_ok else ping.stderr
                 except Exception as error:wrk_ok=False;detail=str(error)
@@ -1082,7 +1122,7 @@ Write-Output ("DIAG_CLOCK:"+$epoch+":UDP:"+[int]$udp)
         # The controller can clean expired unclaimed requests even when the
         # Bastion queue or the redirected drive is unavailable.
         try:
-            app=self.control.exec_powershell(cleanup_script(self.config.bastion.appliance_spool_dir),timeout_sec=budget(15,'clean.appliance'))
+            app=self.control.exec_powershell(cleanup_script(self.config.bastion.appliance_spool_dir,execution_profile=self.config.bastion.execution_profile),timeout_sec=budget(15,'clean.appliance'))
             app_ok=app.exit_code==0
             if app.stdout.startswith('APPLIANCE_CLEAN_OK:'):
                 details=json.loads(app.stdout.split(':',1)[1])
@@ -1094,8 +1134,11 @@ Write-Output ("DIAG_CLOCK:"+$epoch+":UDP:"+[int]$udp)
         bastion_cleanup='disabled' if not self.config.bastion.enabled else 'skipped_worker_stopped' if stopped else 'failed'
         if self.config.bastion.enabled and not stopped:
             try:
-                self.rdp_vfs.close_mux_sessions(timeout_sec=45)
-                result=self.rdp_vfs.exec_bastion("""
+                if self.config.bastion.execution_profile=='structured_only':
+                    result=self.rdp_vfs.clean(timeout_sec=45)
+                else:
+                    self.rdp_vfs.close_mux_sessions(timeout_sec=45)
+                    result=self.rdp_vfs.exec_bastion("""
 $stage=Join-Path $env:LOCALAPPDATA 'EnclaveGateway\\stage'
 if([IO.Directory]::Exists($stage)){
  foreach($file in [IO.Directory]::EnumerateFiles($stage)){
@@ -1380,7 +1423,9 @@ Write-Output 'BASTION_CLEAN_OK'
         settings=self.config.security
         return verify(evidence,nonce,expected_sha256=settings.worker_sha256,
                       trusted_signers=settings.trusted_signers,require_signed=settings.require_signed_agents,
-                      expected_account=settings.worker_account,require_process_isolation=settings.require_process_isolation,expected_runtime_sha256=settings.runtime_sha256,expected_version=settings.worker_version)
+                      expected_account=settings.worker_account,require_process_isolation=settings.require_process_isolation,expected_runtime_sha256=settings.runtime_sha256,expected_version=settings.worker_version,
+                      expected_execution_profile='structured_only' if self.config.bastion.execution_profile=='structured_only' else '',
+                      expected_policy_sha256=self.config.bastion.worker_policy_sha256 if self.config.bastion.execution_profile=='structured_only' else '')
 
     def _scoped_sync(self,direction,local_dir,node,remote_dir,*,as_root,exclude,timeout_sec,actor):
         from enclave_gateway.agents.rooted_fs import request
@@ -1476,6 +1521,7 @@ Write-Output 'PATH_GRANT_OK'
                 "tools": {name: bool(shutil.which(name)) for name in ("ssh", "pwsh", "powershell.exe", "qemu-img")},
                 "provider": provider_adapter(self.config.provider.type).capabilities(),
                 "virtualization":ApplianceHypervisor.tpm_capabilities(),
+                "bastion_execution": {"profile":self.config.bastion.execution_profile,"arbitrary_powershell":self.config.bastion.execution_profile!='structured_only',"tcp_mux":self.config.bastion.execution_profile!='structured_only',"edr_qualified":False},
                 "transactions": {"durable": True, "replay_ambiguous": False, "cancellation": "requested-until-confirmed"},
                 "security": {"signed_helper_required": self.config.security.require_signed_helpers,
                              "signed_agents_required": self.config.security.require_signed_agents,

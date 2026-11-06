@@ -756,3 +756,11 @@ For a lab with two Windows guests, use independently installed or correctly
 Sysprep-generalized images. Duplicate machine SIDs can cause RDP authentication
 to fail even with the correct password. Keep Windows identity checks enabled;
 see [Microsoft's duplicate SID guidance](https://support.microsoft.com/en-au/servicing/os/windows/docs/2025/10/kerberos-and-ntlm-authentication-failures-due-to-duplicate-sids).
+
+## Managed endpoint policies
+
+For an administrator-approved foreground worker without Bastion autostart or
+custom executables, see [the endpoint-policy guide](ENDPOINT-POLICY.md).
+The unreleased `structured_only` profile rejects unsupported operations and
+never falls back to the universal worker. Its Windows and EDR acceptance is
+separate from the portable interpreter tests.

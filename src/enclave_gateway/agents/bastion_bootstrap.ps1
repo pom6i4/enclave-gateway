@@ -9,6 +9,8 @@ param(
     [string]$StateRoot = '',
     [ValidateSet('Files','Stream')][string]$SpoolProtocol = 'Files',
     [ValidateRange(250,30000)][int]$HeartbeatIntervalMs = 5000,
+    [ValidateRange(1,3600)][int]$RecoveryTimeoutSec = 60,
+    [ValidateRange(1,100)][int]$MaxRecoveryAttempts = 5,
     [switch]$MigrateLegacyState,
     [string]$RuntimeHelper = '',
     [string[]]$TrustedSignerThumbprints = @(),
@@ -38,6 +40,7 @@ function Write-AutostartFile([string]$Path,[byte[]]$Bytes,[string]$CopyFrom='') 
     }finally{if([IO.File]::Exists($temporary)){[IO.File]::Delete($temporary)}}
 }
 function Register-UserAutostart {
+    Write-Warning 'USER_AUTOSTART_POLICY: HKCU Run persistence and private directory ACL provisioning require endpoint administrator approval. No EDR compatibility is implied.'
     if($env:OS -ne 'Windows_NT'){throw 'HKCU autostart requires Windows'}
     if($Mode -eq 'Custom' -or $AllowUnsignedLab){throw 'Autostart requires named Standard/Enterprise mode without unsigned lab overrides'}
     $script:InstallDir=$ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath([Environment]::ExpandEnvironmentVariables($InstallDir))
@@ -196,7 +199,7 @@ if ($RegisterStartup) {
     $principal=New-ScheduledTaskPrincipal -UserId $sid -LogonType Interactive -RunLevel Limited
     $options=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
     Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($trigger,$reconnect) -Principal $principal -Settings $options -Force | Out-Null
-    Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'EnclaveBastionWorker' -ErrorAction SilentlyContinue
+    Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'EnclaveGatewayWorker' -ErrorAction SilentlyContinue
     # One managed resident instance owns this SID's startup and reconnects.
     # Deployment restarts that instance; it must not launch a second foreground
     # worker alongside the scheduled one.
@@ -222,6 +225,7 @@ if (($UseStartupConfiguration -or $UseAutostartConfiguration) -and $SourceSpool.
 # Only a typed channel fault with a previously validated local journal can retry.
 $approvedWorkerHash=(Get-FileHash -LiteralPath $workerSrc -Algorithm SHA256).Hash
 $expectedBinding=''
+$recoveryStarted=$null;$recoveryAttempts=0
 $supervisorMutex=$null;$supervisorHeld=$false
 try{
 if($SpoolProtocol -eq 'Stream'){
@@ -234,6 +238,7 @@ if($SpoolProtocol -eq 'Stream'){
 while($true){
     if($StopFile -and [IO.File]::Exists($StopFile)){break}
     try{
+        $workerStarted=[DateTime]::UtcNow
         if((Get-FileHash -LiteralPath $workerSrc -Algorithm SHA256).Hash -cne $approvedWorkerHash){throw 'Worker bytes changed during supervision; restage the approved package'}
         if($RequireSignedAgents -and -not $AllowUnsignedLab){Assert-TrustedScript $workerSrc;Assert-TrustedScript $PSCommandPath}
         if($ProcessIsolation -and -not $AllowUnsignedLab){Assert-TrustedScript $RuntimeHelper}
@@ -243,6 +248,10 @@ while($true){
         $fault=$_.Exception
         while($fault -and $fault.Data['EGW.StreamDisconnected'] -ne $true){$fault=$fault.InnerException}
         if($SpoolProtocol -ne 'Stream' -or -not $fault -or $fault.Data['EGW.StorageBinding'] -cnotmatch '^[a-f0-9]{64}$'){throw}
+        if(([DateTime]::UtcNow-$workerStarted).TotalSeconds -ge $RecoveryTimeoutSec){$recoveryStarted=$null;$recoveryAttempts=0}
+        if($null -eq $recoveryStarted){$recoveryStarted=[DateTime]::UtcNow}
+        $recoveryAttempts++
+        if($recoveryAttempts -gt $MaxRecoveryAttempts){throw 'STREAM_RECOVERY_EXHAUSTED: repeated channel failures; preserve evidence and review endpoint policy before manual restart'}
         $bindingHash=[string]$fault.Data['EGW.StorageBinding']
         if($expectedBinding -and $expectedBinding -cne $bindingHash){throw 'WORKER_JOURNAL_IDENTITY_MISMATCH: supervisor binding changed'}
         $expectedBinding=$bindingHash;$MigrateLegacyState=$false
@@ -250,6 +259,7 @@ while($true){
     }
     $attempt=0
     while($true){
+        if(([DateTime]::UtcNow-$recoveryStarted).TotalSeconds -ge $RecoveryTimeoutSec){throw 'STREAM_RECOVERY_EXHAUSTED: channel recovery deadline expired; no commands were replayed'}
         $delay=@(1000,2000,5000)[[Math]::Min($attempt,2)];$attempt++
         $until=[DateTime]::UtcNow.AddMilliseconds($delay)
         while([DateTime]::UtcNow -lt $until){

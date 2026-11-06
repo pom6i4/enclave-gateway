@@ -1,0 +1,16 @@
+{
+  "revision": 1,
+  "owner_sid": "S-1-5-21-1000-1001",
+  "targets": {
+    "app01": {
+      "host": "10.0.20.11",
+      "port": 22,
+      "user": "deploy",
+      "key_path": "C:\\Users\\operator\\.ssh\\id_ed25519",
+      "known_hosts_path": "C:\\Users\\operator\\.ssh\\known_hosts",
+      "allow_exec": true,
+      "allow_transfer": true,
+      "allow_sudo": false
+    }
+  }
+}

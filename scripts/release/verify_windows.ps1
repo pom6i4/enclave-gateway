@@ -23,7 +23,7 @@ $manifest=Get-Content -LiteralPath (Join-Path $PackageDir 'signature-manifest.js
 if ($manifest.revision -ne 2 -or $manifest.sequence -isnot [int] -or $manifest.sequence -lt 1 -or $manifest.channel -cnotmatch '^[a-z0-9][a-z0-9-]{0,31}$' -or $manifest.status -ne 'signed' -or -not $manifest.files.Count) { throw 'A signed manifest is required' }
 $root=(Resolve-Path -LiteralPath $PackageDir).Path
 $expected=@{}
-$required=@('egw-askpass.exe','egw-runtime.exe','bastion_worker.ps1','bastion_bootstrap.ps1','appliance_init.ps1','session_supervisor.ps1','verify_windows.ps1','install_windows.ps1')
+$required=@('egw-askpass.exe','egw-runtime.exe','bastion_worker.ps1','bastion_structured.ps1','bastion_bootstrap.ps1','appliance_init.ps1','session_supervisor.ps1','verify_windows.ps1','install_windows.ps1')
 if($manifest.files.Count -ne $required.Count){throw 'Incomplete release manifest'}
 if((Get-Item -LiteralPath $root).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Package root cannot be a reparse point'}
 foreach ($item in $manifest.files) {

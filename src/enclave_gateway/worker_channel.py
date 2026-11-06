@@ -100,4 +100,11 @@ def require_running_worker(control,spec):
         raise OperationError('worker_protocol_mismatch','vfs.preflight',tx_id=context.tx_id if context else '',node='@bastion',
                              message='Worker spool protocol differs from bastion.spool_protocol. Stop the worker, stage agents and start the printed command using the same configuration. No request was published.')
 
+    if spec.execution_profile=='structured_only':
+        raw=reader(path,truncate_after_read=False) if callable(reader) else None
+        try:profile=json.loads(raw.decode('utf-8-sig')).get('execution_profile') if raw else None
+        except (ValueError,TypeError,AttributeError):profile=None
+        if profile!='structured_only':
+            raise OperationError('worker_profile_mismatch','vfs.preflight',node='@bastion',message='Start the approved foreground structured worker; legacy workers cannot receive structured requests.')
+
     return state

@@ -3,7 +3,11 @@ from enclave_gateway.security.quoting import ps_quote
 from enclave_gateway.control.stream_pruner import LOCAL_STREAM_PRUNER
 
 
-def cleanup_script(spool):
+def cleanup_script(spool, *, execution_profile='legacy'):
+    if execution_profile not in ('legacy','structured_only'):raise ValueError('Unknown cleanup profile')
+    binding='worker_structured_storage.json' if execution_profile=='structured_only' else 'worker_storage.json'
+    valid=("$meta.revision -eq 1 -and $meta.owner_sha256 -cmatch '^[a-f0-9]{64}$' -and [IO.Directory]::Exists((Join-Path $spool '.structured-transactions'))"
+           if execution_profile=='structured_only' else '$meta.protocol -eq 2')
     return r'''$ErrorActionPreference='Stop'
 $spool=SPOOL;$removed=0;$deferred=0;$errors=0;$lease=$null;$stopped=$false
 $streamRemoved=0;$streamDeferred=0;$streamPreserved=0;$streamCleanup='worker_not_stopped';$activeInstance=''
@@ -16,11 +20,11 @@ if($env:OS -eq 'Windows_NT'){
  while($parent){if($parent.Exists -and ($parent.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Linked Appliance cleanup path rejected'};$parent=$parent.Parent}
 }
 if([IO.Directory]::Exists($spool)){
- $binding=Join-Path $spool 'worker_storage.json';$session=Join-Path $spool '.worker-session'
+ $binding=Join-Path $spool 'STORAGE_BINDING';$session=Join-Path $spool '.worker-session'
  if([IO.File]::Exists($binding) -and [IO.File]::Exists($session)){
   try{
    $meta=[IO.File]::ReadAllText($binding)|ConvertFrom-Json
-   if($meta.protocol -eq 2){$lease=[IO.File]::Open($session,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None);$stopped=$true}
+   if(VALID_STORAGE_BINDING){$lease=[IO.File]::Open($session,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None);$stopped=$true}
   }catch{}
  }
  try{
@@ -89,4 +93,4 @@ if([IO.Directory]::Exists($spool)){
 }
 Write-Output ('APPLIANCE_CLEAN_OK:'+(@{removed=$removed;deferred_processing=$deferred;errors=$errors;stopped_worker_verified=$stopped;stream_cleanup=$streamCleanup;stream_removed=$streamRemoved;stream_preserved=$streamPreserved;stream_deferred=$streamDeferred;stream_error_codes=$streamErrorCodes}|ConvertTo-Json -Compress))
 if($errors){exit 1}
-'''.replace('STREAM_HELPER',LOCAL_STREAM_PRUNER).replace('SPOOL',ps_quote(spool))
+'''.replace('STREAM_HELPER',LOCAL_STREAM_PRUNER).replace('VALID_STORAGE_BINDING',valid).replace('STORAGE_BINDING',binding).replace('SPOOL',ps_quote(spool))

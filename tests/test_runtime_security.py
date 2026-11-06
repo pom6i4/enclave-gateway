@@ -121,9 +121,9 @@ class IsolationTests(unittest.TestCase):
             fake.write_text('#!'+sys.executable+"\nimport subprocess,sys\ndata=sys.stdin.buffer.read()\nassert len(data)>100000\nr=subprocess.run(['sh','-c',sys.argv[-1]],input=data,capture_output=True)\nsys.stdout.buffer.write(r.stdout);sys.stderr.buffer.write(r.stderr);sys.exit(r.returncode)\n")
             fake.chmod(0o700)
             script=build_powershell_ssh_hop_script(TargetNodeSpec('fixture','127.0.0.1',user='fixture'),"#"+'x'*100000+"\nprintf 'тест-готово'\n")
-            file=root/'script.ps1';file.write_text(script)
+            file=root/'script.ps1';file.write_text('$RequestData=[Console]::In.ReadLine()|ConvertFrom-Json;\n'+script)
             environment={**os.environ,'PATH':str(root)+os.pathsep+os.environ['PATH']}
-            result=subprocess.run([os.environ['EGW_TEST_POWERSHELL'],'-NoProfile','-File',str(file)],capture_output=True,text=True,env=environment,timeout=20)
+            result=subprocess.run([os.environ['EGW_TEST_POWERSHELL'],'-NoProfile','-File',str(file)],input=json.dumps(script.request_data)+'\n',capture_output=True,text=True,env=environment,timeout=20)
             self.assertEqual(result.returncode,0,result.stderr)
             self.assertEqual(result.stdout,'тест-готово')
 

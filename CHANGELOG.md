@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Endpoint policy hardening
+
+- Remove command-history suppression from worker execution and SSH wrappers.
+- Carry legacy SSH credentials and stdin separately from PowerShell source.
+  Reject mismatched older workers before launching SSH.
+- Refresh Appliance RDP credentials through native Windows Credential Manager
+  with SID-bound session selection and stdin-only input. Windows acceptance of
+  this operation remains pending.
+- Add an offline autostart-removal command that preserves files and processes.
+  Warn on opt-in persistence and bound repeated Stream recovery.
+- Add an explicit signed foreground `structured_only` worker for direct Linux
+  targets through system OpenSSH. It uses an independently approved local policy
+  and supports Files without startup registration or AppData code installation.
+  Enterprise process isolation is not claimed. Real Windows/RDP/KES qualification
+  remains pending; portable tests do not establish endpoint approval.
+
+
 ### Configuration and security
 
 - Discover global/XDG configuration with explicit environment overrides; keep

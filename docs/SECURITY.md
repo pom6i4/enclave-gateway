@@ -10,7 +10,7 @@ RDP redirected spool and executes as the RDP user. SSH grants access to a separa
 target account. Treat the control sockets, configuration, credentials, spool and
 release material as privileged resources; protect their parents as well as files.
 
-Standard mode trusts that operator, session and all spool writers. Its PowerShell
+Standard mode trusts that operator, session and all spool writers. The legacy worker's PowerShell
 runspaces share one process, filesystem permissions and environment. Secret
 scrubbing and destructive-command confirmations help prevent accidents; they do
 not sandbox an adversarial script. Remote/native subprocess lifetime cannot be
@@ -36,6 +36,16 @@ A native owned job terminates its local process tree on deadline/cancellation or
 supervisor closure. This is not remote effect rollback: an SSH peer, database or
 service may have completed an action before disconnect. Query the transaction
 journal and reconcile indeterminate operations instead of blindly replaying them.
+
+## Endpoint policy
+
+The unreleased `structured_only` foreground profile uses an independently
+approved Bastion policy and the Microsoft-signed system OpenSSH client.
+It does not install code in AppData or register startup. Request data cannot
+select a Bastion interpreter or arbitrary SSH options. It supports Files only
+and is a signed Standard deployment, not Enterprise native process isolation.
+See [endpoint preparation and qualification boundaries](ENDPOINT-POLICY.md).
+Compatibility with a particular EDR policy requires separate acceptance.
 
 ## Approve a release on a build workstation
 
@@ -128,8 +138,11 @@ for exact backend-map constraints and runtime fixtures.
 Keep StrictHostKeyChecking enabled and approve fingerprints out of band. The SSH
 client may run on Bastion, Appliance or Host; [GUIDE.md](GUIDE.md#ssh-trust)
 distinguishes the corresponding key stores. Base64 is encoding, not encryption.
-The native askpass helper keeps passwords out of command arguments and temporary
-password files, but privileged OS/process inspection remains in the trust boundary.
+The native askpass helper returns passwords through its inherited pipe. Legacy
+interpreter requests carry sensitive data separately from PowerShell source.
+The protected spool still carries sensitive data. Privileged OS/process
+inspection remains in the trust boundary. Endpoint logs can capture secrets
+that users explicitly include in their own commands.
 Standard key-only authentication does not retrieve a configured backup SSH
 password when no askpass helper is configured. Password authentication still needs
 an approved helper; this choice never weakens Custom/Enterprise helper checks.
@@ -165,7 +178,7 @@ heartbeat and their generations are never automatically adopted for deletion.
 Support snapshots use an allow-list rather than copying and attempting to redact
 arbitrary logs; review their digest before saving and sharing them.
 
-Redirected workers execute a verified local copy and retain durable request
+Legacy redirected workers execute a verified local copy and retain durable request
 identities on Bastion, with a spool binding to the original local journal owner.
 Migration preserves legacy tombstones; loss of the bound local journal fails
 closed. Backup freshness, coordinated snapshot rollback and remote effect

@@ -14,6 +14,7 @@ from typing import Callable
 
 from enclave_gateway.operations.context import budget, mark_dispatched, timed, owned_cleanup
 from enclave_gateway.config import TargetNodeSpec
+from enclave_gateway.operations.request import PowerShellRequest
 from enclave_gateway.control.qga_client import ExecResult
 from enclave_gateway.security.quoting import ps_quote, validate_endpoint
 
@@ -31,7 +32,7 @@ def build_remote_bash_invocation(script: str, *, as_root: bool = False,
             raise ValueError("sudo is unsupported for Windows targets")
         payload = "[Console]::OutputEncoding = [Text.Encoding]::UTF8\n$ErrorActionPreference='Stop'\n$global:LASTEXITCODE=0\n" + script + "\nif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"
         return "powershell.exe -NoProfile -NonInteractive -EncodedCommand " + base64.b64encode(payload.encode("utf-16le")).decode("ascii")
-    payload = "unset HISTFILE; export HISTFILE=/dev/null;\n" + script.replace("\r\n", "\n")
+    payload = script.replace("\r\n", "\n")
     encoded = base64.b64encode(payload.encode()).decode("ascii")
     command = f"{_build_b64_decode_expr(encoded)} | tr -d '\\r' | (command -v bash >/dev/null 2>&1 && exec bash || exec sh)"
     if not as_root:
@@ -89,7 +90,7 @@ def _build_ssh_common_opts(node, *, port_flag="-p", has_ssh_password=False, conn
 def _wrap_with_askpass_ps(inner_ps: str, ssh_password: str, token_id: str, *, stage_dir=r"%LOCALAPPDATA%\EnclaveGateway\stage",
                           helper_path=r"%LOCALAPPDATA%\EnclaveGateway\bin\egw-askpass.exe", trusted_signers=(), require_signed=True) -> str:
     if not ssh_password:
-        return inner_ps.strip()
+        return PowerShellRequest(inner_ps.strip(), getattr(inner_ps, "request_data", {}))
     encoded = base64.b64encode(ssh_password.encode()).decode("ascii")
     signers = ",".join(ps_quote(value.replace(" ", "").upper()) for value in trusted_signers)
     signature_check = f"""
@@ -98,7 +99,7 @@ def _wrap_with_askpass_ps(inner_ps: str, ssh_password: str, token_id: str, *, st
         throw 'Credential helper requires a valid signature from an explicitly trusted publisher'
     }}
 """ if require_signed else ""
-    return f"""
+    source = f"""
 $askMutex = New-Object Threading.Mutex($false, "EnclaveAskpass_$PID")
 $askAcquired = $false
 $oldAsk = @{{}}
@@ -111,7 +112,8 @@ try {{
     foreach ($key in @('SSH_ASKPASS','SSH_ASKPASS_REQUIRE','DISPLAY','EGW_ASKPASS_B64')) {{
         $oldAsk[$key]=[Environment]::GetEnvironmentVariable($key,'Process')
     }}
-    $env:EGW_ASKPASS_B64='{encoded}'
+    if (-not $RequestData.ssh_password_b64) {{throw 'Credential request data unavailable'}}
+    $env:EGW_ASKPASS_B64=[string]$RequestData.ssh_password_b64
     $env:SSH_ASKPASS=$askHelper
     $env:SSH_ASKPASS_REQUIRE = 'force'
     $env:DISPLAY='localhost:0.0'
@@ -124,6 +126,7 @@ try {{
     $askMutex.Dispose()
 }}
 """.strip()
+    return PowerShellRequest(source, {**getattr(inner_ps, "request_data", {}), "ssh_password_b64": encoded})
 
 
 def build_powershell_ssh_hop_script(node, bash_script, *, as_root=False, ssh_password="", sudo_password="",
@@ -139,7 +142,7 @@ def build_powershell_ssh_hop_script(node, bash_script, *, as_root=False, ssh_pas
         shell="if command -v bash >/dev/null 2>&1; then exec bash -s; else exec sh -s; fi"
         remote=('sudo -S -p '+shlex.quote('')+' sh -c '+shlex.quote(shell)) if as_root else shell
         if as_root and any(char in sudo_password for char in ('\r','\n','\0')): raise ValueError('sudo password must be a single line')
-        payload=(sudo_password+'\n' if as_root else '')+'unset HISTFILE\n'+bash_script.replace('\r','')+'\n'
+        payload=(sudo_password+'\n' if as_root else '')+bash_script.replace('\r','')+'\n'
     arguments=['-T']+_ssh_args(node,has_ssh_password=bool(ssh_password),connect_timeout_sec=connect_timeout_sec,jump_node=jump_node)+[_node_uri(node),remote]
     encoded=base64.b64encode(payload.encode()).decode()
     # A resident worker captures PowerShell objects; standalone callers retain
@@ -154,6 +157,7 @@ def build_powershell_ssh_hop_script(node, bash_script, *, as_root=False, ssh_pas
         stdout_b64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($outText));
         stderr_b64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($errText))} | ConvertTo-Json -Compress'''
     script=f"""
+if ($null -eq $RequestData -or $null -eq $RequestData.ssh_stdin_b64) {{throw 'SSH request data unavailable; no process was started'}}
 $psi=[Diagnostics.ProcessStartInfo]::new()
 $psi.FileName='ssh.exe'
 $psi.Arguments={ps_quote(subprocess.list2cmdline(arguments))}
@@ -164,7 +168,7 @@ $proc=[Diagnostics.Process]::new(); $proc.StartInfo=$psi
 try {{
     [void]$proc.Start()
     $output=$proc.StandardOutput.ReadToEndAsync(); $errorOutput=$proc.StandardError.ReadToEndAsync()
-    $bytes=[Convert]::FromBase64String('{encoded}')
+    $bytes=[Convert]::FromBase64String([string]$RequestData.ssh_stdin_b64)
     $proc.StandardInput.BaseStream.Write($bytes,0,$bytes.Length)
     $proc.StandardInput.Close()
     $proc.WaitForExit()
@@ -172,7 +176,7 @@ try {{
     {publish}
 }} finally {{try {{if (-not $proc.HasExited) {{$proc.Kill()}}}} catch {{}}; $proc.Dispose()}}
 """
-    return _wrap_with_askpass_ps(script, ssh_password, secrets.token_hex(12), stage_dir=stage_dir, helper_path=helper_path, trusted_signers=trusted_signers, require_signed=require_signed)
+    return _wrap_with_askpass_ps(PowerShellRequest(script, {"ssh_stdin_b64": encoded}), ssh_password, secrets.token_hex(12), stage_dir=stage_dir, helper_path=helper_path, trusted_signers=trusted_signers, require_signed=require_signed)
 
 
 def _hash_sh(path: str) -> str:

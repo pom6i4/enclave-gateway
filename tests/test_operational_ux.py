@@ -110,9 +110,13 @@ class OperationalTests(unittest.TestCase):
 class LocalPowerShellControl:
     def __init__(self,shell,translate_paths=True):self.shell=shell;self.translate_paths=translate_paths
     def exec_powershell(self,script,timeout_sec=60):
+        request_data=getattr(script,"request_data",None)
         if os.name!='nt' and self.translate_paths:script=script.replace('\\','/')
         started=time.monotonic()
         bootstrap='[Console]::InputEncoding=New-Object Text.UTF8Encoding($false); & ([scriptblock]::Create([Console]::In.ReadToEnd()))'
+        if request_data:
+            bootstrap='[Console]::InputEncoding=[Text.UTF8Encoding]::new($false);$RequestData=[Console]::In.ReadLine()|ConvertFrom-Json; & ([scriptblock]::Create([Console]::In.ReadToEnd()))'
+            script=json.dumps(request_data)+'\n'+script
         result=subprocess.run([self.shell,'-NoProfile','-NonInteractive','-Command',bootstrap],input=script,
                               encoding='utf-8',capture_output=True,timeout=timeout_sec)
         # PowerShell -Command - emits terminal escapes on some editions.

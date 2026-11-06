@@ -8,6 +8,29 @@ from enclave_gateway.operations.context import mark_dispatched
 from enclave_gateway.security.quoting import ps_quote
 
 
+def unregister_autostart_command():
+    """Print a local recovery action that needs neither worker nor RDP spool.
+
+    Remove only a recognized registration. Preserve running processes and all
+    files, including journals and quarantine evidence, for administrator review.
+    """
+    return r'''$ErrorActionPreference='Stop'
+$starter=Join-Path $env:LOCALAPPDATA 'EnclaveGateway\start_worker.ps1'
+$key=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Run',$true)
+try {
+ if($key){
+  $value=$key.GetValue('EnclaveGatewayWorker',$null)
+  if($null -ne $value){
+   $quoted='"'+$starter+'"'
+   if($value -isnot [string] -or -not $value.Contains($quoted) -or $value -notmatch '(?i)\s-File\s' -or $value -notmatch '\s-UseAutostartConfiguration(?:\s|$)'){throw 'Unrecognized worker startup value; preserve it for administrator review'}
+   $key.DeleteValue('EnclaveGatewayWorker',$false)
+   if($null -ne $key.GetValue('EnclaveGatewayWorker',$null)){throw 'Autostart removal readback failed'}
+  }
+ }
+ Write-Output 'AUTOSTART_UNREGISTERED; running processes and durable state were preserved'
+} finally {if($key){$key.Dispose()}}'''
+
+
 def starter_configuration(mode='standard'):
     if mode not in ('standard','enterprise'):raise ValueError('Select standard or enterprise')
     security={'mode':mode}
@@ -46,7 +69,7 @@ def starter_yaml(mode='standard'):
 
 
 def key_only_authentication(config,node):
-    return config.security.mode=='standard' and bool(node.ssh_key_path) and not config.security.askpass_helper_path
+    return config.bastion.execution_profile=='structured_only' or (config.security.mode=='standard' and bool(node.ssh_key_path) and not config.security.askpass_helper_path)
 
 
 def authentication_warnings(config):
@@ -80,7 +103,8 @@ def configuration_summary(config):
             'ssh_authentication':{name:('key-only' if key_only_authentication(config,node) else 'password-helper' if node.password_env else 'key-or-agent') for name,node in config.targets.items()},
             'provider_type':config.provider.type,'provider_lifecycle_configured':bool(config.provider.lifecycle_manifest),
             'spool_protocol':config.bastion.spool_protocol,'valid':True,'security_mode':security.mode,'targets':list(config.targets),'ssh_execution_hops':routes,
-            'execution_model':'owned-process-job' if security.require_process_isolation else 'in-process-runspace',
+            'execution_profile':config.bastion.execution_profile,
+            'execution_model':'foreground-openssh' if config.bastion.execution_profile=='structured_only' else 'owned-process-job' if security.require_process_isolation else 'in-process-runspace',
             'signed_agents':security.require_signed_agents,'signed_helpers':security.require_signed_helpers,
             'worker_attestation':security.enforce_worker_attestation,'owned_ssh_commands':security.owned_ssh_commands,
             'next_steps':next_steps+[
@@ -93,6 +117,20 @@ def configuration_summary(config):
 def agent_bundle(config, *, execution_policy='',migrate_legacy_state=False,persist_autostart=False):
     if not config.bastion.enabled:raise ValueError('Agent deployment requires bastion.enabled: true')
     security=config.security
+    if config.bastion.execution_profile=='structured_only':
+        if execution_policy or migrate_legacy_state or persist_autostart:
+            raise ValueError('structured_only rejects startup registration, execution-policy changes and legacy journal adoption')
+        folder=Path(security.agent_package_dir).expanduser() if security.agent_package_dir else Path(__file__).parent/'agents'
+        data=(folder/'bastion_structured.ps1').read_bytes()
+        digest=hashlib.sha256(data).hexdigest()
+        if not security.require_signed_agents or digest!=security.worker_sha256.lower() or not security.trusted_signers:
+            raise ValueError('structured_only requires the approved signed script package, worker hash and trusted publishers')
+        hashes={'bastion_structured.ps1':digest};identity=hashlib.sha256(json.dumps(hashes,sort_keys=True).encode()).hexdigest()
+        script=config.bastion.bastion_spool_dir.rstrip('\\/')+'\\agents\\'+identity+'\\bastion_structured.ps1'
+        command='& '+ps_quote(script)+' -SpoolDir '+ps_quote(config.bastion.bastion_spool_dir)
+        command+=' -PolicyPath '+ps_quote(config.bastion.worker_policy_path)+' -PolicySha256 '+ps_quote(config.bastion.worker_policy_sha256)
+        command+=' -TrustedSignerThumbprints @('+','.join(ps_quote(v) for v in security.trusted_signers)+')'
+        return {'bastion_structured.ps1':data},hashes,identity,command
     if execution_policy and (execution_policy!='RemoteSigned' or security.mode!='standard' or security.require_signed_agents):raise ValueError('Process RemoteSigned is an explicit Standard-only option; signed modes retain endpoint policy')
     if security.mode=='custom':raise ValueError('Agent deployment requires explicit security.mode: standard or enterprise; custom configurations are unchanged.')
     signed=security.require_signed_agents or security.mode=='enterprise'
@@ -158,7 +196,7 @@ function Assert-Bundle([string]$folder){
             trusted=','.join(ps_quote(t.replace(' ','').upper()) for t in config.security.trusted_signers)
             checks+="$s=Get-AuthenticodeSignature -LiteralPath $p;if($s.Status -ne 'Valid' -or $s.SignerCertificate.Thumbprint -notin @("+trusted+")){throw 'Untrusted agent publisher'}\n"
         checks+='}}\n$lease=[IO.File]::Open('+ps_quote(root+'\\.bundle-lease')+',[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)\ntry {\nAssert-Bundle $stage\n'
-        if b'# EGW_BUNDLE_LEASE_V1' in files['bastion_worker.ps1']:
+        if b'# EGW_BUNDLE_LEASE_V1' in files.get('bastion_worker.ps1',b''):
             receipt=json.dumps({'protocol':1,'bundle_sha256':identity,'files':hashes},sort_keys=True)
             checks+='[IO.File]::WriteAllText((Join-Path $stage \'bundle.json\'),'+ps_quote(receipt)+',(New-Object Text.UTF8Encoding($false)))\n'
         checks+='if(Test-Path -LiteralPath $target){Assert-Bundle $target}else{[IO.Directory]::Move($stage,$target)}\n}finally{$lease.Dispose()}\n'

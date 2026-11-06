@@ -6,7 +6,8 @@ from enclave_gateway.operations.context import OperationError
 
 
 def verify(evidence, nonce, *, expected_sha256, trusted_signers=(), require_signed=True,
-           expected_account='', require_process_isolation=False,expected_runtime_sha256='',expected_version='0.3.0'):
+           expected_account='', require_process_isolation=False,expected_runtime_sha256='',expected_version='0.3.0',
+           expected_execution_profile='',expected_policy_sha256=''):
     def require(condition, reason):
         if not condition: raise OperationError('agent_attestation_failed','attestation',node='@bastion',message=reason)
     require(isinstance(evidence,dict),'Worker evidence is not an object')
@@ -17,6 +18,10 @@ def verify(evidence, nonce, *, expected_sha256, trusted_signers=(), require_sign
     require(evidence.get('loaded_sha256')==expected_sha256.lower(),'Running worker does not match pinned release')
     require(evidence.get('current_sha256')==evidence.get('loaded_sha256'),'Worker file changed since startup')
     require(bool(re.fullmatch('[a-f0-9]{32}',evidence.get('instance_id',''))),'Missing worker instance identity')
+    if expected_execution_profile:
+        require(evidence.get('execution_profile')==expected_execution_profile,'Worker execution profile mismatch')
+    if expected_policy_sha256:
+        require(evidence.get('policy_sha256')==expected_policy_sha256,'Worker policy does not match the independently approved pin')
     if require_signed:
         require(evidence.get('signature_status')=='Valid','Worker startup signature was not valid')
         require(evidence.get('loaded_signature_status')=='Valid','Worker was not trusted at startup')

@@ -9,7 +9,7 @@ import shutil
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-AGENTS = ("bastion_worker.ps1", "bastion_bootstrap.ps1", "appliance_init.ps1", "session_supervisor.ps1")
+AGENTS = ("bastion_worker.ps1", "bastion_structured.ps1", "bastion_bootstrap.ps1", "appliance_init.ps1", "session_supervisor.ps1")
 
 
 def prepare(output: Path, helper: Path, runtime: Path):

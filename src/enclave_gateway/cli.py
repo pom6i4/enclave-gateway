@@ -50,9 +50,9 @@ def build_parser() -> argparse.ArgumentParser:
     destination.add_argument('--global',dest='global_config',action='store_true',help='Create the private XDG user configuration.')
     config_actions.add_parser('check',help='Validate configuration and show effective security settings.')
     agents=sub.add_parser('agents',help='Stage an immutable worker bundle or print its Bastion startup command.')
-    agents.add_argument('agents_action',choices=['stage','command','prune','stop'])
+    agents.add_argument('agents_action',choices=['stage','command','prune','stop','unregister-autostart-command'])
     agents.add_argument('--execution-policy',choices=['RemoteSigned'],default='',help='Explicit process-only Standard startup option; never weakens AllSigned or Group Policy.')
-    agents.add_argument('--persist-autostart',action='store_true',help='Explicitly register current-user Bastion logon startup when the printed command runs.')
+    agents.add_argument('--persist-autostart',action='store_true',help='Opt-in HKCU Run persistence; requires endpoint policy approval and may be blocked by EDR.')
     agents.add_argument('--unregister-autostart',action='store_true',help='Remove the current worker user HKCU startup value before acknowledged stop.')
     agents.add_argument('--migrate-legacy-state',action='store_true',help='Approve one-time journal migration after stopping the old worker.')
     agents.add_argument('--timeout',type=float,default=45,help='Stop request budget in seconds.')
@@ -534,6 +534,15 @@ def _main(argv: list[str] | None = None) -> int:
         with os.fdopen(descriptor,'wb') as output:output.write(data)
         print(json.dumps({'created':str(args.output),'mode':args.mode,'next_step':'Edit topology, then run egw config check. Enterprise placeholders must be replaced with approved release pins.'}))
         return 0
+
+    if args.command=='agents' and args.agents_action=='unregister-autostart-command':
+        if args.execution_policy or args.persist_autostart or args.unregister_autostart or args.migrate_legacy_state or args.apply or args.remove or args.keep or args.min_age_hours!=168 or args.timeout!=45:
+            parser.error('Offline autostart removal command accepts no deployment, stop or pruning options')
+        from enclave_gateway.onboarding import unregister_autostart_command
+        print(unregister_autostart_command());return 0
+
+    if args.command=='agents' and args.persist_autostart:
+        print('USER_AUTOSTART_POLICY: HKCU Run persistence and ACL provisioning require endpoint administrator approval; EDR compatibility is not implied.',file=sys.stderr)
 
     try:cfg = EnclaveConfig.load(args.config)
     except TypeError as error:raise ValueError('Invalid configuration value type; run egw config check and see docs/GUIDE.md.') from error

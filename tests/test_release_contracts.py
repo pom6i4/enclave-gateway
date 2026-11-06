@@ -49,7 +49,7 @@ class ReleaseContracts(unittest.TestCase):
             self.assertEqual(report["status"],"unsigned")
             self.assertFalse(report["qualified_windows"])
             names={row["file"] for row in report["files"]}
-            self.assertEqual(names,{"egw-askpass.exe","bastion_worker.ps1","bastion_bootstrap.ps1","appliance_init.ps1","session_supervisor.ps1","verify_windows.ps1","install_windows.ps1","egw-runtime.exe"})
+            self.assertEqual(names,{"egw-askpass.exe","bastion_worker.ps1", "bastion_structured.ps1","bastion_bootstrap.ps1","appliance_init.ps1","session_supervisor.ps1","verify_windows.ps1","install_windows.ps1","egw-runtime.exe"})
             with self.assertRaises(FileExistsError): prepare(output,helper,helper)
 
     def test_provider_probe_requires_exact_explicit_qualification(self):
@@ -132,10 +132,10 @@ class NativeHelperTests(unittest.TestCase):
         helper=str(Path(os.environ["EGW_TEST_HELPER"]).with_suffix(".exe" if os.name=="nt" else ""))
         # Explicit unsigned mode is confined to this synthetic local fixture.
         wrapped=_wrap_with_askpass_ps("& $env:SSH_ASKPASS 'ignored prompt'", "fixture-value", "fixture",helper_path=helper,require_signed=False)
-        script="$env:EGW_ASKPASS_B64='prior';\n"+wrapped+"\nif ($env:EGW_ASKPASS_B64 -ne 'prior') {throw 'Environment was not restored'}"
+        script="$RequestData=[Console]::In.ReadLine()|ConvertFrom-Json;$env:EGW_ASKPASS_B64='prior';\n"+wrapped+"\nif ($env:EGW_ASKPASS_B64 -ne 'prior') {throw 'Environment was not restored'}"
         encoded=base64.b64encode(script.encode("utf-16le")).decode()
         environment={**os.environ,"DOTNET_ROOT":str(Path(os.environ["EGW_TEST_DOTNET"]).parent)}
-        result=subprocess.run([os.environ["EGW_TEST_POWERSHELL"],"-NoProfile","-EncodedCommand",encoded],env=environment,capture_output=True,text=True,timeout=20)
+        result=subprocess.run([os.environ["EGW_TEST_POWERSHELL"],"-NoProfile","-EncodedCommand",encoded],input=json.dumps(wrapped.request_data)+"\n",env=environment,capture_output=True,text=True,timeout=20)
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertEqual(result.stdout.strip(),"fixture-value")
 

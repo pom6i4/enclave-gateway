@@ -149,8 +149,16 @@ class BastionSpec:
     block_size_bytes: int = 4 * 1024 * 1024
     heartbeat_max_age_sec: int = 45
     spool_protocol: str = "files"
+    execution_profile: str = 'legacy'
+    worker_policy_path: str = r'C:\ProgramData\EnclaveGateway\worker-policy.json'
+    worker_policy_sha256: str = ''
 
     def __post_init__(self):
+        if self.execution_profile not in ('legacy','structured_only'):
+            raise ValueError('execution_profile must be legacy or structured_only')
+        if self.execution_profile=='structured_only':
+            if self.spool_protocol!='files':raise ValueError('structured_only currently requires files; Stream and TCP mux have no fallback')
+            if not re.fullmatch('[a-f0-9]{64}',self.worker_policy_sha256):raise ValueError('Pin the independently approved Bastion worker policy SHA-256')
         if self.spool_protocol not in ("files", "stream"):
             raise ValueError("spool_protocol must be files or stream")
         if type(self.heartbeat_max_age_sec) is not int or not 5<=self.heartbeat_max_age_sec<=300:
@@ -293,6 +301,16 @@ class EnclaveConfig(_ConfigurationOrigin):
     journal_retention: dict = field(default_factory=dict)
     targets: dict[str, TargetNodeSpec] = field(default_factory=dict)
     forwards: dict[str, PortForwardSpec] = field(default_factory=dict)
+
+    def __post_init__(self):
+        if self.bastion.execution_profile=='structured_only':
+            security=self.security
+            if not self.bastion.enabled or security.mode!='standard' or security.require_process_isolation:
+                raise ValueError('structured_only requires Bastion and does not provide Enterprise native process isolation')
+            if not security.require_signed_agents or not security.worker_sha256 or not security.trusted_signers or not security.enforce_worker_attestation:
+                raise ValueError('structured_only requires signed agents, trusted publishers, a worker SHA-256 and fresh worker attestation')
+            if any(t.os not in ('linux','posix','unix') or t.via not in ('bastion','@bastion') for t in self.targets.values()):
+                raise ValueError('structured_only requires direct Linux TargetNodes via Bastion')
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> EnclaveConfig:
