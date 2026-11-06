@@ -1,5 +1,7 @@
 # Endpoint detection: preserve evidence before retrying
 
+[English](ENDPOINT-INCIDENT.md) · [Русский](ru/ENDPOINT-INCIDENT.md)
+
 Use this procedure when an endpoint product reports or blocks an `egw` process.
 A request timeout alone does not identify an antivirus block. A valid signature
 does not establish endpoint compatibility. The experimental foreground profile
@@ -47,6 +49,53 @@ it cannot replace a missing original in an evidence record.
 If policy export is unavailable, record that limitation. Do not change password
 protection or enable additional telemetry solely to complete the report without
 administrator approval.
+
+## Capture exact samples on the Host
+
+Run `scripts/qualification/preserve_endpoint_samples.py` from the source checkout
+before executing the signed worker on the disposable endpoint. It copies only
+these inputs:
+
+- The exact approved `.ps1` worker.
+- The exact approved `.json` worker policy.
+
+Supply both hashes from the independent approval record. Do not compute a new
+approval from a suspect file after detection. Create a private parent directory
+on the Host outside the disposable VM and outside any public checkout. The
+following example assumes that directory already exists and the shell variables
+contain the approved hashes:
+
+```sh
+python3 scripts/qualification/preserve_endpoint_samples.py capture \
+  --worker /private/approved/worker.ps1 \
+  --worker-sha256 "$APPROVED_WORKER_SHA256" \
+  --policy /private/approved/policy.json \
+  --policy-sha256 "$APPROVED_POLICY_SHA256" \
+  --output /private/endpoint-evidence/attempt001
+
+python3 scripts/qualification/preserve_endpoint_samples.py verify \
+  --bundle /private/endpoint-evidence/attempt001 \
+  --worker-sha256 "$APPROVED_WORKER_SHA256" \
+  --policy-sha256 "$APPROVED_POLICY_SHA256"
+```
+
+The tool preserves bytes without newline conversion. It checks readback before
+completing the manifest. It rejects mismatched hashes and nonregular inputs.
+It refuses an existing destination. Failed partial captures remain on disk and
+cannot pass verification; use a new attempt directory after investigating them.
+Each input is limited to 16 MiB. Reverification requires the independent pins,
+so editing a copied file and its manifest together does not satisfy approval.
+
+On POSIX hosts, the parent must be owned by the current user without access for
+other users. The tool creates the bundle with mode `0700` and its files with
+mode `0600`. On Windows, provision the parent with an approved private DACL;
+the tool does not validate Windows ACLs. It never modifies source permissions.
+
+This manifest proves only a match to the supplied hashes. The tool does not
+verify Authenticode or establish a KES verdict. Preserve signature evidence
+separately. It does not collect keys or contact the endpoint. The policy may
+contain private configuration, so this bundle must not be published or sent
+unreviewed to support.
 
 ## Read-only KES collection
 

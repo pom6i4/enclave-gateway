@@ -55,6 +55,10 @@ previous Stream latency results do not apply to this profile.
 7. Configure the approved worker hash and trusted signing publisher. Use
    [the configuration example](../config/enclave.structured.example.yaml).
    Its empty pins intentionally prevent use before approval.
+8. Before a disposable endpoint trial, [preserve the exact signed sample and
+   policy on the Host](ENDPOINT-INCIDENT.md#capture-exact-samples-on-the-host).
+   Reverify that copy before retiring the VM. A digest alone cannot replace a
+   sample removed by endpoint protection.
 
 Fresh attestation binds the worker to Host's approved policy hash as well as
 the signed worker hash. A different policy is rejected before dispatch.
