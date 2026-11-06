@@ -1,7 +1,7 @@
 # Endpoint policy and the foreground OpenSSH profile
 
-This describes unreleased source changes. It does not change the published
-`v0.2.0` tag or certify compatibility with an antivirus product. Deployment on a
+This describes the experimental foreground profile in `0.3.0b1` (Beta 1).
+It does not change the published `v0.2.0` tag or certify antivirus compatibility. Deployment on a
 managed endpoint requires its administrator's approval. An active security
 incident must be resolved through the organization's incident process first.
 
@@ -153,8 +153,10 @@ through the Windows API for the managed task's exact SID. Cross-session access
 requires SYSTEM and the OS-granted user token. Missing support fails explicitly;
 no password-bearing script or `cmdkey /pass` fallback is generated. This new
 operation has passed a current-SID test in a disposable Windows ARM64 VM.
-SYSTEM selection of a different interactive task SID still requires acceptance
-before production deployment.
+SYSTEM selection of a different ordinary interactive task SID has also passed
+there with the native ARM64 helper. The end-to-end refresh took 13,651 ms under
+the unchanged 15-second cap. The selected user then used that exact test
+credential for the isolated RDP connection. This does not qualify Windows x64.
 
 Secret separation prevents automatic insertion into interpreter source. It does
 not encrypt the spool or protect against privileged process inspection. Commands
@@ -204,12 +206,31 @@ random fixture-only name and is removed afterward. Portable interpreter tests
 add command execution and binary transfer coverage; their SSH process is
 synthetic. Native Direct SSH is tested separately with a real SSH jump and TTY.
 
+An additional pair of isolated Windows ARM64 VMs exercised the signed foreground
+worker in an ordinary user's actual native `mstsc.exe` session. NLA remained
+enabled and the server certificate was validated. This run checked:
+
+- Fresh worker and policy attestation.
+- Execution through system OpenSSH to a real isolated Linux SSH server.
+- Unicode output with a nonzero remote exit status.
+- A binary 1 MiB file in both directions with matching SHA-256.
+- Rejection of a changed SSH host key before remote command execution.
+- Actual RDP disconnect/reconnect with events 24 and 25 for the same session.
+- Explicit manual foreground restart with a new worker instance.
+- Reconciliation of an interrupted request without repeating its side effect.
+- Durable rejection of completed and interrupted transaction IDs after restart.
+- Successful cleanup with a running worker and after acknowledged stop.
+
+The disconnected Host request timed out and remains failed evidence. A request
+made before the new heartbeat was ready failed preflight without publication;
+the subsequent readiness-qualified checks passed. No automatic foreground
+recovery or remote rollback is claimed. The test used synthetic trust and keys.
+It did not include a proprietary VPN or additional WAN delay. Its Files timings
+are not the legacy Stream performance baseline.
+
 The following acceptance remains separate:
 
 - Native Windows x64 execution of the new profile.
-- Target SSH execution and file transfer from this Windows worker.
-- Real RDP disconnect and reconnect with this new foreground worker.
-- SYSTEM credential refresh for a different interactive user's SID.
 - The exact KES version and approved protection policy.
 
 A passing local-spool test is not RDP or KES acceptance. Keep failed runs and

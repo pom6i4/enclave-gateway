@@ -1,12 +1,30 @@
 # Preparing an unsigned release candidate
 
-The release candidate is a source-bound bundle for review. It does not publish a
+The candidate assembly procedure creates a source-bound bundle for review. It does not publish a
 tag, upload packages, change repository visibility or establish Enterprise signing
 trust. Hosted workflows are not needed for these steps.
 
+## Current Beta candidate
+
+The current Python package version is `0.3.0b1`. Its Git release tag is
+`v0.3.0-beta.1`. The previously published `v0.2.0` tag remains immutable at
+`2d0167f2402a923f7eb95e4e752559cea250eaef`.
+
+The foreground `structured_only` profile is experimental. See
+[endpoint-policy qualification](ENDPOINT-POLICY.md#qualification-status) for the
+exact tested scope and remaining acceptance. No release implies KES approval.
+The interactive SSH bridge through QGA remains unavailable. Direct Host SSH
+and RDP TCP mux are separate explicitly configured routes.
+
+A source/Python Beta may be distributed with those limitations. Its clean-install
+receipt must bind the exact wheel and source. This does not establish acceptance
+of Windows native helper distributions. A full unsigned candidate assembled
+below still requires all specified platform receipts. Missing receipts must not
+be waived or replaced with cross-compilation evidence.
+
 ## Source baseline
 
-The frozen `0.2.0` Beta implementation is
+The historical pre-release `0.2.0` Beta performance baseline is
 `49c3cc216473524e52f13d554cf4cabf619c47ee`. This identifies the code exercised
 by the latest cold-start checks. Build and artifact receipts must still bind
 the exact source revision used to assemble the candidate.
@@ -17,7 +35,8 @@ already-running Windows passed all 90 TargetNode calls on the preceding
 revision `bed7e87`. On the frozen revision, the final cold Windows series
 passed 29 of 30 calls. The first call took 1,032 ms. A separate instrumented
 first call took 1,071 ms and completed successfully. The cold-start gate
-remains open at 800 ms per call. These lab runs did not exercise RDP drive
+was not met at 800 ms per call. For this Beta, 800 ms for the first cold call is
+an optimization target rather than a release blocker. These lab runs did not exercise RDP drive
 redirection, a customer WAN or Enterprise process isolation.
 
 Retain the complete cold and warm receipts, including failed samples, in
@@ -28,10 +47,11 @@ package, sign release artifacts or establish production Enterprise trust.
 
 | Component | Contract | Validation boundary |
 | --- | --- | --- |
-| Python CLI/package | `0.2.0`, Python 3.10 or newer; the release matrix exercises 3.10–3.14 | Pure Python has no mandatory third-party runtime dependencies. Record exact Python patches and platform for each run. |
+| Python CLI/package | `0.3.0b1`, Python 3.10 or newer; the release matrix exercises 3.10–3.14 | Pure Python has no mandatory third-party runtime dependencies. Record exact Python patches and platform for each run. |
 | Windows native helpers | `net10.0`, self-contained `win-x64` and `win-arm64` | Use the exact pinned SDK/runtime and both helper projects. Cross compilation and PE inspection do not prove Windows execution. |
 | Worker identity | Attestation version `0.3.0`, fresh nonce, approved hashes/signer/SID when required | This is an independent worker contract, not the Python package version. Deploy matching approved scripts/runtime together. |
-| Worker journal and telemetry | Revision 2, local journal with protected spool binding | Preserve transaction identities across restart, migration and backup reconciliation. |
+| Legacy worker journal and telemetry | Revision 2, Bastion-local journal with protected spool binding | Preserve transaction identities across restart, migration and backup reconciliation. |
+| Foreground worker ledger | `.structured-transactions` on the approved redirected spool | Preserve its independent binding and interrupted outcomes; no legacy adoption or automatic restart. |
 | Optional stream framing | Descriptor revision 3, 4 KiB request alignment | Host and worker must both select `stream`; no automatic replay or protocol downgrade. |
 | Enterprise distribution | Authenticode plus signed CMS metadata and release ordering | Unsigned candidate binaries cannot satisfy production Enterprise installation. |
 
@@ -123,7 +143,7 @@ artifact directory from the successful comparison:
 
 ```powershell
 python scripts/qualification/artifact_acceptance.py `
-  --wheel C:\Acceptance\enclave_gateway-0.2.0-py3-none-any.whl `
+  --wheel C:\Acceptance\enclave_gateway-0.3.0b1-py3-none-any.whl `
   --pip-wheel C:\Acceptance\pip-approved-py3-none-any.whl `
   --runtime C:\Acceptance\egw-runtime.exe --askpass C:\Acceptance\egw-askpass.exe `
   --allow-unsigned-lab --work-dir C:\Acceptance\new-client `
@@ -148,7 +168,7 @@ with `pidfd_open` support (Linux 5.3 or newer) for PID-safe cancellation checks:
 
 ```sh
 python3 scripts/qualification/artifact_acceptance.py \
-  --wheel /input/enclave_gateway-0.2.0-py3-none-any.whl \
+  --wheel /input/enclave_gateway-0.3.0b1-py3-none-any.whl \
   --pip-wheel /input/pip-approved-py3-none-any.whl \
   --work-dir /work/new-client --output /work/new-result.json
 ```
@@ -212,6 +232,26 @@ accounts and isolated networking. Connect the Appliance to Bastion with native
 `mstsc.exe`, redirect only the laboratory drive, validate the server certificate,
 and retain NLA. A local spool, injected exception or revoked SMB handle exercises
 regression paths but does not qualify actual RDP reconnection.
+
+### Foreground profile
+
+For `structured_only`, record the approved worker and policy hashes. Run the
+signed foreground command explicitly in the ordinary Bastion user's session.
+Wait for a fresh running heartbeat and nonce attestation before dispatch.
+Interrupt the owned RDP connection during an operation with a unique observable
+side effect. Retain the Host timeout and the durable transaction record.
+
+After reconnect, require events 24 and 25 for the same Windows session. The old
+foreground worker must not relaunch itself. Start a new instance explicitly and
+verify its fresh attestation. Reconcile the original remote effect. Remove an
+owned cancellation marker only after preserving it and confirming the previous
+worker exited; resend the same transaction ID with a fresh deadline to prove
+the durable ledger itself rejects replay. Check a completed ID as well. Neither
+request may repeat the remote effect. End with acknowledged stop and cleanup
+that preserves the ledger. This profile has no bootstrap supervisor or autostart
+acceptance path. See [the qualification scope](ENDPOINT-POLICY.md#qualification-status).
+
+### Legacy Stream supervisor
 
 Stage the exact candidate agents, start the local bootstrap inside the ordinary
 Bastion user session, and record its Windows session ID, SID, PID, worker hash,

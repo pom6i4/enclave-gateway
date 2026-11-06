@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 Beta 1
+
+Package version: `0.3.0b1`. Git tag: `v0.3.0-beta.1`.
+
+The foreground `structured_only` profile is experimental. This Beta does not
+certify KES compatibility. The published `v0.2.0` tag remains unchanged.
 
 ### Local endpoint qualification and Direct interactive SSH
 
@@ -9,9 +14,15 @@
 - Reject RDP-only SSH configuration export for Appliance SSH targets.
 - Add a disposable Windows local-spool acceptance fixture with synthetic signing
   trust cleanup and a 15-second bound on each native credential request.
-- Verify Windows ARM64 foreground startup under AllSigned and current-SID
-  Credential Manager writes. Native Windows x64 remains unqualified for this
-  profile. RDP reconnect and KES acceptance remain open.
+- Verify Windows ARM64 foreground startup under AllSigned and SID-bound
+  Credential Manager writes. Test SYSTEM refresh for a different interactive
+  user's SID with the native ARM64 helper within the existing 15-second cap.
+- Exercise the signed foreground worker through actual RDP drive redirection to
+  an isolated Linux OpenSSH server. Check binary transfers with SHA-256 and
+  strict rejection of a changed SSH host key.
+- Verify manual foreground restart after real RDP disconnect/reconnect with
+  durable replay rejection. Check cleanup before and after acknowledged stop.
+  Native Windows x64 and KES acceptance remain open for this profile.
 - Add negative policy tests and durable replay rejection across worker restart.
 - Send large Appliance PowerShell sources through QGA stdin to stay below the
   Windows command-line size limit while retaining separate request data.
@@ -33,16 +44,20 @@
 - Carry legacy SSH credentials and stdin separately from PowerShell source.
   Reject mismatched older workers before launching SSH.
 - Refresh Appliance RDP credentials through native Windows Credential Manager
-  with SID-bound session selection and stdin-only input. Windows acceptance of
-  this operation remains pending.
+  with SID-bound session selection and stdin-only input. Qualification is scoped
+  to the tested Windows ARM64 environment.
 - Add an offline autostart-removal command that preserves files and processes.
   Warn on opt-in persistence and bound repeated Stream recovery.
 - Add an explicit signed foreground `structured_only` worker for direct Linux
   targets through system OpenSSH. It uses an independently approved local policy
   and supports Files without startup registration or AppData code installation.
-  Enterprise process isolation is not claimed. Real Windows/RDP/KES qualification
-  remains pending; portable tests do not establish endpoint approval.
+  Enterprise process isolation is not claimed. Windows ARM64 RDP qualification
+  does not establish KES approval or native Windows x64 acceptance.
 
+
+## 0.2.0 Beta
+
+The following earlier changes belong to the existing Beta baseline.
 
 ### Configuration and security
 

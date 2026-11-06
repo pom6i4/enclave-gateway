@@ -1,7 +1,7 @@
 # Explicit routes under endpoint policy
 
-The `--route` starter flag and stricter transport guards described here are
-unreleased source changes. The published `v0.2.0` tag is unchanged.
+The `--route` starter flag and stricter transport guards are available in
+`0.3.0b1` (Beta 1). The published `v0.2.0` tag is unchanged.
 
 Route selection is configuration, not a connectivity heuristic. A failed route
 never triggers another transport. Changing a route requires the administrator's

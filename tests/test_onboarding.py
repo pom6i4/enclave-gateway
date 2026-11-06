@@ -193,12 +193,12 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaises(ValueError):TargetNodeSpec('app','10.0.0.10',ssh_known_hosts_path='file\nStrictHostKeyChecking no')
 
     def test_schema_exports_and_secret_stdin_do_not_require_topology_or_leak_value(self):
-        with patch('enclave_gateway.cli.EnclaveEngine') as engine,patch('enclave_gateway.cli.EnclaveConfig.load') as load:
+        with tempfile.TemporaryDirectory() as folder,patch('enclave_gateway.cli.EnclaveEngine') as engine,patch('enclave_gateway.cli.EnclaveConfig.load') as load:
             with patch('sys.stdout',new_callable=io.StringIO):
                 self.assertEqual(main(['mcp','--export-openapi']),0)
                 self.assertEqual(main(['mcp-config','--client','all']),0)
             with patch('enclave_gateway.security.secrets.SecretVault') as vault,patch('sys.stdin',io.StringIO('fixture-hidden-value\n')),patch('sys.stdout',new_callable=io.StringIO) as output:
-                self.assertEqual(main(['secret','set','ENCLAVE_FIXTURE','--stdin']),0)
+                self.assertEqual(main(['--state-dir',str(Path(folder)/'state'),'secret','set','ENCLAVE_FIXTURE','--stdin']),0)
                 vault.return_value.set_in_keychain.assert_called_once_with('ENCLAVE_FIXTURE','fixture-hidden-value')
                 self.assertNotIn('fixture-hidden-value',output.getvalue())
             load.assert_not_called();engine.assert_not_called()

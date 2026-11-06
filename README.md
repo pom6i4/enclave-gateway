@@ -35,6 +35,10 @@ The diagram shows the RDP route. When policy permits SSH, use the
 Enterprise adds signed native isolation and verified identities. Neither mode
 replaces the organization's endpoint policy, VPN entitlement or host-key approval.
 
+The current version is **0.3.0 Beta 1** (`0.3.0b1`). The signed foreground
+`structured_only` profile is **experimental** and requires explicit endpoint
+approval. KES compatibility is not certified. See [release boundaries](docs/RELEASING.md#current-beta-candidate).
+
 ## Key capabilities
 
 - **QEMU Appliance & 6 VPN Provider Adapters** — `vipnet`, `kontinent`,
@@ -142,13 +146,13 @@ Standard; migrating an existing deployment is an operator decision.
   keys, CLI recipes, existing VM prerequisites and troubleshooting.
 - [Security architecture and Enterprise deployment](docs/SECURITY.md): trust
   boundaries, signing, attestation, roles and operational limits.
-- [Managed endpoint policies](docs/ENDPOINT-POLICY.md): the unreleased approved
+- [Managed endpoint policies](docs/ENDPOINT-POLICY.md): the experimental approved
   foreground OpenSSH profile and its qualification limits.
 - [Explicit SSH and RDP routes](docs/ROUTING.md): choose the approved route;
   transport failures never select an alternative.
 - [Contributing](CONTRIBUTING.md): code layout, tests and extension points.
 - [Release preparation and component compatibility](docs/RELEASING.md), with
-  [unreleased changes](CHANGELOG.md): source-bound unsigned candidates and checks.
+  [changelog](CHANGELOG.md): source-bound unsigned candidates and checks.
 - [Maintainer qualification](contrib/qualification/README.md): disposable lab
   tooling and historical evidence, separate from product configuration.
 
