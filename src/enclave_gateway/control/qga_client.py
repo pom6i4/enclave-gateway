@@ -257,12 +257,20 @@ class QgaClient:
 
     def exec_powershell(self, script: str, timeout_sec: float = 120.0) -> ExecResult:
         request_data=getattr(script,"request_data",None)
-        script="$ProgressPreference='SilentlyContinue';\n"+script
-        if request_data:
-            script="[Console]::InputEncoding=[Text.UTF8Encoding]::new($false);$RequestData=[Console]::In.ReadLine()|ConvertFrom-Json;\n"+script
-        encoded_cmd=base64.b64encode(script.encode('utf-16le')).decode('ascii')
+        source="$ProgressPreference='SilentlyContinue';\n"+script
+        preamble="[Console]::InputEncoding=[Text.UTF8Encoding]::new($false);"
+        if request_data:preamble+="$RequestData=[Console]::In.ReadLine()|ConvertFrom-Json;"
+        command=(preamble+'\n' if request_data else '')+source
+        encoded_cmd=base64.b64encode(command.encode('utf-16le')).decode('ascii')
+        data=(json.dumps(request_data)+'\n').encode() if request_data else b''
+        # Windows CreateProcess limits the complete command line to 32767 UTF-16
+        # characters. Keep argv bounded; QGA can carry the source through stdin.
+        if len(encoded_cmd)>24000:
+            bootstrap="$ProgressPreference='SilentlyContinue';"+preamble+"& ([scriptblock]::Create([Console]::In.ReadToEnd()))"
+            encoded_cmd=base64.b64encode(bootstrap.encode('utf-16le')).decode('ascii')
+            data+=source.encode('utf-8')
         return self.exec_guest('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',encoded_cmd],
-                               input_data=(json.dumps(request_data)+'\n').encode() if request_data else None,timeout_sec=timeout_sec)
+                               input_data=data or None,timeout_sec=timeout_sec)
 
     def exec_guest(self,path: str,arguments=(),*,input_data: bytes | None=None,timeout_sec: float=120.0) -> ExecResult:
         if not isinstance(arguments,(list,tuple)) or not isinstance(path,str) or not path or '\0' in path or any(not isinstance(item,str) or '\0' in item for item in arguments):

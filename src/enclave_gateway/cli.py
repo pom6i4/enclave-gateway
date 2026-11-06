@@ -248,7 +248,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ssh = sub.add_parser(
         "ssh",
-        help="Launch an interactive OpenSSH session to a TargetNode over `egw stdio-proxy`.",
+        help="Launch interactive OpenSSH on the configured Direct SSH or RDP TCP mux route.",
     )
     p_ssh.add_argument("node", help="TargetNode name from enclave.yaml.")
     p_ssh.add_argument(

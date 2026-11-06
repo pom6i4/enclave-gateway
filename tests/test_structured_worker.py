@@ -69,15 +69,15 @@ class StructuredContractTests(unittest.TestCase):
 @unittest.skipUnless(os.environ.get('EGW_TEST_POWERSHELL') and os.name!='nt','Portable interpreter fixture requires PowerShell and POSIX')
 class StructuredRuntimeTests(unittest.TestCase):
     @contextmanager
-    def worker(self):
+    def worker(self, *, allow_exec=True, allow_transfer=True):
         with tempfile.TemporaryDirectory(prefix='egw-structured-') as temporary:
             root=Path(temporary).resolve();spool=root/'spool';spool.mkdir();stop=root/'stop'
             fake=root/'ssh.exe'
-            fake.write_text('#!'+sys.executable+"\nimport subprocess,sys\np=subprocess.run(['sh','-c',sys.argv[-1]],stdin=sys.stdin.buffer,stdout=sys.stdout.buffer,stderr=sys.stderr.buffer)\nsys.exit(p.returncode)\n")
+            fake.write_text('#!'+sys.executable+"\nimport subprocess,sys\nfrom pathlib import Path\nwith Path(__file__).with_name('ssh-invocations.log').open('ab') as log: log.write(b'started\\n')\np=subprocess.run(['sh','-c',sys.argv[-1]],stdin=sys.stdin.buffer,stdout=sys.stdout.buffer,stderr=sys.stderr.buffer)\nsys.exit(p.returncode)\n")
             fake.chmod(0o700)
             (root/'key').write_text('synthetic-key-path-only');(root/'known_hosts').write_text('synthetic-host-path-only')
             policy={'revision':1,'owner_sid':'S-1-5-21-1000','targets':{'app01':{'host':'127.0.0.1','port':22,'user':'fixture',
-                    'key_path':str(root/'key'),'known_hosts_path':str(root/'known_hosts'),'allow_exec':True,'allow_transfer':True,'allow_sudo':False}}}
+                    'key_path':str(root/'key'),'known_hosts_path':str(root/'known_hosts'),'allow_exec':allow_exec,'allow_transfer':allow_transfer,'allow_sudo':False}}}
             policy_path=root/'policy.json';policy_path.write_text(json.dumps(policy))
             source=SOURCE.read_text().replace("if($env:OS -ne 'Windows_NT')","if($false)")
             source=source.replace('            }catch{\n                $state=',
@@ -169,3 +169,54 @@ class StructuredRuntimeTests(unittest.TestCase):
             details=json.loads(cleaned.stdout.split('APPLIANCE_CLEAN_OK:',1)[1])
             self.assertTrue(details['stopped_worker_verified'])
             self.assertTrue((root/'spool/.structured-transactions'/(timeout['tx_id']+'.json')).exists())
+
+    def test_policy_denials_and_cancelled_requests_never_launch_ssh(self):
+        with self.worker(allow_exec=False,allow_transfer=False) as (root,transport,executor,process):
+            identity=dict(target='app01',expected_host='127.0.0.1',expected_port=22,expected_user='fixture')
+            for fields in ({'command':'touch '+str(root/'forbidden')},
+                           {'command':'true','as_root':True},
+                           {'command':'true','as_root':'true'}):
+                denied=transport.request('ssh_exec',10,**identity,**fields)
+                self.assertNotEqual(denied.exit_code,0)
+            denied=transport.request('ssh_push',10,**identity,transfer_id='a'*32,remote_path='/tmp/unused',sha256='b'*64)
+            self.assertNotEqual(denied.exit_code,0)
+            for fields in ({'expires_unix_ms':1}, {'expected_worker_instance':'a'*32}):
+                envelope={'tx_id':generate_tx_id(),'op':'ssh_exec','timeout_ms':10000,**identity,'command':'true',**fields}
+                self.assertNotEqual(transport._dispatch_envelope(envelope,10).exit_code,0)
+            self.assertFalse((root/'ssh-invocations.log').exists())
+            self.assertFalse((root/'forbidden').exists())
+            self.assertEqual(transport.ping(10).stdout,'VFS_PONG')
+
+    def test_interrupted_transaction_cannot_replay_after_worker_restart(self):
+        with self.worker() as (root,transport,executor,process):
+            marker=root/'effect'
+            request={'tx_id':generate_tx_id(),'op':'ssh_exec','timeout_ms':500,'target':'app01',
+                     'expected_host':'127.0.0.1','expected_port':22,'expected_user':'fixture',
+                     'command':"printf once >> '"+str(marker)+"'; sleep 2"}
+            response=transport._dispatch_envelope(request,10)
+            self.assertNotEqual(response.exit_code,0)
+            self.assertEqual(marker.read_text(),'once')
+            journal=root/'spool/.structured-transactions'/(request['tx_id']+'.json')
+            before=journal.read_bytes()
+            self.assertEqual(json.loads(before)['state'],'indeterminate')
+            old_instance=json.loads((root/'spool/worker_state.json').read_text())['instance_id']
+            self.assertEqual(transport.exec_bastion('',op='stop',timeout_sec=10).exit_code,0)
+            self.assertEqual(process.wait(timeout=10),0)
+            with (root/'restarted.log').open('wb') as log:
+                restarted=subprocess.Popen(process.args,stdout=log,stderr=log)
+                try:
+                    deadline=time.monotonic()+15
+                    while True:
+                        state=json.loads((root/'spool/worker_state.json').read_text())
+                        if state['status']=='running' and state['instance_id']!=old_instance:break
+                        if restarted.poll() is not None or time.monotonic()>deadline:self.fail((root/'restarted.log').read_text())
+                        time.sleep(.02)
+                    replay=transport._dispatch_envelope(dict(request),10)
+                    self.assertNotEqual(replay.exit_code,0)
+                    self.assertEqual(marker.read_text(),'once')
+                    self.assertEqual(journal.read_bytes(),before)
+                    self.assertEqual(transport.ping(10).stdout,'VFS_PONG')
+                    self.assertEqual(transport.exec_bastion('',op='stop',timeout_sec=10).exit_code,0)
+                    self.assertEqual(restarted.wait(timeout=10),0)
+                finally:
+                    if restarted.poll() is None:restarted.kill();restarted.wait(timeout=5)

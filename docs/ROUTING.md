@@ -95,6 +95,13 @@ that a Bastion worker is not required. `doctor` treats RDP checks as inapplicabl
 An explicit RDP credential-refresh request is rejected. `clean` is a successful
 no-op for the absent RDP spool and preserves old deployment evidence.
 
+For a Direct Host, `egw ssh app01` starts the native local SSH client on the
+configured route. Explicit SSH jumps use their own keys and known-host files.
+The command ignores per-user SSH configuration on each hop and uses batch key
+authentication. An interactive session inherits the terminal; its keystrokes and
+output are not captured as structured command transactions. Use `egw exec` when
+a recorded command result is needed.
+
 The following RDP-dependent operations fail explicitly in the agentless route:
 
 - `exec @bastion`
@@ -108,9 +115,11 @@ The following RDP-dependent operations fail explicitly in the agentless route:
 - SOCKS proxies
 - Managed port forwards
 
-The Host interactive SSH bridge currently depends on RDP TCP mux; it is distinct
-from `egw exec` through the SSH executor. No unavailable operation starts an RDP
-worker or silently bypasses the configured route. Native SSH forwarding can be
+For a QGA Appliance, interactive `egw ssh` remains unavailable on the SSH route.
+A streaming terminal bridge through QGA has not been implemented. The existing
+`stdio-proxy` and `ssh-config` export still require RDP TCP mux. A mixed
+configuration cannot export an Appliance SSH target as an RDP ProxyCommand.
+No unavailable operation starts a worker or silently changes the route. Native SSH forwarding can be
 used separately when it is approved and the initiating machine has the route.
 
 ## RDP-only route

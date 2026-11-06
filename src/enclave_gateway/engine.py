@@ -1183,7 +1183,12 @@ Write-Output 'BASTION_CLEAN_OK'
         prefix: str = "enclave-",
         nodes: set[str] | None = None,
     ) -> str:
-        """Generate an OpenSSH ~/.ssh/config block using `egw stdio-proxy %h %p`."""
+        """Generate RDP ProxyCommand configuration without changing selected routes."""
+        from enclave_gateway.routing import resolve_target_route
+        for name, target in self.config.targets.items():
+            if (nodes is None or name in nodes) and resolve_target_route(self.config, target).execution_hop != 'bastion':
+                raise OperationError('interactive_ssh_unavailable', 'ssh.config', node=name,
+                    message='ssh-config currently exports only RDP TCP mux routes. Use egw ssh for Direct SSH; no RDP fallback was attempted.')
         self.rdp_vfs.require_tcp_mux()
         cfg_flag = f" -c {shlex.quote(config_path)}" if config_path else ""
         lines = [
@@ -1227,9 +1232,17 @@ Write-Output 'BASTION_CLEAN_OK'
         *,
         config_path: str | None = None,
     ) -> list[str]:
-        """Build a host OpenSSH client command line that tunnels directly via `egw stdio-proxy`."""
-        self.rdp_vfs.require_tcp_mux()
+        """Use the selected route; native Direct SSH needs no RDP TCP mux."""
         target = self._resolve_target(node)
+        hop, chain = self._resolve_hop_and_jump(target)
+        if hop is self.appliance_ssh:
+            if self.config.appliance.hypervisor != 'direct' or not isinstance(self.control, DirectHostControlChannel):
+                raise OperationError('interactive_ssh_unavailable', 'ssh.route', node=node,
+                    message='Interactive SSH through a QGA Appliance is not implemented. Use egw exec on this approved route; no RDP fallback was attempted.')
+            from enclave_gateway.transports.ssh_hop import _ssh_args
+            return ['ssh', *_ssh_args(target, jump_node=chain, windows=os.name == 'nt', ignore_user_config=True),
+                    *list(extra_args or []), _node_uri(target)]
+        self.rdp_vfs.require_tcp_mux()
         import subprocess
         join = subprocess.list2cmdline if os.name == "nt" else shlex.join
         base = ["egw"] + (["-c", config_path] if config_path else [])
@@ -1539,6 +1552,8 @@ Write-Output 'PATH_GRANT_OK'
                 "provider": provider_adapter(self.config.provider.type).capabilities(),
                 "virtualization":ApplianceHypervisor.tpm_capabilities(),
                 "bastion_execution": {"enabled":self.config.bastion.enabled,"profile":self.config.bastion.execution_profile if self.config.bastion.enabled else None,"arbitrary_powershell":self.config.bastion.enabled and self.config.bastion.execution_profile!='structured_only',"tcp_mux":self.config.bastion.enabled and self.config.bastion.execution_profile!='structured_only',"edr_qualified":False},
+                "interactive_ssh": {"direct_host":self.config.appliance.hypervisor=='direct' and isinstance(self.control,DirectHostControlChannel),
+                                    "qga_bridge":False,"rdp_tcp_mux":self.config.bastion.enabled and self.config.bastion.execution_profile!='structured_only'},
                 "automatic_route_fallback":False,
                 "transactions": {"durable": True, "replay_ambiguous": False, "cancellation": "requested-until-confirmed"},
                 "security": {"signed_helper_required": self.config.security.require_signed_helpers,

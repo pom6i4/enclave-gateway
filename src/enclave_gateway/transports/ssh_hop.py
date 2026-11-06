@@ -53,11 +53,13 @@ def _node_uri(node: TargetNodeSpec) -> str:
     return f"{node.user}@{host}"
 
 
-def _ssh_args(node, *, scp=False, has_ssh_password=False, connect_timeout_sec=15, jump_node=None, windows=True):
+def _ssh_args(node, *, scp=False, has_ssh_password=False, connect_timeout_sec=15, jump_node=None, windows=True, ignore_user_config=False):
     _node_uri(node)
     args = ["-o", f"BatchMode={'no' if has_ssh_password else 'yes'}", "-o", "StrictHostKeyChecking=yes",
             "-o", f"ConnectTimeout={int(connect_timeout_sec)}", "-o", "ServerAliveInterval=15",
             "-o", "ServerAliveCountMax=3", "-P" if scp else "-p", str(node.port)]
+    if ignore_user_config:
+        args = ['-F', 'NUL' if windows else '/dev/null', '-o', 'IdentitiesOnly=yes'] + args
     if node.ssh_known_hosts_path:
         from enclave_gateway.security.quoting import ssh_config_quote
         args.extend(['-o','UserKnownHostsFile='+ssh_config_quote(node.ssh_known_hosts_path)])
@@ -66,10 +68,10 @@ def _ssh_args(node, *, scp=False, has_ssh_password=False, connect_timeout_sec=15
         if any(j.password_env for j in jumps):
             raise ValueError("Per-hop password authentication requires independently configured OpenSSH host entries")
         spec = ",".join(f"{_node_uri(j)}:{j.port}" for j in jumps)
-        if any(j.ssh_key_path or j.ssh_known_hosts_path for j in jumps):
+        if ignore_user_config or any(j.ssh_key_path or j.ssh_known_hosts_path for j in jumps):
             def channel(host, port, index):
                 jump = jumps[index]
-                command = ["ssh.exe" if windows else "ssh"] + _ssh_args(jump,windows=windows)
+                command = ["ssh.exe" if windows else "ssh"] + _ssh_args(jump,windows=windows,ignore_user_config=ignore_user_config)
                 if index:
                     command += ["-o", "ProxyCommand=" + channel(jump.host, jump.port, index - 1)]
                 command += ["-W", f"[{host}]:{port}", _node_uri(jump)]

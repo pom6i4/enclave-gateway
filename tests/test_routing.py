@@ -90,8 +90,20 @@ class RouteContracts(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             control=Mock();engine=engine_at(Path(folder),control,cfg)
             self.assertTrue(engine.clean_session()['ok']);control.assert_not_called();self.assertFalse(control.mock_calls)
-            for call in (engine.generate_ssh_config,lambda:engine.build_ssh_command('app01'),engine.stage_agents,engine.prune_agents,engine.attest_worker,lambda:engine.heal(update_credentials=True)):
+            for call in (engine.generate_ssh_config,engine.stage_agents,engine.prune_agents,engine.attest_worker,lambda:engine.heal(update_credentials=True)):
                 with self.assertRaises((ValueError,OperationError)):call()
+            engine.control=DirectHostControlChannel()
+            command=engine.build_ssh_command('app01')
+            self.assertNotIn('stdio-proxy',' '.join(command))
+            self.assertIn('StrictHostKeyChecking=yes',command)
+            self.assertIn('BatchMode=yes',command)
+            self.assertIn('/dev/null' if os.name!='nt' else 'NUL',command)
+            self.assertTrue(engine.capabilities()['interactive_ssh']['direct_host'])
+            cfg.appliance.hypervisor='auto'
+            with self.assertRaisesRegex(OperationError,'QGA Appliance'):engine.build_ssh_command('app01')
+            cfg.bastion.enabled=True
+            with self.assertRaisesRegex(OperationError,'only RDP TCP mux routes'):engine.generate_ssh_config()
+            cfg.bastion.enabled=False
             self.assertFalse(control.mock_calls)
             caps=engine.capabilities();self.assertFalse(caps['bastion_execution']['tcp_mux'])
             self.assertFalse(caps['worker_verification']['applicable'])
@@ -185,6 +197,11 @@ LogLevel VERBOSE
             direct=measure('direct_ssh_exec',lambda:engine.exec_node('app01','printf DIRECT_OK',timeout_sec=15))
             self.assertEqual((direct.exit_code,direct.stdout),(0,'DIRECT_OK'))
             cfg.targets['app01'].via='jump01'
+            interactive=measure('direct_host_interactive_jump_ssh',lambda:subprocess.run(
+                engine.build_ssh_command('app01',extra_args=['-tt']),
+                input=b"test -t 0 && printf 'TTY_%s\\n' CONFIRMED; exit 7\n",capture_output=True,timeout=15))
+            self.assertEqual(interactive.returncode,7,interactive.stderr)
+            self.assertIn(b'TTY_CONFIRMED',interactive.stdout)
             result=measure('jump_ssh_exec_nonzero',lambda:engine.exec_node('app01',"printf 'тест'; printf 'warning' >&2; exit 7",timeout_sec=15))
             self.assertEqual((result.exit_code,result.stdout,result.stderr),(7,'тест','warning'))
             source=root/'source.bin';data=bytes(range(256))*80;source.write_bytes(data);remote=str(root/"remote ' file.bin")

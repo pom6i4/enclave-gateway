@@ -152,7 +152,9 @@ Bastion. JSON data arrives through stdin. The runtime writes Credential Manager
 through the Windows API for the managed task's exact SID. Cross-session access
 requires SYSTEM and the OS-granted user token. Missing support fails explicitly;
 no password-bearing script or `cmdkey /pass` fallback is generated. This new
-operation still requires native Windows acceptance before production deployment.
+operation has passed a current-SID test in a disposable Windows ARM64 VM.
+SYSTEM selection of a different interactive task SID still requires acceptance
+before production deployment.
 
 Secret separation prevents automatic insertion into interpreter source. It does
 not encrypt the spool or protect against privileged process inspection. Commands
@@ -165,17 +167,57 @@ The portable fixture executes the actual foreground worker's dispatch logic
 with synthetic SSH processes. Only its Windows platform adapters are replaced
 in a private test copy. It checks binary transfers and transaction replay denial.
 
+The reusable [Windows local-spool fixture](../scripts/qualification/endpoint_windows.ps1)
+requires an explicitly disposable VM. It creates a one-day synthetic signing
+certificate and removes its exact trust entries on completion. Each attempt
+requires a fresh evidence directory; failed attempts are retained. Run the
+fixture from an approved administrator context. Sign the fixture itself through
+the lab's approved procedure before invoking it under `AllSigned`. It never
+changes execution policy. Do not run it on a production endpoint: provisioning
+synthetic trust is deliberately limited to this disposable platform fixture.
+The KES acceptance run must use separately approved deployment trust.
+
+```powershell
+.\endpoint_windows.ps1 -Worker C:\EGWLab\bastion_structured.ps1 -Workspace C:\EGWLab\attempt001 -Runtime C:\EGWLab\egw-runtime.exe -DisposableLab
+```
+
+The fixture has passed on Windows ARM64 with Windows PowerShell 5.1 under
+`AllSigned`. It checks these boundaries:
+
+- Valid signed foreground startup using the actual system OpenSSH signature.
+- Unsigned worker rejection.
+- Pinned policy hash rejection.
+- User-writable policy rejection with the expected causal error.
+- Fresh attestation binding the policy hash.
+- Fixed ping and clean operations.
+- Arbitrary PowerShell rejection.
+- TCP mux rejection.
+- Unapproved target rejection.
+- Acknowledged stop with exit code zero.
+- Native ARM64 Credential Manager write for the exact current SID.
+- Wrong-SID rejection without changing the owned test credential.
+
+The worker's Windows local-spool test runs as SYSTEM. PowerShell runs under
+x64 emulation on ARM64; this is not native Windows x64 qualification. The
+Credential Manager helper is a native ARM64 build. Its test credential uses a
+random fixture-only name and is removed afterward. Portable interpreter tests
+add command execution and binary transfer coverage; their SSH process is
+synthetic. Native Direct SSH is tested separately with a real SSH jump and TTY.
+
 The following acceptance remains separate:
 
-- Microsoft publisher validation on the actual Windows build.
-- Administrator-owned policy ACL validation on Windows.
+- Native Windows x64 execution of the new profile.
+- Target SSH execution and file transfer from this Windows worker.
 - Real RDP disconnect and reconnect with this new foreground worker.
-- Native Windows Credential Manager refresh.
-- The exact KES version and corporate protection policy.
+- SYSTEM credential refresh for a different interactive user's SID.
+- The exact KES version and approved protection policy.
 
-A passing portable test is not Windows or KES acceptance. Keep failed runs and
+A passing local-spool test is not RDP or KES acceptance. Keep failed runs and
 versioned evidence. Do not disable protection or add broad exclusions to obtain
-a passing result.
+a passing result. KES acceptance requires a legally available installer with a
+valid lab license. Record its build and approved policy. Preserve relevant
+endpoint events around each test. An alert or a hung RDP session fails the run
+and must be handled through the administrator's incident process.
 
 ## Platform references
 

@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Local endpoint qualification and Direct interactive SSH
+
+- Add native interactive `egw ssh` for a Direct Host's explicitly approved SSH
+  route. Preserve each jump's key and host-key checks without RDP fallback.
+- Reject RDP-only SSH configuration export for Appliance SSH targets.
+- Add a disposable Windows local-spool acceptance fixture with synthetic signing
+  trust cleanup and a 15-second bound on each native credential request.
+- Verify Windows ARM64 foreground startup under AllSigned and current-SID
+  Credential Manager writes. Native Windows x64 remains unqualified for this
+  profile. RDP reconnect and KES acceptance remain open.
+- Add negative policy tests and durable replay rejection across worker restart.
+- Send large Appliance PowerShell sources through QGA stdin to stay below the
+  Windows command-line size limit while retaining separate request data.
+
 ### Explicit policy-approved routes
 
 - Add `config init --route ssh` for an agentless Appliance SSH route.

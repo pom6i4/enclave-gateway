@@ -51,6 +51,38 @@ class RequestDataTests(unittest.TestCase):
         self.assertNotIn(base64.b64encode(secret.encode()).decode(),script)
         self.assertEqual(json.loads(captured[0][2]['input_data']),source.request_data)
 
+    def test_large_qga_source_keeps_argv_bounded_and_data_separate(self):
+        captured=[]
+        class Channel(QgaClient):
+            def __init__(self):pass
+            def exec_guest(self,path,arguments,**options):
+                captured.append((arguments,options));return ExecResult(0,'','',0)
+        source='Write-Output $RequestData.marker;\n#'+'x'*13000
+        marker='fixture-secret-данные'
+        Channel().exec_powershell(PowerShellRequest(source,{'marker':marker}))
+        arguments,options=captured.pop()
+        self.assertLess(len(arguments[-1]),24000)
+        bootstrap=base64.b64decode(arguments[-1]).decode('utf-16le')
+        self.assertNotIn(source,bootstrap);self.assertNotIn(marker,bootstrap)
+        first,body=options['input_data'].split(b'\n',1)
+        self.assertEqual(json.loads(first),{'marker':marker})
+        self.assertTrue(body.decode().endswith(source))
+        self.assertLess(bootstrap.index('InputEncoding'),bootstrap.index('ReadLine'))
+        self.assertLess(bootstrap.index('ReadLine'),bootstrap.index('ReadToEnd'))
+
+    @unittest.skipUnless(os.environ.get('EGW_TEST_POWERSHELL'),'Real interpreter fixture is opt-in')
+    def test_large_qga_source_reads_utf8_after_request_data(self):
+        class Channel(QgaClient):
+            def __init__(self):pass
+            def exec_guest(self,path,arguments,**options):
+                result=subprocess.run([os.environ['EGW_TEST_POWERSHELL'],*arguments],input=options['input_data'],capture_output=True,timeout=15)
+                return ExecResult(result.returncode,result.stdout.decode(),result.stderr.decode(),0)
+        source='[Console]::Write($RequestData.marker);\n#'+'x'*13000
+        result=Channel().exec_powershell(PowerShellRequest(source,{'marker':'fixture-данные'}))
+        self.assertEqual((result.exit_code,result.stdout),(0,'fixture-данные'),result.stderr)
+        result=Channel().exec_powershell('Write-Output "LARGE_SOURCE_OK";\n#'+'x'*13000)
+        self.assertEqual((result.exit_code,result.stdout.strip()),(0,'LARGE_SOURCE_OK'),result.stderr)
+
     def test_rdp_refresh_uses_pinned_task_identity_and_native_stdin(self):
         calls=[]
         class Channel:
