@@ -278,6 +278,9 @@ valid lab license. Record its build and approved policy. Preserve relevant
 endpoint events around each test. An alert or a hung RDP session fails the run
 and must be handled through the administrator's incident process.
 
+Use [the endpoint incident procedure](ENDPOINT-INCIDENT.md) to preserve exact
+samples before execution and prepare a reviewed support packet after detection.
+
 ## Platform references
 
 - [Windows Credential Manager writes](https://learn.microsoft.com/en-us/windows/win32/api/wincred/nf-wincred-credwritew)

@@ -23,6 +23,10 @@ egw doctor --preflight
 
 See [the SSH example](../config/enclave.ssh.example.yaml).
 
+An agentless route still requires approval under the controller's endpoint
+policy. It is not a KES compatibility guarantee; follow the
+[incident procedure](ENDPOINT-INCIDENT.md) after any endpoint detection.
+
 The controller runs the SSH client on Appliance. In POSIX Direct mode the local
 Host is the controller. Target credentials and verified host keys belong on that
 executing hop. They are not automatically copied from Host to a Windows Appliance.

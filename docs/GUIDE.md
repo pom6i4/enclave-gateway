@@ -338,6 +338,7 @@ rotation in your operational plan.
 | QGA socket missing | Match the existing VM's virtio channel, runtime directory and managed name; confirm QGA service |
 | `SESSION_PENDING_WORKER` / no fresh heartbeat | Run `egw agents stage`, verify redirection and execute its printed command inside Bastion RDP |
 | Script is blocked / ConstrainedLanguage | Obtain administrator approval under the actual endpoint policy; do not bypass it |
+| Endpoint product detects or removes a worker | Stop requests and follow the [incident procedure](ENDPOINT-INCIDENT.md); preserve unresolved transaction records |
 | Native helper absent | Standard key-based/in-process work needs no helper; explicitly requested isolation or password helper needs the approved package |
 | Host-key verification failed | Verify the expected fingerprint and known_hosts **on the SSH hop**, retaining strict checking |
 | `Permission denied (publickey)` | Check target account, authorized_keys ACLs and the key/agent on the hop |
