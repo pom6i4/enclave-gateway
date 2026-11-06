@@ -22,6 +22,14 @@ of Windows native helper distributions. A full unsigned candidate assembled
 below still requires all specified platform receipts. Missing receipts must not
 be waived or replaced with cross-compilation evidence.
 
+The published `0.3.0b1` wheel and fresh self-contained x64 helpers have passed
+the Windows artifact checker on native Windows Server 2022 with Python 3.14.5.
+The run used timing scale 1 and the existing 15-second signature cap. Its
+temporary signing key and trust were removed; original trust stores were
+preserved. This additional receipt does not replace the other platform receipts
+or assemble/publish a full native distribution. The source/Python release assets
+and its tag remain unchanged.
+
 ## Source baseline
 
 The historical pre-release `0.2.0` Beta performance baseline is

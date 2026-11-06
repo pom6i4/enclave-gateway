@@ -171,7 +171,8 @@ in a private test copy. It checks binary transfers and transaction replay denial
 
 The reusable [Windows local-spool fixture](../scripts/qualification/endpoint_windows.ps1)
 requires an explicitly disposable VM. It creates a one-day synthetic signing
-certificate and removes its exact trust entries on completion. Each attempt
+certificate and removes its exact trust entries and nonexportable private key
+on completion. It verifies that the owned CNG key no longer exists. Each attempt
 requires a fresh evidence directory; failed attempts are retained. Run the
 fixture from an approved administrator context. Sign the fixture itself through
 the lab's approved procedure before invoking it under `AllSigned`. It never
@@ -183,7 +184,7 @@ The KES acceptance run must use separately approved deployment trust.
 .\endpoint_windows.ps1 -Worker C:\EGWLab\bastion_structured.ps1 -Workspace C:\EGWLab\attempt001 -Runtime C:\EGWLab\egw-runtime.exe -DisposableLab
 ```
 
-The fixture has passed on Windows ARM64 with Windows PowerShell 5.1 under
+The fixture has passed on Windows ARM64 and native Windows x64 with Windows PowerShell 5.1 under
 `AllSigned`. It checks these boundaries:
 
 - Valid signed foreground startup using the actual system OpenSSH signature.
@@ -196,15 +197,32 @@ The fixture has passed on Windows ARM64 with Windows PowerShell 5.1 under
 - TCP mux rejection.
 - Unapproved target rejection.
 - Acknowledged stop with exit code zero.
-- Native ARM64 Credential Manager write for the exact current SID.
+- Native Credential Manager write for the exact current SID.
 - Wrong-SID rejection without changing the owned test credential.
 
-The worker's Windows local-spool test runs as SYSTEM. PowerShell runs under
+The ARM64 Windows local-spool test runs as SYSTEM. PowerShell runs under
 x64 emulation on ARM64; this is not native Windows x64 qualification. The
 Credential Manager helper is a native ARM64 build. Its test credential uses a
 random fixture-only name and is removed afterward. Portable interpreter tests
 add command execution and binary transfer coverage; their SSH process is
 synthetic. Native Direct SSH is tested separately with a real SSH jump and TTY.
+
+A separate Windows Server 2022 Datacenter x64 VM exercised the exact
+`v0.3.0-beta.1` foreground worker bytes in a local spool. Both Windows and
+PowerShell ran natively as x64 in an interactive administrator session. Its
+signed startup took 1,077 ms on the first run; the current-SID credential check,
+including wrong-SID denial, took 760 ms. The fixture's existing 15-second limits
+were unchanged. A repeat also verified private-key deletion and unchanged
+trust stores around the signing fixture.
+
+The exact published `0.3.0b1` wheel also passed a clean offline installation on
+Python 3.14.5 on that VM. Fresh self-contained x64 helpers passed filesystem
+containment and descendant cancellation checks without an SDK, at timing scale
+1 and the existing 15-second signature cap. Temporary artifact-signing trust
+was removed with the original stores preserved. Microsoft Defender real-time
+protection remained enabled; no detections referencing the owned test directory
+were reported. This is local Windows qualification, not a KES policy evaluation
+or an additional end-to-end x64 RDP transport qualification.
 
 An additional pair of isolated Windows ARM64 VMs exercised the signed foreground
 worker in an ordinary user's actual native `mstsc.exe` session. NLA remained
@@ -228,10 +246,8 @@ recovery or remote rollback is claimed. The test used synthetic trust and keys.
 It did not include a proprietary VPN or additional WAN delay. Its Files timings
 are not the legacy Stream performance baseline.
 
-The following acceptance remains separate:
-
-- Native Windows x64 execution of the new profile.
-- The exact KES version and approved protection policy.
+Acceptance under the exact KES version and approved protection policy remains
+separate.
 
 A passing local-spool test is not RDP or KES acceptance. Keep failed runs and
 versioned evidence. Do not disable protection or add broad exclusions to obtain

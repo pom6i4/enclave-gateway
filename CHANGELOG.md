@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Qualify the published Beta foreground worker on native Windows Server 2022
+  x64 under AllSigned, including current-SID credentials and wrong-SID denial.
+  Keep the 15-second limits unchanged. KES policy acceptance remains open.
+- Accept the exact published Python wheel with fresh self-contained x64 helpers
+  in a clean Windows Python 3.14.5 installation without an SDK.
+- Remove and verify deletion of the local-spool fixture's nonexportable signing
+  key as well as its temporary certificate trust.
+- Make the portable replay test cancel only after observing its side effect,
+  avoiding a cold-process startup race while retaining restart/replay checks.
+
 ## 0.3.0 Beta 1
 
 Package version: `0.3.0b1`. Git tag: `v0.3.0-beta.1`.

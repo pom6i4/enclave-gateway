@@ -11,7 +11,7 @@ if(-not $DisposableLab -or $env:OS -ne 'Windows_NT'){throw 'An explicitly dispos
 if([IO.Directory]::Exists($Workspace)){throw 'Use a new evidence directory; previous attempts must be retained'}
 [void][IO.Directory]::CreateDirectory($Workspace)
 $checks=New-Object 'Collections.Generic.List[object]'
-$certificate=$null;$script:workerProcess=$null;$result=@{revision=1;status='running';scope='windows-local-spool';rdp_tested=$false;kes_tested=$false;checks=$checks}
+$certificate=$null;$keyName=$null;$keyProvider=$null;$script:workerProcess=$null;$result=@{revision=1;status='running';scope='windows-local-spool';rdp_tested=$false;kes_tested=$false;checks=$checks}
 function Save-Result { [IO.File]::WriteAllText((Join-Path $Workspace 'result.json'),($result|ConvertTo-Json -Depth 8)) }
 function Check([string]$Name,[scriptblock]$Action){
     $watch=[Diagnostics.Stopwatch]::StartNew()
@@ -68,7 +68,9 @@ try{
     foreach($principal in @($admins,$system)){$acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($principal,'FullControl','Allow')))}
     [IO.File]::SetAccessControl($policyPath,$acl)
     $hash=(Get-FileHash -LiteralPath $policyPath -Algorithm SHA256).Hash.ToLowerInvariant()
-    $certificate=New-SelfSignedCertificate -Type CodeSigningCert -Subject ('CN=EGW Disposable Endpoint Fixture '+[Guid]::NewGuid().ToString('N')) -CertStoreLocation Cert:\LocalMachine\My -NotAfter (Get-Date).AddDays(1)
+    $certificate=New-SelfSignedCertificate -Type CodeSigningCert -Subject ('CN=EGW Disposable Endpoint Fixture '+[Guid]::NewGuid().ToString('N')) -CertStoreLocation Cert:\LocalMachine\My -NotAfter (Get-Date).AddDays(1) -KeyExportPolicy NonExportable -Provider 'Microsoft Software Key Storage Provider'
+    $privateKey=[Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($certificate)
+    try{$keyName=$privateKey.Key.KeyName;$keyProvider=$privateKey.Key.Provider}finally{$privateKey.Dispose()}
     foreach($name in @('Root','TrustedPublisher')){
         $store=New-Object Security.Cryptography.X509Certificates.X509Store($name,'LocalMachine')
         try{$store.Open('ReadWrite');$store.Add($certificate)}finally{$store.Close()}
@@ -136,12 +138,16 @@ public static class EGWFixtureCredential {
 finally{
     if($script:workerProcess){try{if(-not $script:workerProcess.HasExited){$script:workerProcess.Kill();[void]$script:workerProcess.WaitForExit(5000)}}finally{$script:workerProcess.Dispose()}}
     if($certificate){
-        foreach($store in @('My','Root','TrustedPublisher')){
+        foreach($store in @('Root','TrustedPublisher')){
             $path='Cert:\LocalMachine\'+$store+'\'+$certificate.Thumbprint
             if(Test-Path -LiteralPath $path){Remove-Item -LiteralPath $path -Force}
         }
+        $path='Cert:\LocalMachine\My\'+$certificate.Thumbprint
+        if(Test-Path -LiteralPath $path){Remove-Item -LiteralPath $path -DeleteKey -Force}
         foreach($store in @('My','Root','TrustedPublisher')){if(Test-Path -LiteralPath ('Cert:\LocalMachine\'+$store+'\'+$certificate.Thumbprint)){throw 'Synthetic certificate cleanup failed'}}
         $certificate.Dispose();$result.synthetic_trust_removed=$true
+        if($keyName -and [Security.Cryptography.CngKey]::Exists($keyName,$keyProvider,[Security.Cryptography.CngKeyOpenOptions]::MachineKey)){throw 'Synthetic private key cleanup failed'}
+        $result.synthetic_key_removed=$true
     }
     Save-Result
 }

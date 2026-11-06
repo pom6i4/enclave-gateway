@@ -4,6 +4,7 @@ The portable fixture replaces Windows identity/signature adapters in a private
 copy only. It never qualifies Windows publisher trust, RDP or any EDR product.
 """
 import base64
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import hashlib
 import json
@@ -190,10 +191,20 @@ class StructuredRuntimeTests(unittest.TestCase):
     def test_interrupted_transaction_cannot_replay_after_worker_restart(self):
         with self.worker() as (root,transport,executor,process):
             marker=root/'effect'
-            request={'tx_id':generate_tx_id(),'op':'ssh_exec','timeout_ms':500,'target':'app01',
+            request={'tx_id':generate_tx_id(),'op':'ssh_exec','timeout_ms':10000,'target':'app01',
                      'expected_host':'127.0.0.1','expected_port':22,'expected_user':'fixture',
-                     'command':"printf once >> '"+str(marker)+"'; sleep 2"}
-            response=transport._dispatch_envelope(request,10)
+                     'command':"printf once >> '"+str(marker)+"'; sleep 10"}
+            # Establish the side effect before interrupting. A 500 ms startup
+            # assumption could cancel a cold synthetic SSH before it ran at all.
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                pending=pool.submit(transport._dispatch_envelope,request,10)
+                deadline=time.monotonic()+5
+                while not marker.exists() or marker.read_text()!='once':
+                    if pending.done() or time.monotonic()>deadline:
+                        self.fail('Synthetic SSH did not establish the side effect before cancellation')
+                    time.sleep(.01)
+                (root/'spool'/('cancel_'+request['tx_id']+'.json')).write_text(json.dumps({'tx_id':request['tx_id']}))
+                response=pending.result(timeout=3)
             self.assertNotEqual(response.exit_code,0)
             self.assertEqual(marker.read_text(),'once')
             journal=root/'spool/.structured-transactions'/(request['tx_id']+'.json')
