@@ -767,7 +767,7 @@ see [Microsoft's duplicate SID guidance](https://support.microsoft.com/en-au/ser
 
 For an administrator-approved foreground worker without Bastion autostart or
 custom executables, see [the endpoint-policy guide](ENDPOINT-POLICY.md).
-The experimental `structured_only` profile in `0.3.0b1` rejects unsupported
+The experimental `structured_only` profile in `0.3.0b2` rejects unsupported
 operations and never falls back to the universal worker. Its
 [Windows qualification scope](ENDPOINT-POLICY.md#qualification-status) is
 separate from EDR approval and the portable interpreter tests.

@@ -6,13 +6,16 @@ trust. Hosted workflows are not needed for these steps.
 
 ## Current Beta candidate
 
-The current Python package version is `0.3.0b1`. Its Git release tag is
-`v0.3.0-beta.1`. The previously published `v0.2.0` tag remains immutable at
+The current Python package version is `0.3.0b2`. Its Git release tag is
+`v0.3.0-beta.2`. The previously published `v0.2.0` tag remains immutable at
 `2d0167f2402a923f7eb95e4e752559cea250eaef`.
 
 The foreground `structured_only` profile is experimental. See
 [endpoint-policy qualification](ENDPOINT-POLICY.md#qualification-status) for the
-exact tested scope and remaining acceptance. No release implies KES approval.
+exact tested scope and remaining acceptance. Beta 2 is a source and Python prerelease. Its operator backend completed
+24 of 24 uploads of 1 MiB on the isolated KES 14.1 RDP route in 5.07–11.49 s,
+with matching target hashes and zero new KES events in the captured log.
+Deployment under a particular endpoint policy requires its own acceptance.
 The interactive SSH bridge through QGA remains unavailable. Direct Host SSH
 and RDP TCP mux are separate explicitly configured routes.
 
@@ -22,7 +25,7 @@ of Windows native helper distributions. A full unsigned candidate assembled
 below still requires all specified platform receipts. Missing receipts must not
 be waived or replaced with cross-compilation evidence.
 
-The published `0.3.0b1` wheel and fresh self-contained x64 helpers have passed
+The earlier `0.3.0b1` wheel and fresh self-contained x64 helpers have passed
 the Windows artifact checker on native Windows Server 2022 with Python 3.14.5.
 The run used timing scale 1 and the existing 15-second signature cap. Its
 temporary signing key and trust were removed; original trust stores were
@@ -55,11 +58,11 @@ package, sign release artifacts or establish production Enterprise trust.
 
 | Component | Contract | Validation boundary |
 | --- | --- | --- |
-| Python CLI/package | `0.3.0b1`, Python 3.10 or newer; the release matrix exercises 3.10–3.14 | Pure Python has no mandatory third-party runtime dependencies. Record exact Python patches and platform for each run. |
+| Python CLI/package | `0.3.0b2`, Python 3.10 or newer; the release matrix exercises 3.10–3.14 | Pure Python has no mandatory third-party runtime dependencies. Record exact Python patches and platform for each run. |
 | Windows native helpers | `net10.0`, self-contained `win-x64` and `win-arm64` | Use the exact pinned SDK/runtime and both helper projects. Cross compilation and PE inspection do not prove Windows execution. |
 | Worker identity | Attestation version `0.3.0`, fresh nonce, approved hashes/signer/SID when required | This is an independent worker contract, not the Python package version. Deploy matching approved scripts/runtime together. |
 | Legacy worker journal and telemetry | Revision 2, Bastion-local journal with protected spool binding | Preserve transaction identities across restart, migration and backup reconciliation. |
-| Foreground worker ledger | `.structured-transactions` on the approved redirected spool | Preserve its independent binding and interrupted outcomes; no legacy adoption or automatic restart. |
+| Foreground worker ledger | `.structured-transactions` in the redirected spool for `spawn`, or the approved local NTFS state for `operator` | Preserve its independent binding and interrupted outcomes; no legacy adoption or automatic restart. |
 | Optional stream framing | Descriptor revision 3, 4 KiB request alignment | Host and worker must both select `stream`; no automatic replay or protocol downgrade. |
 | Enterprise distribution | Authenticode plus signed CMS metadata and release ordering | Unsigned candidate binaries cannot satisfy production Enterprise installation. |
 
@@ -151,7 +154,7 @@ artifact directory from the successful comparison:
 
 ```powershell
 python scripts/qualification/artifact_acceptance.py `
-  --wheel C:\Acceptance\enclave_gateway-0.3.0b1-py3-none-any.whl `
+  --wheel C:\Acceptance\enclave_gateway-0.3.0b2-py3-none-any.whl `
   --pip-wheel C:\Acceptance\pip-approved-py3-none-any.whl `
   --runtime C:\Acceptance\egw-runtime.exe --askpass C:\Acceptance\egw-askpass.exe `
   --allow-unsigned-lab --work-dir C:\Acceptance\new-client `
@@ -176,7 +179,7 @@ with `pidfd_open` support (Linux 5.3 or newer) for PID-safe cancellation checks:
 
 ```sh
 python3 scripts/qualification/artifact_acceptance.py \
-  --wheel /input/enclave_gateway-0.3.0b1-py3-none-any.whl \
+  --wheel /input/enclave_gateway-0.3.0b2-py3-none-any.whl \
   --pip-wheel /input/pip-approved-py3-none-any.whl \
   --work-dir /work/new-client --output /work/new-result.json
 ```

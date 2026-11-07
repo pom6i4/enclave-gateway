@@ -35,7 +35,7 @@ The diagram shows the RDP route. When policy permits SSH, use the
 Enterprise adds signed native isolation and verified identities. Neither mode
 replaces the organization's endpoint policy, VPN entitlement or host-key approval.
 
-The current version is **0.3.0 Beta 1** (`0.3.0b1`). The signed foreground
+The current version is [**0.3.0 Beta 2**](https://github.com/pom6i4/enclave-gateway/releases/tag/v0.3.0-beta.2) (`0.3.0b2`). The signed foreground
 `structured_only` profile is **experimental** and requires explicit endpoint
 approval. KES compatibility is not certified. See [release boundaries](docs/RELEASING.md#current-beta-candidate).
 
@@ -53,6 +53,9 @@ approval. KES compatibility is not certified. See [release boundaries](docs/RELE
   and block deltas use SHA-256, default 4 MiB blocks and optional zlib compression.
   Standard executes commands in warm PowerShell runspaces; transfer scripts use
   a RunspacePool. No C# compiler or additional worker `.exe` is required.
+- **Operator-started OpenSSH** — the experimental `structured_only` profile
+  can use `operator` with Stream for `egw exec` and `egw cp` to one Linux target
+  through an approved RDP session. [Setup and lab qualification](docs/ENDPOINT-POLICY.md).
 - **Multi-Hop SSH, SOCKS5 & Port Forwarding** — `egw exec`, `cp` and `sync`;
   bidirectional TCP multiplexing and RFC 1928 SOCKS5 (`egw socks5`); OpenSSH
   ProxyCommand (`egw ssh`, `stdio-proxy`, `ssh-config`); supervised forwards

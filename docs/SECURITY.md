@@ -43,11 +43,14 @@ journal and reconcile indeterminate operations instead of blindly replaying them
 
 ## Endpoint policy
 
-The experimental `structured_only` foreground profile in `0.3.0b1` uses an independently
+The experimental `structured_only` foreground profile in `0.3.0b2` uses an independently
 approved Bastion policy and the Microsoft-signed system OpenSSH client.
 It does not install code in AppData or register startup. Request data cannot
-select a Bastion interpreter or arbitrary SSH options. It supports Files only
-and is a signed Standard deployment, not Enterprise native process isolation.
+select a Bastion interpreter or arbitrary SSH options. The default `spawn`
+backend uses Files. The opt-in `operator` backend uses Stream and an
+operator-started OpenSSH session linked to the signed adapter over local named
+pipes. It requires a dedicated key forced to run `operator_target.py` on one
+Linux target. Both backends use the signed Standard trust model.
 See [endpoint preparation and qualification boundaries](ENDPOINT-POLICY.md).
 Compatibility with a particular EDR policy requires separate acceptance.
 

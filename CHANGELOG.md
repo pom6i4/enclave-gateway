@@ -1,10 +1,28 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 Beta 2
+
+Package version `0.3.0b2` and Git tag `v0.3.0-beta.2`.
+
+- Add the opt-in `structured_only` operator backend for one Linux target.
+  The operator starts system OpenSSH in the RDP session. A signed Windows
+  adapter uses local named pipes, and a dedicated SSH key selects the Linux
+  protocol peer.
+- Add `stream_upload_v1` and bounded Deflate. For large raw attachments,
+  overlap RDP reads with SSH writes and withhold the final byte until the
+  complete SHA-256 matches. The Linux target verifies the staged file before
+  replacing the destination.
+- Qualify the operator backend on an isolated Windows Server 2022 x64 RDP
+  route under KES 14.1. All 24 uploads of 1 MiB finished in 5.07–11.49 s
+  within the 15-second limit, with matching SHA-256 and zero new KES events
+  in the captured log. See the [test scope](docs/ENDPOINT-POLICY.md#operator-backend-under-kes-141).
+- Document the operator setup and trust model in English and Russian.
+
+### Earlier qualification and test fixes
 
 - Qualify the published Beta foreground worker on native Windows Server 2022
   x64 under AllSigned, including current-SID credentials and wrong-SID denial.
-  Keep the 15-second limits unchanged. KES policy acceptance remains open.
+  Keep the 15-second limits unchanged. This check covers the Beta 1 local spool.
 - Accept the exact published Python wheel with fresh self-contained x64 helpers
   in a clean Windows Python 3.14.5 installation without an SDK.
 - Remove and verify deletion of the local-spool fixture's nonexportable signing

@@ -1,6 +1,6 @@
 # Endpoint policy and the foreground OpenSSH profile
 
-This describes the experimental foreground profile in `0.3.0b1` (Beta 1).
+This describes the experimental foreground profile in `0.3.0b2` (Beta 2).
 It does not change the published `v0.2.0` tag or certify antivirus compatibility. Deployment on a
 managed endpoint requires its administrator's approval. An active security
 incident must be resolved through the organization's incident process first.
@@ -356,10 +356,25 @@ compatibility.
 The actual redirected RDP Files trial separately exceeded the same limit during
 attestation and cancelled before dispatch. Reconnecting reached the existing
 desktop and the foreground worker exited on the disconnected drive; this is
-not successful end-to-end acceptance. Remaining operations were not qualified
-under KES. Deployment requires administrator review of the detection and an
-approved route. Acceptance under the organization's exact protection policy
-remains open.
+not successful end-to-end acceptance. Deployment requires administrator review of the detection and an approved route.
+
+### Operator backend under KES 14.1
+
+On an isolated Windows Server 2022 x64 Bastion with KES 14.1.0.423 active,
+the `operator` backend passed two series of 12 uploads of 1 MiB each through
+real RDP drive redirection to an isolated Linux OpenSSH target. Each series
+started a new worker and included six incompressible files. All 24 uploads
+finished in 5.07–11.49 seconds within the 15-second limit, and every target
+SHA-256 matched. For the incompressible files, the reply after the final byte
+took 0.23–0.97 seconds. Both series also passed attestation, command execution,
+byte-identical download and acknowledged stop.
+
+AMSI, Behavior Detection and File Threat Protection remained active. The
+before and after KES snapshots contained the same event record IDs. No
+exclusions were added. KSN was off in the lab. This run used Direct control
+mapped to an RDP drive, with disposable signing trust. It qualifies this
+specific laboratory route and policy. Appliance/QGA and customer policy
+acceptance are separate. Earlier failed samples were retained.
 
 A passing local-spool test is not RDP or KES acceptance. Keep failed runs and
 versioned evidence. Do not disable protection or add broad exclusions to obtain
