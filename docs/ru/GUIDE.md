@@ -60,6 +60,36 @@ egw cp hello.txt app01:/tmp/hello.txt
 egw cp app01:/tmp/hello.txt hello-returned.txt
 ```
 
+### OpenSSH с ручным запуском на бастионе
+
+Если политика разрешает запуск системного OpenSSH оператором, используйте
+[подписанную конфигурацию Standard](../../config/enclave.structured.example.yaml)
+для одного Linux-узла и явно выберите режим:
+
+```yaml
+bastion:
+  execution_profile: structured_only
+  structured_backend: operator
+  spool_protocol: stream
+```
+
+1. На целевом Linux-узле установите [`operator_target.py`](../../src/enclave_gateway/agents/operator_target.py) в каталог под управлением root. Настройте Python 3.10+ и отдельный SSH-ключ с ограничением `restrict,command="…"` в `authorized_keys`. Принудительная команда должна запускать этот скрипт.
+2. На бастионе разместите подписанный `bastion_structured.ps1` и утверждённую политику в каталоге под управлением администратора. Укажите в политике `operator_state_dir` на локальном NTFS с доступом на запись для SID воркера и доверенных администраторов. Сверьте ключ сервера в `known_hosts`.
+3. В RDP-сеансе запустите адаптер командой, которую печатает `egw agents command`. Откройте отдельное окно CMD в том же сеансе и выполните команду OpenSSH, напечатанную адаптером.
+
+```sh
+egw agent-verify
+egw exec app01 'uname -s' --timeout 15
+egw cp ./hello.txt app01:/tmp/hello.txt --timeout 15
+egw cp app01:/tmp/hello.txt ./hello-returned.txt --timeout 15
+egw agents stop --timeout 15
+```
+
+Общий срок для `exec` и `cp` ограничен 15 секундами, включая свежую
+аттестацию. Интерактивный SSH и TCP-прокси в этом режиме недоступны. При
+разрыве OpenSSH адаптер завершает работу. Сверьте исход незавершённых операций
+перед повторным запуском. [Порядок развёртывания](../ENDPOINT-POLICY.md#operator-openssh-backend)
+
 ## 4. Эксплуатация и диагностика
 
 - **`SESSION_PENDING_WORKER`.** Проверьте, что команда запуска выполнена в нужном RDP-сеансе и воркер видит перенаправленный спул. `agents stage` подготавливает файлы. Воркер запускается отдельной командой.
