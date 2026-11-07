@@ -43,7 +43,7 @@ journal and reconcile indeterminate operations instead of blindly replaying them
 
 ## Endpoint policy
 
-The experimental `structured_only` foreground profile in `0.3.0b2` uses an independently
+The experimental `structured_only` foreground profile in `0.3.0b3` uses an independently
 approved Bastion policy and the Microsoft-signed system OpenSSH client.
 It does not install code in AppData or register startup. Request data cannot
 select a Bastion interpreter or arbitrary SSH options. The default `spawn`
@@ -51,6 +51,17 @@ backend uses Files. The opt-in `operator` backend uses Stream and an
 operator-started OpenSSH session linked to the signed adapter over local named
 pipes. It requires a dedicated key forced to run `operator_target.py` on one
 Linux target. Both backends use the signed Standard trust model.
+Fresh attestation reports the transfer features for the approved worker.
+
+- `stream_upload_v1` advertises the ordinary streamed upload path for files up
+  to 1 MiB. Ordinary structured copies have a 64 MiB size ceiling.
+- `chunked_copy_slots_v1` is required for `egw cp --chunked` up to 512 MiB.
+  Each 1 MiB block has a SHA-256 check. The adapter holds back the final upload
+  byte until the block hash matches. The receiver verifies the entire file
+  before publishing it atomically.
+- Each chunk request keeps the 15 s limit. Attestation keeps its 10 s budget.
+  A lost receipt requires reconciliation before reusing the upload slot.
+
 See [endpoint preparation and qualification boundaries](ENDPOINT-POLICY.md).
 Compatibility with a particular EDR policy requires separate acceptance.
 

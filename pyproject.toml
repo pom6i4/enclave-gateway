@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "enclave-gateway"
-version = "0.3.0b2"
+version = "0.3.0b3"
 description = "Cross-platform cryptographic appliance orchestrator, RDP Virtual-Channel (MS-RDPEFS) relay, multi-hop SSH router, and MCP server for isolated network enclaves."
 readme = "README.md"
 license = "MIT"

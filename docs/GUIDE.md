@@ -767,7 +767,57 @@ see [Microsoft's duplicate SID guidance](https://support.microsoft.com/en-au/ser
 
 For an administrator-approved foreground worker without Bastion autostart or
 custom executables, see [the endpoint-policy guide](ENDPOINT-POLICY.md).
-The experimental `structured_only` profile in `0.3.0b2` rejects unsupported
+The experimental `structured_only` profile in `0.3.0b3` rejects unsupported
 operations and never falls back to the universal worker. Its
 [Windows qualification scope](ENDPOINT-POLICY.md#qualification-status) is
 separate from EDR approval and the portable interpreter tests.
+
+### Operator-started OpenSSH on Bastion
+
+If endpoint policy permits the operator to start the system OpenSSH client, use
+the [signed Standard configuration](../config/enclave.structured.example.yaml)
+for one Linux target and select this backend explicitly.
+
+```yaml
+bastion:
+  execution_profile: structured_only
+  structured_backend: operator
+  spool_protocol: stream
+```
+
+1. Install [`operator_target.py`](../src/enclave_gateway/agents/operator_target.py)
+   on the Linux target in a root-managed directory. Use Python 3.10+ and a
+   dedicated SSH key restricted in `authorized_keys` with `restrict,command="…"`.
+   The forced command must run the script.
+2. Place the signed `bastion_structured.ps1` and approved policy in an
+   administrator-managed directory on Bastion. Set `operator_state_dir` to
+   local NTFS writable by the worker SID and trusted administrators. Verify
+   the pinned target host key in `known_hosts`.
+3. Run the command printed by `egw agents command` in the RDP session. Open a
+   separate CMD window in that same session and run the OpenSSH command printed
+   by the adapter.
+
+```sh
+egw agent-verify
+egw exec app01 'uname -s' --timeout 15
+egw cp ./hello.txt app01:/tmp/hello.txt --timeout 15
+egw cp app01:/tmp/hello.txt ./hello-returned.txt --timeout 15
+```
+
+Ordinary `exec` and `cp` have a 15 s overall limit, including fresh attestation.
+This profile has no interactive SSH or TCP proxy. The adapter exits if OpenSSH
+disconnects. Reconcile unfinished transactions before restarting it.
+
+For files up to 512 MiB, use chunked copy after `egw agent-verify` reports
+`chunked_copy_slots_v1: true`. It transfers 1 MiB blocks, verifies SHA-256 on each
+block and publishes the destination after verifying the whole file. Each
+request is limited to 15 s. `--timeout` sets the total copy budget. Allow enough
+time on the foreground lease to finish and stop the worker.
+
+```sh
+egw cp --chunked --timeout 900 ./artifact.bin app01:/tmp/artifact.bin
+egw cp --chunked --timeout 900 app01:/tmp/artifact.bin ./received.bin
+egw agents stop --timeout 15
+```
+
+[Deployment and recovery](ENDPOINT-POLICY.md#larger-files-with-the-operator-backend)

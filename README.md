@@ -35,7 +35,7 @@ The diagram shows the RDP route. When policy permits SSH, use the
 Enterprise adds signed native isolation and verified identities. Neither mode
 replaces the organization's endpoint policy, VPN entitlement or host-key approval.
 
-The current version is [**0.3.0 Beta 2**](https://github.com/pom6i4/enclave-gateway/releases/tag/v0.3.0-beta.2) (`0.3.0b2`). The signed foreground
+The current version is [**0.3.0 Beta 3**](https://github.com/pom6i4/enclave-gateway/releases/tag/v0.3.0-beta.3) (`0.3.0b3`). The signed foreground
 `structured_only` profile is **experimental** and requires explicit endpoint
 approval. KES compatibility is not certified. See [release boundaries](docs/RELEASING.md#current-beta-candidate).
 
@@ -55,14 +55,20 @@ approval. KES compatibility is not certified. See [release boundaries](docs/RELE
   a RunspacePool. No C# compiler or additional worker `.exe` is required.
 - **Operator-started OpenSSH** — the experimental `structured_only` profile
   can use `operator` with Stream for `egw exec` and `egw cp` to one Linux target
-  through an approved RDP session. [Setup and lab qualification](docs/ENDPOINT-POLICY.md).
+  through an approved RDP session.
+  - Use `egw cp --chunked` for files up to 512 MiB after the worker advertises
+    `chunked_copy_slots_v1: true`. Every 1 MiB block is verified with SHA-256.
+  - On the isolated Windows Server 2022 RDP lab with KES 14.1, 3 MiB and 65 MiB
+    transferred in both directions. All 136 blocks met the 15 s limit, with a
+    slowest block of 2.692 s and zero new KES events.
+    [Setup and qualification scope](docs/ENDPOINT-POLICY.md).
 - **Multi-Hop SSH, SOCKS5 & Port Forwarding** — `egw exec`, `cp` and `sync`;
   bidirectional TCP multiplexing and RFC 1928 SOCKS5 (`egw socks5`); OpenSSH
   ProxyCommand (`egw ssh`, `stdio-proxy`, `ssh-config`); supervised forwards
   (`egw forward`), terminal monitoring (`egw top`) and layered L1–L7 diagnostics
   (`egw doctor`, `heal`). SSH requires verified host keys and credentials on the
   executing hop; transport compatibility and latency need deployment validation.
-- **Governed MCP Server (stdio & HTTP)** — connect AI agents and IDEs with
+- **Governed MCP Server (stdio & HTTP)** — connect MCP clients and IDEs with
   `egw mcp`, role/tool/node/path policies and `PrincipalRouter` backends.
   `DestructiveCommandGuard` checks commands, `SecretScrubber` filters registered
   and recognized secret patterns, `FlightRecorder` provides hash-linked audit,

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.0 Beta 3
+
+Package version `0.3.0b3` and Git tag `v0.3.0-beta.3`.
+
+- Add `egw cp --chunked` for the signed `operator` backend over Stream. Require
+  attested `chunked_copy_slots_v1` to transfer files up to 512 MiB in 1 MiB blocks.
+- Pipeline each upload block through a reusable slot into OpenSSH. Hold back
+  the final byte until the block's SHA-256 matches. Read download metadata and
+  bytes through one response handle. Publish only after whole-file verification.
+- Keep the 15 s request limit and the 10 s attestation budget. `--timeout`
+  sets the overall copy budget.
+- On the isolated Windows Server 2022 x64 RDP lab under KES 14.1.0.423, the 3 MiB
+  and 65 MiB round trips matched SHA-256. All 136 blocks met the 15 s limit.
+  The slowest was 2.692 s, with zero new KES events and zero added exclusions.
+  [Qualification scope](docs/ENDPOINT-POLICY.md#operator-backend-under-kes-141)
+- The PowerShell-enabled suite discovered 329 tests. 313 passed and 16 were
+  skipped. This release distributes source and Python packages.
+
 ## 0.3.0 Beta 2
 
 Package version `0.3.0b2` and Git tag `v0.3.0-beta.2`.

@@ -82,7 +82,6 @@ egw agent-verify
 egw exec app01 'uname -s' --timeout 15
 egw cp ./hello.txt app01:/tmp/hello.txt --timeout 15
 egw cp app01:/tmp/hello.txt ./hello-returned.txt --timeout 15
-egw agents stop --timeout 15
 ```
 
 Общий срок для `exec` и обычного `cp` ограничен 15 секундами, включая свежую
@@ -92,9 +91,17 @@ egw agents stop --timeout 15
 
 Для файлов до 512 МиБ используйте `egw cp --chunked --timeout 900`, если
 `egw agent-verify` показывает `chunked_copy_slots_v1: true`. Команда передаёт
-блоки по 1 МиБ и заменяет файл назначения после проверки полного
-SHA-256. Лимит каждого запроса составляет 15 секунд. Параметр `--timeout`
-задаёт срок всей передачи, которая также должна уложиться в срок сеанса.
+блоки по 1 МиБ, проверяет SHA-256 каждого блока и заменяет файл назначения
+после проверки SHA-256 всего файла. Лимит каждого запроса составляет 15 секунд.
+Параметр `--timeout` задаёт срок всей передачи. В сеансе должно хватить времени
+на завершение копирования и остановку воркера.
+
+```sh
+egw cp --chunked --timeout 900 ./artifact.bin app01:/tmp/artifact.bin
+egw cp --chunked --timeout 900 app01:/tmp/artifact.bin ./received.bin
+egw agents stop --timeout 15
+```
+
 [Ограничения и восстановление после обрыва](../ENDPOINT-POLICY.md#larger-files-with-the-operator-backend)
 
 ## 4. Эксплуатация и диагностика

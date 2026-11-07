@@ -1,6 +1,6 @@
 # Endpoint policy and the foreground OpenSSH profile
 
-This describes the experimental foreground profile in `0.3.0b2` (Beta 2).
+This describes the experimental foreground profile in `0.3.0b3` (Beta 3).
 It does not change the published `v0.2.0` tag or certify antivirus compatibility. Deployment on a
 managed endpoint requires its administrator's approval. An active security
 incident must be resolved through the organization's incident process first.
@@ -179,7 +179,14 @@ local SSH process and requires reconciliation of its remote effects.
 ### Larger files with the operator backend
 
 Use `--chunked` for files up to 512 MiB when `egw agent-verify` reports
-`chunked_copy_slots_v1: true` for the approved signed adapter. The TargetNode
+`chunked_copy_slots_v1: true` for the approved signed adapter. The matching
+operator worker also reports the related protocol capabilities.
+
+- `chunked_copy_v1: true`
+- `stream_upload_v1: true`
+- `stream_upload_deflate_v1: true`
+
+The TargetNode
 policy must allow file transfers. The Linux endpoint uses `sha256sum` and
 `python3` in addition to its usual shell and core utilities.
 
@@ -190,12 +197,13 @@ egw cp --chunked --timeout 900 app01:/tmp/artifact.bin ./received.bin
 
 The CLI transfers 1 MiB blocks one at a time. The request stream carries only
 control messages. A single upload slot per worker instance holds the block
-data. The worker reads it through handles opened at startup and sends the last
-byte to OpenSSH only after verifying the block SHA-256. A valid receipt lets
+data. The worker opens four slot readers at startup and pipelines reads into
+OpenSSH. It sends the last byte only after verifying the block SHA-256. A valid receipt lets
 the CLI erase and reuse the slot. A lost receipt or interrupted slot cleanup
 can leave the slot occupied. Reconcile the transaction and start a new worker
-before uploading again. Download bytes follow the hashed metadata in the
-pre-opened response file and are verified before the CLI erases that response.
+before uploading again. The Host consumes the hashed metadata and download bytes through a single read
+handle on the pre-opened response slot (`ipc_res_<instance>_<slot>.bin`). It
+verifies the bytes before erasing the response.
 The 15-second per-request limit and 10-second attestation limit still apply. For
 `--chunked`, `--timeout` budgets the whole copy. The foreground lease must
 also cover the copy. Ordinary `exec` and `cp` in operator mode keep their
@@ -406,6 +414,28 @@ exclusions were added. KSN was off in the lab. This run used Direct control
 mapped to an RDP drive, with disposable signing trust. It qualifies this
 specific laboratory route and policy. Appliance/QGA and customer policy
 acceptance are separate. Earlier failed samples were retained.
+
+A subsequent chunked-copy run used an isolated Windows Server 2022 Standard
+x64 Bastion with the same KES build and active protection components. Each copy
+used the real RDP redirected drive and a disposable Linux OpenSSH target.
+
+| Direction | File size | Wall time | Slowest 1 MiB block |
+| --- | ---: | ---: | ---: |
+| Upload | 3 MiB | 6.751 s | 2.320 s |
+| Download | 3 MiB | 4.768 s | 1.709 s |
+| Upload | 65 MiB | 117.987 s | 2.692 s |
+| Download | 65 MiB | 53.863 s | 1.710 s |
+
+- All 136 data blocks and the auxiliary requests met the 15 s limit. The
+  attestation took 0.344 s against a 10 s budget.
+- Every file's SHA-256 matched. The KES event log stayed at 10 records before and
+  after the run, with zero new events and zero added exclusions.
+- The lab covered the Direct-control RDP path. Customer VPN, QGA and other
+  corporate KES policies require separate acceptance.
+
+A separate portable PowerShell and Linux fixture transferred 512 MiB in
+36.022 s upload and 46.780 s download over local pipes. Its request file measured
+5,312,512 bytes (about 5.1 MiB) after the round trip and other fixture operations.
 
 A passing local-spool test is not RDP or KES acceptance. Keep failed runs and
 versioned evidence. Do not disable protection or add broad exclusions to obtain
