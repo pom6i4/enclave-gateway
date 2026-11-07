@@ -3,7 +3,13 @@ from enclave_gateway.security.quoting import ps_quote
 from enclave_gateway.control.stream_pruner import LOCAL_STREAM_PRUNER
 
 
-def cleanup_script(spool, *, execution_profile='legacy'):
+def cleanup_script(spool, *, execution_profile='legacy', structured_backend='spawn'):
+    if structured_backend == 'operator':
+        if execution_profile != 'structured_only':
+            raise ValueError('Operator cleanup requires structured_only')
+        return _operator_cleanup_script(spool)
+    if structured_backend != 'spawn':
+        raise ValueError('Unknown structured backend')
     if execution_profile not in ('legacy','structured_only'):raise ValueError('Unknown cleanup profile')
     binding='worker_structured_storage.json' if execution_profile=='structured_only' else 'worker_storage.json'
     valid=("$meta.revision -eq 1 -and $meta.owner_sha256 -cmatch '^[a-f0-9]{64}$' -and [IO.Directory]::Exists((Join-Path $spool '.structured-transactions'))"
@@ -94,3 +100,43 @@ if([IO.Directory]::Exists($spool)){
 Write-Output ('APPLIANCE_CLEAN_OK:'+(@{removed=$removed;deferred_processing=$deferred;errors=$errors;stopped_worker_verified=$stopped;stream_cleanup=$streamCleanup;stream_removed=$streamRemoved;stream_preserved=$streamPreserved;stream_deferred=$streamDeferred;stream_error_codes=$streamErrorCodes}|ConvertTo-Json -Compress))
 if($errors){exit 1}
 '''.replace('STREAM_HELPER',LOCAL_STREAM_PRUNER).replace('VALID_STORAGE_BINDING',valid).replace('STORAGE_BINDING',binding).replace('SPOOL',ps_quote(spool))
+
+def _operator_cleanup_script(spool):
+    """Check the lease without deleting operator streams or loading a pruner."""
+    return r'''$ErrorActionPreference='Stop'
+$spool=SPOOL
+$stopped=$false
+$lease=$null
+if($env:OS -eq 'Windows_NT'){
+ $spool=[IO.Path]::GetFullPath($spool)
+ if($spool.StartsWith('\\') -or [IO.DriveInfo]::new([IO.Path]::GetPathRoot($spool)).DriveType -eq 'Network'){
+  throw 'Operator cleanup requires the local Appliance spool'
+ }
+}
+$dir=[IO.DirectoryInfo]::new($spool)
+while($dir){
+ if($dir.Exists -and ($dir.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Linked Appliance cleanup path rejected'}
+ $dir=$dir.Parent
+}
+$path=[IO.Path]::Combine($spool,'.worker-session')
+if([IO.File]::Exists($path)){
+ if([IO.File]::GetAttributes($path) -band [IO.FileAttributes]::ReparsePoint){throw 'Linked operator lease rejected'}
+ try{
+  $lease=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+  $statePath=[IO.Path]::Combine($spool,'worker_state.json')
+  $binding=[IO.Path]::Combine($spool,'worker_structured_storage.json')
+  if([IO.File]::Exists($statePath) -and [IO.File]::Exists($binding)){
+   foreach($item in $statePath,$binding){
+    $info=[IO.FileInfo]::new($item)
+    if(($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $info.Length -gt 65536){throw 'Invalid operator cleanup metadata'}
+   }
+   $state=[IO.File]::ReadAllText($statePath)|ConvertFrom-Json
+   $meta=[IO.File]::ReadAllText($binding)|ConvertFrom-Json
+   $stopped=$state.status -ceq 'stopped' -and $state.execution_profile -ceq 'structured_only' -and
+    $state.structured_backend -ceq 'operator' -and $state.spool_protocol -ceq 'stream' -and
+    $state.instance_id -cmatch '^[a-f0-9]{32}$' -and $meta.revision -eq 1 -and $meta.owner_sha256 -cmatch '^[a-f0-9]{64}$'
+  }
+ }catch [IO.IOException]{}finally{if($lease){$lease.Dispose()}}
+}
+Write-Output ('APPLIANCE_CLEAN_OK:'+(@{removed=0;errors=0;stopped_worker_verified=$stopped;stream_cleanup='operator_evidence_preserved'}|ConvertTo-Json -Compress))
+'''.replace('SPOOL', ps_quote(spool))

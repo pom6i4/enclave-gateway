@@ -388,6 +388,15 @@ class RdpVfsTransport:
                 self._verified_worker=None;self._verified_until=0
                 if current(): current().worker_invalidated=True
                 raise OperationError('agent_instance_changed','vfs.response',tx_id=current().tx_id if current() else tx_id,indeterminate=True)
+        if self.spec.structured_backend == "operator" and not current():
+            try:
+                state=json.loads(raw.lstrip('﻿')).get("state")
+            except (ValueError,AttributeError):
+                state=None
+            if state in ("indeterminate", "cancelled"):
+                raise OperationError("remote_indeterminate" if state=="indeterminate" else "cancelled",
+                                     "vfs.response", tx_id=tx_id, node="@bastion",
+                                     indeterminate=state=="indeterminate")
         return self._parse_envelope_response(raw,duration,tx_id,strict=strict)
 
     def exec_bastion(
@@ -427,18 +436,18 @@ class RdpVfsTransport:
         return self._dispatch_envelope(envelope, timeout_sec=timeout_sec)
 
     def _dispatch_envelope(
-        self, envelope: dict[str, Any], timeout_sec: float = 120.0
+        self, envelope: dict[str, Any], timeout_sec: float = 120.0, *, attachment: bytes | None = None
     ) -> ExecResult:
         self.require_worker()
         context = current()
         if not context:
-            return self._dispatch_envelope_impl(envelope, timeout_sec)
+            return self._dispatch_envelope_impl(envelope, timeout_sec, attachment=attachment)
         request_id = str(envelope["tx_id"])
         with context.cancellation_hook("vfs_" + request_id, lambda: self.request_cancel(request_id)):
             try:
-                return self._dispatch_envelope_impl(envelope, timeout_sec)
+                return self._dispatch_envelope_impl(envelope, timeout_sec, attachment=attachment)
             except OperationError:
-                if context.dispatched:
+                if context.dispatched and self.spec.structured_backend != "operator":
                     try:
                         self.request_cancel(request_id)
                     except Exception:
@@ -446,14 +455,26 @@ class RdpVfsTransport:
                 raise
 
     def _dispatch_envelope_impl(
-        self, envelope: dict[str, Any], timeout_sec: float = 120.0
+        self, envelope: dict[str, Any], timeout_sec: float = 120.0, *, attachment: bytes | None = None
     ) -> ExecResult:
         context=current()
+        started=time.monotonic()
+        operator=self.spec.structured_backend == "operator"
+        deadline=started+budget(timeout_sec, "vfs.preflight") if operator else None
         ready=getattr(self,'readiness_guard',None);readiness=None
         if ready:
             with timed('vfs.preflight'):readiness=self._check_readiness(ready)
         evidence=self._verify_dispatch(envelope.get('op'))
-        timeout_sec = budget(timeout_sec, "vfs.dispatch")
+        if attachment is not None and (
+            not operator or self.spec.spool_protocol != "stream"
+            or not evidence or evidence.get("stream_upload_v1") is not True
+        ):
+            raise OperationError("agent_attestation_failed", "vfs.publish",
+                                 message="The attested worker does not support Stream uploads.")
+        remaining=deadline-time.monotonic() if deadline is not None else timeout_sec
+        if remaining <= 0:
+            raise OperationError("deadline_exceeded", "vfs.preflight", node="@bastion")
+        timeout_sec = budget(remaining, "vfs.dispatch")
         deadline = time.monotonic() + timeout_sec
         envelope=dict(envelope)
         envelope.setdefault('expires_unix_ms',int((time.time()+timeout_sec)*1000))
@@ -463,20 +484,24 @@ class RdpVfsTransport:
         tx_id = str(envelope["tx_id"])
         if not re.fullmatch(r"[A-Za-z0-9_]+", tx_id):
             raise ValueError("Invalid transaction identifier")
-        raw_envelope = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
         spool = self.spec.appliance_spool_dir.rstrip("\\/")
         started = time.monotonic()
 
         if self.spec.spool_protocol == "stream":
-            return self._dispatch_stream(envelope, evidence, deadline, started, readiness)
+            return self._dispatch_stream(envelope, evidence, deadline, started, readiness, attachment=attachment)
 
         try_read_fn = getattr(self.control, "try_read_bytes", None)
-        if getattr(self.control, "supports_direct_spool_ipc", False) and callable(
-            try_read_fn
-        ):
+        publisher = getattr(self.control, "publish_bytes", None)
+        direct_ipc = bool(getattr(self.control, "supports_direct_spool_ipc", False)) and callable(try_read_fn)
+        direct_probe = (direct_ipc and callable(publisher) and self.spec.execution_profile == 'structured_only' and
+                        tx_id.startswith('probe_') and envelope.get('op') in ('attest', 'ping') and
+                        isinstance(readiness, dict) and readiness.get('probe_direct_reply') is True)
+        if direct_probe:
+            envelope['probe_direct_reply'] = True
+        raw_envelope = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
+        if direct_ipc:
             req_guest = f"{spool}\\req_{tx_id}.json"
             res_guest = f"{spool}\\res_{tx_id}.json"
-            publisher = getattr(self.control, "publish_bytes", None)
             if callable(publisher):
                 # Publication failure is ambiguous: never replay a mutating command.
                 mark_dispatched()
@@ -486,7 +511,14 @@ class RdpVfsTransport:
                 raw_res_text = ""
                 while time.monotonic() < deadline:
                     checkpoint("vfs.response")
-                    res_bytes = try_read_fn(res_guest, truncate_after_read=False)
+                    try:
+                        res_bytes = try_read_fn(res_guest, truncate_after_read=False)
+                    except QgaCommandError as error:
+                        if not direct_probe or error.command != 'guest-file-open':
+                            raise
+                        res_bytes = None
+                    if direct_probe and time.monotonic() >= deadline:
+                        break
                     if res_bytes:
                         raw_res_text = res_bytes.decode("utf-8", errors="replace").strip()
                         if raw_res_text:
@@ -580,8 +612,10 @@ exit 124
             raise ValueError("Stream worker is not ready; stage and start agents with spool_protocol: stream")
         return descriptor(raw)
 
-    def _dispatch_stream(self, envelope, evidence, deadline, started, readiness=None):
-        from enclave_gateway.transports.stream_frames import Decoder, encode_frame, MAX_STREAM, CONTROL_RESERVE, BLOCK, descriptor
+    def _dispatch_stream(self, envelope, evidence, deadline, started, readiness=None, *, attachment=None):
+        from enclave_gateway.transports.stream_frames import (
+            Decoder, encode_frame, encode_upload_frame, MAX_STREAM, CONTROL_RESERVE, BLOCK, descriptor,
+        )
         expiry=readiness.get('_heartbeat_expires_unix') if isinstance(readiness,dict) else None
         cached=readiness.get('_stream_descriptor') if isinstance(readiness,dict) else None
         if isinstance(cached,dict) and type(expiry) in (int,float) and 0<expiry-time.time()<self.spec.heartbeat_max_age_sec:
@@ -593,7 +627,12 @@ exit 124
             raise ValueError("Stream descriptor does not match the attested worker")
         envelope["expected_worker_instance"] = info["instance"]
         envelope["expected_worker_sha256"] = info["worker_sha256"]
-        frame = encode_frame(envelope)  # Reject unsupported size before dispatch.
+        if attachment is None:
+            frame = encode_frame(envelope)
+        else:
+            frame = encode_upload_frame(
+                envelope, attachment, allow_deflate=evidence.get("stream_upload_deflate_v1") is True,
+            )
         root = self.spec.appliance_spool_dir.rstrip("\\/")
         req = root + "\\ipc_req_" + info["instance"] + ".bin"
         cursor = 0
@@ -603,6 +642,9 @@ exit 124
         with timed("vfs.publish"):
             position = self.control.stream_append(req, frame, limit=limit)
         res = root + "\\ipc_res_" + info["instance"] + "_" + str(position // BLOCK) + ".bin"
+        operator = self.spec.structured_backend == "operator"
+        next_state_check = time.monotonic() + 1.0
+        read_snapshot = getattr(type(self.control), "read_file_snapshot", None)
         while time.monotonic() < deadline:
             checkpoint("vfs.response")
             completed=[];matched=[]
@@ -625,8 +667,7 @@ exit 124
                 # never republish the request.
                 if error.command != "guest-file-open":
                     raise
-                time.sleep(min(.015, max(0, deadline-time.monotonic())))
-                continue
+                data = b""
             cursor += len(data)
             if completed:return completed[0]
             for offset, size, value in (matched if combined else decoder.feed(data)):
@@ -650,8 +691,33 @@ exit 124
                         self.control.consume_file(legacy)
                 return result
             if not data:
+                if operator and time.monotonic() >= next_state_check:
+                    next_state_check = time.monotonic() + 1.0
+                    try:
+                        state_path = root + "\\worker_state.json"
+                        if callable(read_snapshot):
+                            state_raw, stamp = read_snapshot(self.control, state_path)
+                        else:
+                            state_raw = self.control.try_read_bytes(state_path, truncate_after_read=False)
+                            stamp = None
+                        state = json.loads(state_raw.decode("utf-8-sig")) if state_raw and len(state_raw) <= 65536 else {}
+                    except (ValueError, RecursionError):
+                        state = {}
+                    except QgaCommandError as error:
+                        if error.command != "guest-file-open":
+                            raise
+                        state = {}
+                    if (isinstance(state, dict) and state.get("instance_id") == info["instance"]
+                            and state.get("worker_sha256") == info["worker_sha256"]
+                            and (state.get("status") == "stopped" or stamp == 946684800)):  # UTC 2000-01-01
+                        read_only = envelope["op"] in ("attest", "ping")
+                        raise OperationError("session_pending_worker" if read_only else "remote_indeterminate",
+                                             "vfs.response", tx_id=envelope["tx_id"], node="@bastion",
+                                             indeterminate=not read_only,
+                                             message="Operator OpenSSH worker stopped while waiting for a response.")
                 time.sleep(min(.015, max(0, deadline-time.monotonic())))
-        self.request_cancel(envelope["tx_id"])
+        if self.spec.structured_backend != "operator":
+            self.request_cancel(envelope["tx_id"])
         raise OperationError("worker_response_timeout", "vfs.response", tx_id=envelope["tx_id"], node="@bastion", indeterminate=True)
 
     def attest(self, nonce, timeout_sec=10):

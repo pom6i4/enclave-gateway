@@ -712,6 +712,14 @@ class DirectHostControlChannel:
     def consume_file(self, guest_path: str) -> None:
         self._map_path(guest_path).unlink(missing_ok=True)
 
+    def read_file_snapshot(self, guest_path: str) -> tuple[bytes, float]:
+        from enclave_gateway.control.published import open_shared
+        try:
+            with open_shared(self._map_path(guest_path)) as stream:
+                return stream.read(65537), os.fstat(stream.fileno()).st_mtime
+        except FileNotFoundError:
+            return b'', 0.0
+
     def try_read_bytes(
         self, guest_path: str, *, truncate_after_read: bool = False
     ) -> bytes | None:

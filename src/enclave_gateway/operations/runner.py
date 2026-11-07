@@ -34,6 +34,9 @@ def tracked(operation: str):
             requested = kwargs.pop("tx_id", None)
             bound = signature.bind(self, *args, **kwargs)
             bound.apply_defaults()
+            cap = getattr(self, "_operation_timeout", None)
+            if cap and "timeout_sec" in bound.arguments:
+                bound.arguments["timeout_sec"] = cap(operation, bound.arguments.get("node"), bound.arguments["timeout_sec"])
             context = current()
             if context:
                 if requested and requested != context.tx_id:

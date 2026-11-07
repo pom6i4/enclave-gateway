@@ -9,6 +9,7 @@ security:
 bastion:
   host: '10.0.1.10'
   execution_profile: structured_only
+  structured_backend: spawn # operator requires Stream and a dedicated approved target.
   spool_protocol: files
   worker_policy_path: 'C:\ProgramData\EnclaveGateway\worker-policy.json'
   worker_policy_sha256: ''

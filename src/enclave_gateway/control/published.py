@@ -1,14 +1,16 @@
 """Read published spool files without blocking Windows atomic replacement."""
 from __future__ import annotations
+from contextlib import contextmanager
 import os
 from pathlib import Path
 
 
-def read_shared(path: Path, *, offset: int = 0, count: int = -1) -> bytes:
+@contextmanager
+def open_shared(path: Path):
     if os.name != 'nt':
         with path.open('rb') as stream:
-            if offset:stream.seek(offset)
-            return stream.read(count)
+            yield stream
+        return
     import ctypes
     import msvcrt
     from ctypes import wintypes
@@ -26,6 +28,11 @@ def read_shared(path: Path, *, offset: int = 0, count: int = -1) -> bytes:
         kernel.CloseHandle(handle)
         raise
     with os.fdopen(descriptor, 'rb') as stream:
+        yield stream
+
+
+def read_shared(path: Path, *, offset: int = 0, count: int = -1) -> bytes:
+    with open_shared(path) as stream:
         if offset:stream.seek(offset)
         return stream.read(count)
 

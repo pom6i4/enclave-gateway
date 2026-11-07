@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime
 import json
 import time
-from enclave_gateway.operations.context import OperationError,current,budget
+from enclave_gateway.operations.context import OperationError,current,budget,read_only_preflight
 from enclave_gateway.security.quoting import ps_quote
 from enclave_gateway.control.qga_client import QgaCommandError
 
@@ -51,11 +51,59 @@ def _stream_state_from_reader(reader,spec):
     return max(candidates,key=lambda item:(item[0],item[1].get('status')!='running'))[1] if candidates else {}
 
 
+def _structured_worker_state(control,path,spec):
+    reader=getattr(type(control),'read_file_snapshot',None)
+    try:
+        if callable(reader):
+            raw,stamp=reader(control,path)
+        else:
+            # QGA guest-file commands expose bytes but no file timestamps.
+            # Hold the same file open when reading the state and its timestamp.
+            script="$ErrorActionPreference='Stop';$p="+ps_quote(path)+"""
+if([IO.File]::Exists($p)){
+    $file=[IO.File]::Open($p,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
+    try{
+        if($file.Length -le 65536){
+            $reader=[IO.StreamReader]::new($file)
+            try{
+                $state=$reader.ReadToEnd()
+                $stamp=[DateTimeOffset]::new([IO.File]::GetLastWriteTimeUtc($p)).ToUnixTimeMilliseconds()
+                @{state=$state;stamp_ms=$stamp}|ConvertTo-Json -Compress
+            }finally{$reader.Dispose()}
+        }
+    }finally{$file.Dispose()}
+} # EGW_STRUCTURED_READINESS
+"""
+            with read_only_preflight():
+                result=control.exec_powershell(script,timeout_sec=budget(5,'vfs.preflight'))
+            if result.exit_code or not result.stdout:return {}
+            snapshot=json.loads(result.stdout)
+            raw=snapshot['state'].encode('utf-8')
+            stamp=snapshot['stamp_ms']/1000
+        if not raw or len(raw)>65536:return {}
+        value=json.loads(raw.decode('utf-8-sig'))
+        state={'running':value.get('status')=='running','age_sec':time.time()-stamp,
+                'spool_protocol':value.get('spool_protocol','files'),
+                '_heartbeat_expires_unix':stamp+spec.heartbeat_max_age_sec,
+                'execution_profile':value.get('execution_profile'),
+                'structured_backend':value.get('structured_backend', 'spawn'),
+                'probe_direct_reply':value.get('probe_direct_reply') is True}
+        if state['structured_backend'] == 'operator' and state['spool_protocol'] == 'stream':
+            from enclave_gateway.transports.stream_frames import BLOCK, REVISION, descriptor
+            state['_stream_descriptor'] = descriptor(json.dumps({
+                'revision': REVISION, 'block_bytes': BLOCK, 'instance': value.get('instance_id'),
+                'worker_sha256': value.get('worker_sha256'),
+            }).encode())
+        return state
+    except (ValueError,TypeError,KeyError,AttributeError):
+        return {}
+
+
 def require_running_worker(control,spec):
     path=spec.appliance_spool_dir.rstrip('\\/')+'\\worker_state.json'
     reader=getattr(control,'try_read_bytes',None)
-    state=None
-    snapshot=stream_worker_state(control,spec) if spec.spool_protocol=='stream' else None
+    state=_structured_worker_state(control,path,spec) if spec.execution_profile=='structured_only' else None
+    snapshot=stream_worker_state(control,spec) if spec.spool_protocol=='stream' and spec.execution_profile!='structured_only' else None
     if snapshot is not None:
         age=-1;stamp=None
         if snapshot:
@@ -101,10 +149,10 @@ def require_running_worker(control,spec):
                              message='Worker spool protocol differs from bastion.spool_protocol. Stop the worker, stage agents and start the printed command using the same configuration. No request was published.')
 
     if spec.execution_profile=='structured_only':
-        raw=reader(path,truncate_after_read=False) if callable(reader) else None
-        try:profile=json.loads(raw.decode('utf-8-sig')).get('execution_profile') if raw else None
-        except (ValueError,TypeError,AttributeError):profile=None
-        if profile!='structured_only':
+        if state.get('execution_profile')!='structured_only':
             raise OperationError('worker_profile_mismatch','vfs.preflight',node='@bastion',message='Start the approved foreground structured worker; legacy workers cannot receive structured requests.')
+
+        if state.get('structured_backend', 'spawn') != spec.structured_backend:
+            raise OperationError('worker_profile_mismatch','vfs.preflight',node='@bastion',message='The running worker uses a different structured OpenSSH backend.')
 
     return state

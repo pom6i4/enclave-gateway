@@ -215,6 +215,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_cp.add_argument("source", help="Source path or <node>:<remote_path>.")
     p_cp.add_argument("destination", help="Destination path or <node>:<remote_path>.")
+    p_cp.add_argument("--timeout", type=float, default=900.0, help="Total file transfer budget in seconds.")
     p_cp.add_argument(
         "--sudo",
         action="store_true",
@@ -862,6 +863,7 @@ def _main(argv: list[str] | None = None) -> int:
                 dst_path,
                 as_root=args.sudo,
                 use_delta=not args.no_delta,
+                timeout_sec=args.timeout,
                 actor="cli", tx_id=args.tx_id,
             )
         elif src_node is not None and dst_node is None:
@@ -872,6 +874,7 @@ def _main(argv: list[str] | None = None) -> int:
                 src_path,
                 as_root=args.sudo,
                 use_delta=not args.no_delta,
+                timeout_sec=args.timeout,
                 actor="cli", tx_id=args.tx_id,
             )
         else:

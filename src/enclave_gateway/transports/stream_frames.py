@@ -9,10 +9,12 @@ import hashlib
 import json
 import math
 import re
+import zlib
 
 MAGIC = b"EGWS1 "
 MAX_BODY = 1024 * 1024
 MAX_FRAME = len(MAGIC) + 65 + ((MAX_BODY + 2) // 3) * 4 + 1
+MAX_UPLOAD_ATTACHMENT = 1024 * 1024
 MAX_STREAM = 64 * 1024 * 1024
 CONTROL_RESERVE = 1024 * 1024
 BLOCK = 4096
@@ -35,6 +37,25 @@ def encode_frame(value):
     if len(body) > MAX_BODY:
         raise ValueError("Stream envelope exceeds 1 MiB; select bastion.spool_protocol: files for larger commands")
     return MAGIC + hashlib.sha256(body).hexdigest().encode() + b" " + base64.b64encode(body) + b"\n"
+
+
+def encode_upload_frame(value, attachment, *, allow_deflate=False):
+    """Attach bounded file data at the next aligned offset after the envelope."""
+    if (value.get("op") != "ssh_push" or {"upload_bytes", "upload_plain_bytes"} & value.keys()
+            or not 0 < len(attachment) <= MAX_UPLOAD_ATTACHMENT):
+        raise ValueError("Invalid operator upload attachment")
+    if allow_deflate:
+        compressor = zlib.compressobj(level=1, wbits=-zlib.MAX_WBITS)
+        compressed = compressor.compress(attachment) + compressor.flush()
+        # Only spend decompression time when it removes a whole aligned block.
+        if math.ceil(len(compressed) / BLOCK) < math.ceil(len(attachment) / BLOCK):
+            value = {**value, "upload_plain_bytes": len(attachment)}
+            attachment = compressed
+    frame = encode_frame({**value, "upload_bytes": len(attachment)})
+    frame += bytes(-len(frame) % BLOCK) + attachment
+    if len(frame) > MAX_FRAME:
+        raise ValueError("Operator upload frame exceeds the stream limit")
+    return frame
 
 
 def request_block(data, position, limit):

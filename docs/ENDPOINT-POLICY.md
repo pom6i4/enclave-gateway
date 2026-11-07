@@ -27,15 +27,90 @@ The foreground worker does not perform these actions:
 - Disable command history or endpoint logging.
 - Change execution policy or filesystem ACLs.
 
-It launches the Microsoft-signed `ssh.exe` in the system OpenSSH directory.
+The default `spawn` backend launches Microsoft-signed `ssh.exe` from the system OpenSSH directory.
 It ignores per-user SSH configuration through `-F NUL` and prohibits local
 commands. It uses approved keys with strict host-key checking. File copies use
 that same SSH process with binary stdin/stdout and remote Linux utilities.
 The policy cannot supply an executable or arbitrary OpenSSH options.
 
-`structured_only` currently supports only the Files protocol. Stream selection
-is rejected rather than downgraded. Performance must be measured separately;
-previous Stream latency results do not apply to this profile.
+The `spawn` backend uses Files. The opt-in `operator` backend uses Stream.
+There is no fallback between them. The legacy Stream performance baseline does
+not apply to either backend.
+
+## Operator OpenSSH backend
+
+Use this mode when the endpoint owner approves system OpenSSH in a foreground
+operator session but does not allow the worker to start it. It requires one
+Linux TargetNode. Install Python 3.10 or newer on that target and deploy the
+reviewed [Linux protocol peer](../src/enclave_gateway/agents/operator_target.py)
+at a root-managed path. Restrict a dedicated SSH key to that command (for
+example, an `authorized_keys` entry with
+`restrict,command="/usr/bin/python3 /usr/local/lib/egw-operator-target.py"`).
+The dedicated SSH session enables OpenSSH compression and disables forwarding.
+The peer accepts the literal SSH command `egw-operator-v1`. The dedicated key
+grants the Linux account's privileges, including its shell permissions. Apply
+the target's own account and sudo policy accordingly.
+
+Set these options in the signed Standard [starter configuration](../config/enclave.structured.example.yaml):
+
+```yaml
+bastion:
+  execution_profile: structured_only
+  structured_backend: operator
+  spool_protocol: stream
+```
+
+Add `operator_state_dir` to the independently approved Windows worker policy.
+Provision that directory on local NTFS with write access limited to the worker
+SID and trusted administrators. Use a dedicated spool and state directory;
+reconcile outstanding transactions before changing either directory or its
+policy pin. Install the exact signed `bastion_structured.ps1` beside the policy
+in the administrator-owned directory. The process holds both files against
+writes and verifies the script's current signature and digest on every
+attestation. The operator's RDP account and administrators remain trusted.
+
+Run the local start command printed by `egw agents command`. In another CMD
+console in the same RDP session, run the command printed by the adapter. It
+starts system OpenSSH with the fixed target, key and known-hosts file from the
+approved policy. The adapter exchanges framed data over two local named pipes
+that allow the worker SID and deny network access. It does not launch the SSH
+client, run PowerShell from requests, start on logon, or open a TCP proxy.
+Host-key checks remain enabled. No SSH password is accepted.
+
+When the worker is ready, use the regular CLI:
+
+```sh
+egw agent-verify
+egw exec app01 'uname -s' --timeout 15
+egw cp ./artifact.bin app01:/tmp/artifact.bin --timeout 15
+egw cp app01:/tmp/artifact.bin ./received.bin --timeout 15
+egw agents stop --timeout 15
+```
+
+For the `operator` backend, `egw clean` checks that the adapter has stopped
+and preserves the Stream evidence. Retire the spool separately under the
+endpoint's retention policy after collecting any needed evidence.
+
+Target exec and copy share a maximum 15-second operation budget, including
+fresh attestation (at most 10 seconds), staging, remote work and response
+delivery. This is a deadline, not a throughput guarantee for large files.
+When attestation advertises `stream_upload_v1`, uploads up to 1 MiB travel
+in the existing request stream. An adapter advertising `stream_upload_deflate_v1`
+also accepts Deflate when it saves at least one aligned block. The original
+size remains capped at 1 MiB. For large raw attachments, the adapter overlaps
+redirected reads with SSH writes and withholds the final byte until SHA-256
+matches. The Linux peer requires the complete payload before running the
+command. The target verifies the staged file before replacing the destination. These bytes count toward the session's stream
+capacity. Larger uploads and older workers use a separate staged file.
+For copy troubleshooting, the local Bastion journal distinguishes reads
+from the request stream or staged file and the exchange over OpenSSH.
+Preserve the failed transaction and compare these phases before retrying.
+A failure after dispatch can leave the outcome indeterminate; check the
+transaction before retrying a command or upload. If the OpenSSH connection
+ends, including while idle, the adapter stops advertising readiness and exits.
+Start the adapter and OpenSSH again from the approved RDP account. Stop and
+restart when the bounded stream fills. Generic Bastion shell access,
+interactive SSH, mux and multi-hop SSH remain unavailable in this mode.
 
 ## Administrator preparation
 
@@ -104,12 +179,23 @@ local SSH process and requires reconciliation of its remote effects.
 ## State and failures
 
 The foreground worker writes protocol files only to the approved redirected
-spool. Its durable no-replay ledger is `.structured-transactions`. Its binding is
+spool. Its durable no-replay ledger is `.structured-transactions`: it lives
+in the spool for `spawn` and in the approved local state directory for `operator`. Its binding is
 `worker_structured_storage.json`. It does not adopt or erase a legacy journal.
 Protect the Appliance spool and its parents against untrusted writers.
 
-A repeated transaction identifier is rejected, including after restart. Running
-or interrupted operations must be reconciled. Disconnect is not remote rollback.
+The durable ledger rejects repeated transaction identifiers, including after
+restart. Attestation and ping use reserved probe identifiers and require no
+durable ledger writes. Attestation still verifies the current signature and
+file hash and returns the Host's challenge. Probe identifiers cannot execute
+SSH or change worker state. The worker atomically publishes its running and
+stopped states. Between transitions it refreshes the state file's modification
+time, which the Host uses only as a liveness hint. Use matching Host and worker
+versions for this heartbeat protocol. When the worker advertises support and
+the Host polls the spool directly, read-only probes create a unique reply
+without renaming it. The Host waits for a complete response within the
+request deadline. Running or interrupted operations must be reconciled.
+Disconnect is not remote rollback.
 The foreground worker exits on channel failure and does not relaunch itself.
 Stopping SSH does not prove termination of a remote background process; this
 profile does not make an Enterprise owned-process claim. It is available as a

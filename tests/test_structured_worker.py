@@ -38,6 +38,68 @@ def configuration(**changes):
 
 
 class StructuredContractTests(unittest.TestCase):
+    def test_structured_readiness_uses_file_timestamp_and_fails_closed(self):
+        from enclave_gateway.operations.context import OperationError
+        from enclave_gateway.worker_channel import require_running_worker
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            spool=root/'spool';spool.mkdir()
+            path=spool/'worker_state.json'
+            state={'status':'running','execution_profile':'structured_only',
+                   'spool_protocol':'files','last_heartbeat_utc':'2000-01-01T00:00:00Z'}
+            path.write_text(json.dumps(state))
+            channel=DirectHostControlChannel(root)
+            spec=BastionSpec(appliance_spool_dir='C:\\spool',execution_profile='structured_only',
+                             worker_policy_sha256='b'*64)
+            self.assertTrue(require_running_worker(channel,spec)['running'])
+            expired=time.time()-spec.heartbeat_max_age_sec-1
+            os.utime(path,(expired,expired))
+            with self.assertRaises(OperationError) as raised:
+                require_running_worker(channel,spec)
+            self.assertEqual(raised.exception.code,'session_pending_worker')
+            path.write_text(json.dumps({**state,'status':'stopped'}))
+            with self.assertRaises(OperationError):
+                require_running_worker(channel,spec)
+
+    def test_structured_appliance_snapshot_does_not_mark_target_dispatched(self):
+        from enclave_gateway.control.qga_client import ExecResult
+        from enclave_gateway.operations.context import OperationContext,activate,mark_dispatched
+        from enclave_gateway.worker_channel import require_running_worker
+        state={'status':'running','execution_profile':'structured_only','spool_protocol':'files'}
+        def read_state(script, timeout_sec):
+            self.assertIn('GetLastWriteTimeUtc',script)
+            self.assertLessEqual(timeout_sec,1)
+            mark_dispatched()
+            return ExecResult(0,json.dumps({'state':json.dumps(state),'stamp_ms':time.time_ns()//1000000}),'',0)
+        control=Mock()
+        control.exec_powershell.side_effect=read_state
+        operation=OperationContext('test_readiness','@bastion','local',time.monotonic()+1)
+        with activate(operation):
+            self.assertTrue(require_running_worker(control,configuration().bastion)['running'])
+            self.assertFalse(operation.dispatched)
+            mark_dispatched()
+            self.assertTrue(operation.dispatched)
+
+    def test_direct_probe_waits_for_complete_reply(self):
+        from enclave_gateway.control.qga_client import QgaCommandError
+        control=Mock(supports_direct_spool_ipc=True)
+        transport=StructuredTransport(control,configuration().bastion)
+        transport.readiness_guard=lambda: {'probe_direct_reply':True}
+        def complete():
+            envelope=json.loads(control.publish_bytes.call_args.args[0])
+            self.assertIs(envelope['probe_direct_reply'],True)
+            return json.dumps({'tx_id':envelope['tx_id'],'exit_code':0,
+                               'stdout_b64':'VkZTX1BPTkc=','stderr_b64':''}).encode()
+        replies=iter((QgaCommandError('guest-file-open',{'error':'fixture busy'}),b'{'))
+        def read(*args,**kwargs):
+            item=next(replies,None)
+            if isinstance(item,Exception):
+                raise item
+            return complete() if item is None else item
+        control.try_read_bytes.side_effect=read
+        self.assertEqual(transport.ping(1).stdout,'VFS_PONG')
+        self.assertEqual(control.try_read_bytes.call_count,3)
+
     def test_profile_requires_independent_policy_and_cannot_fallback(self):
         cfg=configuration()
         files,hashes,identity,command=agent_bundle(cfg)
@@ -59,9 +121,10 @@ class StructuredContractTests(unittest.TestCase):
 
     def test_source_has_no_dynamic_interpreter_or_persistence(self):
         source=SOURCE.read_text()
-        for pattern in ('FromBase64String','ScriptBlock','AddScript','CreateRunspace','Invoke-Expression',
+        for pattern in ('ScriptBlock','AddScript','CreateRunspace','Invoke-Expression',
                         'TcpClient','LOCALAPPDATA','CurrentVersion\\Run','Register-ScheduledTask','egw-runtime'):
             self.assertNotIn(pattern.lower(),source.lower())
+        self.assertEqual(source.count('FromBase64String'), 1)  # Sealed stream data only.
         self.assertIn("'StrictHostKeyChecking=yes'",source)
         self.assertIn("'ProxyCommand=none'",source)
         self.assertIn("'PermitLocalCommand=no'",source)
@@ -70,7 +133,7 @@ class StructuredContractTests(unittest.TestCase):
 @unittest.skipUnless(os.environ.get('EGW_TEST_POWERSHELL') and os.name!='nt','Portable interpreter fixture requires PowerShell and POSIX')
 class StructuredRuntimeTests(unittest.TestCase):
     @contextmanager
-    def worker(self, *, allow_exec=True, allow_transfer=True):
+    def worker(self, *, allow_exec=True, allow_transfer=True, target_delay_ms=0):
         with tempfile.TemporaryDirectory(prefix='egw-structured-') as temporary:
             root=Path(temporary).resolve();spool=root/'spool';spool.mkdir();stop=root/'stop'
             fake=root/'ssh.exe'
@@ -84,10 +147,13 @@ class StructuredRuntimeTests(unittest.TestCase):
             source=source.replace('            }catch{\n                $state=',
                                   '            }catch{\n                Write-Warning ($_.Exception.ToString()+" line="+$_.InvocationInfo.ScriptLineNumber)\n                $state=')
             source=source.replace("$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value","$sid='S-1-5-21-1000'")
-            a=source.index('function Assert-Signature(');b=source.index('Assert-PlainPath $PSCommandPath',a)
+            a=source.index('function Assert-Signature(');b=source.index('function Operator-Remaining',a)
             source=source[:a]+"function Assert-Signature {return @{Status='Valid';SignerCertificate=@{Thumbprint='"+'A'*40+"'}}}\n"+source[b:]
             a=source.index('    $acl=Get-Acl');b=source.index('    $policy=[IO.File]',a);source=source[:a]+source[b:]
             a=source.index('    $ssh=[IO.Path]');b=source.index('\n',a);source=source[:a]+"    $ssh='"+str(fake).replace("'","''")+"'"+source[b:]
+            if target_delay_ms:
+                source=source.replace('    function Target($Request){',
+                    f'    function Target($Request){{\n        Start-Sleep -Milliseconds {target_delay_ms}')
             worker=root/'worker.ps1';worker.write_text(source)
             class Channel(DirectHostControlChannel):
                 supports_direct_spool_ipc=True
@@ -231,3 +297,26 @@ class StructuredRuntimeTests(unittest.TestCase):
                     self.assertEqual(restarted.wait(timeout=10),0)
                 finally:
                     if restarted.poll() is None:restarted.kill();restarted.wait(timeout=5)
+
+    def test_expired_deadline_during_policy_checks_does_not_launch_ssh(self):
+        with self.worker(target_delay_ms=300) as (root,transport,_,_):
+            request={'tx_id':generate_tx_id(),'op':'ssh_exec','timeout_ms':150,
+                     'target':'app01','expected_host':'127.0.0.1','expected_port':22,
+                     'expected_user':'fixture','command':'true'}
+            response=transport._dispatch_envelope(request,10)
+            self.assertNotEqual(response.exit_code,0)
+            self.assertFalse((root/'ssh-invocations.log').exists())
+            journal=root/'spool/.structured-transactions'/(request['tx_id']+'.json')
+            self.assertEqual(json.loads(journal.read_bytes())['state'],'failed')
+
+    def test_probes_do_not_write_ledger_and_cannot_dispatch_ssh(self):
+        with self.worker() as (root,transport,_,_):
+            self.assertEqual(transport.attest('c'*64)['nonce'],'c'*64)
+            self.assertEqual(transport.ping(10).stdout,'VFS_PONG')
+            request={'tx_id':'probe_'+generate_tx_id(),'op':'ssh_exec','timeout_ms':10000,
+                     'target':'app01','expected_host':'127.0.0.1','expected_port':22,
+                     'expected_user':'fixture','command':'true'}
+            response=transport._dispatch_envelope(request,10)
+            self.assertNotEqual(response.exit_code,0)
+            self.assertFalse((root/'ssh-invocations.log').exists())
+            self.assertEqual(list((root/'spool/.structured-transactions').iterdir()),[])

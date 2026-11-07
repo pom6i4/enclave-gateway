@@ -152,14 +152,21 @@ class BastionSpec:
     execution_profile: str = 'legacy'
     worker_policy_path: str = r'C:\ProgramData\EnclaveGateway\worker-policy.json'
     worker_policy_sha256: str = ''
+    structured_backend: str = 'spawn'
 
     def __post_init__(self):
         if self.transport!='rdp_vfs':
             raise ValueError('bastion.transport supports rdp_vfs only. For an approved SSH route set bastion.enabled: false and route targets via appliance or explicit SSH jump nodes.')
         if self.execution_profile not in ('legacy','structured_only'):
             raise ValueError('execution_profile must be legacy or structured_only')
+        if self.structured_backend not in ('spawn', 'operator'):
+            raise ValueError('structured_backend must be spawn or operator')
+        if self.structured_backend == 'operator' and self.execution_profile != 'structured_only':
+            raise ValueError('The operator OpenSSH backend requires structured_only')
         if self.execution_profile=='structured_only':
-            if self.spool_protocol!='files':raise ValueError('structured_only currently requires files; Stream and TCP mux have no fallback')
+            required_protocol = 'stream' if self.structured_backend == 'operator' else 'files'
+            if self.spool_protocol != required_protocol:
+                raise ValueError(f'structured_only requires {required_protocol} for this backend; no fallback is permitted')
             if not re.fullmatch('[a-f0-9]{64}',self.worker_policy_sha256):raise ValueError('Pin the independently approved Bastion worker policy SHA-256')
         if self.spool_protocol not in ("files", "stream"):
             raise ValueError("spool_protocol must be files or stream")
@@ -311,6 +318,8 @@ class EnclaveConfig(_ConfigurationOrigin):
                 raise ValueError('structured_only requires Bastion and does not provide Enterprise native process isolation')
             if not security.require_signed_agents or not security.worker_sha256 or not security.trusted_signers or not security.enforce_worker_attestation:
                 raise ValueError('structured_only requires signed agents, trusted publishers, a worker SHA-256 and fresh worker attestation')
+            if self.bastion.structured_backend == 'operator' and len(self.targets) != 1:
+                raise ValueError('The operator OpenSSH backend requires exactly one TargetNode')
             if any(t.os not in ('linux','posix','unix') or t.via not in ('bastion','@bastion') for t in self.targets.values()):
                 raise ValueError('structured_only requires direct Linux TargetNodes via Bastion')
 

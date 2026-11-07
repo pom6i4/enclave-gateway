@@ -1,20 +1,28 @@
-"""Explicit Files-only protocol for the foreground, system-OpenSSH worker."""
+"""Structured foreground system-OpenSSH dispatch through RDP."""
 from __future__ import annotations
+import hashlib
 import secrets
+import time
 from pathlib import Path
 
-from enclave_gateway.operations.context import OperationError, budget, timed, current
+from enclave_gateway.operations.context import (
+    OperationContext, OperationError, activate, budget, current, principal, read_only_preflight, timed,
+)
 from enclave_gateway.transports.rdp_vfs import RdpVfsTransport, generate_tx_id
 from enclave_gateway.transports.ssh_hop import SshHopExecutor
+from enclave_gateway.transports.stream_frames import MAX_UPLOAD_ATTACHMENT
 
 
 class StructuredTransport(RdpVfsTransport):
-    def request(self, op, timeout_sec=120, **fields):
-        envelope={'tx_id':generate_tx_id(),'op':op,'timeout_ms':max(1,int(budget(timeout_sec)*1000))}
+    def request(self, op, timeout_sec=120, *, attachment=None, **fields):
+        tx_id=generate_tx_id()
+        if op in ('attest','ping'):
+            tx_id='probe_'+tx_id
+        envelope={'tx_id':tx_id,'op':op,'timeout_ms':max(1,int(budget(timeout_sec)*1000))}
         context=current()
         if context:envelope['operation_id']=context.tx_id
         if set(fields)&set(envelope):raise ValueError('Reserved envelope fields cannot be overridden')
-        return self._dispatch_envelope({**envelope,**fields},timeout_sec)
+        return self._dispatch_envelope({**envelope,**fields},timeout_sec,attachment=attachment)
 
     def exec_bastion(self, ps_script, timeout_sec=120, *, op='exec', extra_fields=None):
         if op not in ('attest','stop') or ps_script:
@@ -23,6 +31,20 @@ class StructuredTransport(RdpVfsTransport):
         if op=='stop' and (extra_fields or {}).get('unregister_autostart'):
             raise ValueError('structured_only has no autostart registration; use the offline recovery command for an older installation')
         return self.request(op,timeout_sec,**(extra_fields or {}))
+
+    def attest(self, nonce, timeout_sec=10):
+        with timed('attestation'), read_only_preflight():
+            if self.spec.structured_backend != "operator":
+                return super().attest(nonce, timeout_sec)
+            timeout = min(budget(timeout_sec, "attestation"), 10.0)
+            parent = current()
+            scope = OperationContext(parent.tx_id if parent else generate_tx_id(), "@bastion",
+                                     principal(), time.monotonic() + timeout)
+            if parent:
+                scope.cancelled = parent.cancelled
+                scope.deadline = min(parent.deadline, scope.deadline)
+            with activate(scope):
+                return super().attest(nonce, timeout)
 
     def ping(self, timeout_sec=45):return self.request('ping',timeout_sec)
     def clean(self, timeout_sec=45):return self.request('clean',timeout_sec)
@@ -66,20 +88,32 @@ class StructuredSshExecutor(SshHopExecutor):
         self._validate(node,options)
         token=secrets.token_hex(16)
         path=self.spec.appliance_spool_dir.rstrip('\\/')+'\\structured_'+token+'.bin'
-        if Path(local_path).stat().st_size>64*1024*1024:raise ValueError('structured_only transfer limit is 64 MiB')
+        source=Path(local_path)
+        size=source.stat().st_size
+        if size>64*1024*1024:raise ValueError('structured_only transfer limit is 64 MiB')
         from enclave_gateway.transports.rdp_vfs import compute_file_sha256
-        digest=compute_file_sha256(Path(local_path))
+        attachment=None
+        if self.spec.structured_backend == "operator":
+            evidence=self.transport._verify_dispatch("ssh_push")
+            if evidence and evidence.get("stream_upload_v1") is True and 0 < size <= MAX_UPLOAD_ATTACHMENT:
+                with source.open("rb") as stream:
+                    attachment=stream.read(MAX_UPLOAD_ATTACHMENT+1)
+                if len(attachment)!=size:
+                    raise ValueError("The upload source changed size while reading")
+        digest=hashlib.sha256(attachment).hexdigest() if attachment is not None else compute_file_sha256(source)
         completed=False
         try:
-            self.control.write_file(Path(local_path),path)
+            if attachment is None:
+                self.control.write_file(source,path)
             result=self.transport.request('ssh_push',options.get('timeout_sec',900),target=node.name,
-                        transfer_id=token,remote_path=remote_path,sha256=digest,as_root=bool(options.get('as_root')),**self._identity(node))
+                        attachment=attachment,transfer_id=token,remote_path=remote_path,sha256=digest,
+                        as_root=bool(options.get('as_root')),**self._identity(node))
             if result.exit_code or result.stdout.strip()!='VERIFIED:'+digest:
                 raise OperationError('structured_transfer_failed','ssh.upload',indeterminate=True,message='Transfer was not verified; reconcile its transaction before retrying.')
             completed=True
             return digest
         finally:
-            if completed:self.control.consume_file(path)
+            if completed and attachment is None:self.control.consume_file(path)
 
     def pull_file_from_node(self,node,remote_path,local_path,**options):
         self._validate(node,options)

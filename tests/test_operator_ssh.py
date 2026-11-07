@@ -1,0 +1,309 @@
+"""Exercise the Linux wire peer and the opt-in host/worker contract."""
+import hashlib
+import itertools
+import json
+import os
+from pathlib import Path
+import random
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import Mock, patch
+
+from enclave_gateway.agents import operator_target
+from enclave_gateway.config import BastionSpec
+from enclave_gateway.operations.context import OperationError
+from enclave_gateway.security.attestation import verify
+from enclave_gateway.transports.structured import StructuredTransport
+
+
+@unittest.skipIf(os.name == "nt", "The operator SSH peer runs on Linux")
+class OperatorPeerTests(unittest.TestCase):
+    def setUp(self):
+        self.process = subprocess.Popen(
+            [sys.executable, str(Path(operator_target.__file__))],
+            env={**os.environ, "SSH_ORIGINAL_COMMAND": "egw-operator-v1"},
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        self.addCleanup(self.stop)
+        self.assertEqual(self.process.stdout.read(8), operator_target.READY)
+
+    def stop(self):
+        if self.process.poll() is None:
+            self.process.kill()
+        self.process.communicate(timeout=3)
+
+    def request(self, *, command, payload=b"", timeout=1500, limit=10000):
+        header = json.dumps({
+            "id": "fixture_id", "command": command, "input_bytes": len(payload),
+            "output_limit": limit, "timeout_ms": timeout,
+        }).encode()
+        self.process.stdin.write(f"{len(header):08x}".encode() + header + payload)
+        self.process.stdin.flush()
+        size = int(self.process.stdout.read(8), 16)
+        result = json.loads(self.process.stdout.read(size))
+        self.assertEqual(result["id"], "fixture_id")
+        return result, self.process.stdout.read(result["output_bytes"]), self.process.stdout.read(result["error_bytes"])
+
+    def test_one_session_preserves_binary_output_and_exit_status(self):
+        binary = bytes(range(256)) * 32
+        reply, output, error = self.request(command="cat; printf failure >&2; exit 7", payload=binary)
+        self.assertEqual((reply["exit_code"], reply["indeterminate"], output, error), (7, False, binary, b"failure"))
+        reply, output, error = self.request(command="printf second")
+        self.assertEqual((reply["exit_code"], output, error), (0, b"second", b""))
+
+    def test_expiry_retires_peer_and_kills_owned_process_group(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "unexpected"
+            import shlex
+            reply, _, _ = self.request(command=f"(sleep 0.4; touch {shlex.quote(str(marker))}) & wait", timeout=70)
+            self.assertTrue(reply["indeterminate"])
+            self.assertEqual(self.process.wait(timeout=3), 0)
+            import time
+            time.sleep(.45)
+            self.assertFalse(marker.exists())
+
+    def test_peer_rejects_excess_budget_before_dispatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "unexpected"
+            import shlex
+            with self.assertRaises(ValueError):
+                self.request(command=f"touch {shlex.quote(str(marker))}", timeout=15001)
+            self.assertNotEqual(self.process.wait(timeout=3), 0)
+            self.assertFalse(marker.exists())
+
+
+class OperatorTransportTests(unittest.TestCase):
+    def test_operator_never_downgrades_to_legacy_or_files(self):
+        for options in ({"spool_protocol": "stream"}, {"execution_profile": "structured_only"}):
+            with self.assertRaises(ValueError):
+                BastionSpec(structured_backend="operator", worker_policy_sha256="b" * 64, **options)
+        spec = BastionSpec(execution_profile="structured_only", structured_backend="operator",
+                           spool_protocol="stream", worker_policy_sha256="b" * 64)
+        transport = StructuredTransport(Mock(), spec)
+        transport._dispatch_envelope = Mock(side_effect=AssertionError("Forbidden dispatch"))
+        with self.assertRaises(OperationError):
+            transport.exec_bastion("whoami")
+        with self.assertRaises(OperationError):
+            transport.mux_open("10.0.0.10", 22)
+
+    def test_fresh_attestation_rejects_a_different_backend(self):
+        nonce = hashlib.sha256(b"fixture").hexdigest()
+        evidence = {
+            "protocol_revision": 1, "version": "0.3.0", "nonce": nonce,
+            "instance_id": "a" * 32, "loaded_sha256": "b" * 64, "current_sha256": "b" * 64,
+            "execution_model": "foreground-openssh",
+        }
+        with self.assertRaisesRegex(OperationError, "backend mismatch"):
+            verify(evidence, nonce, expected_sha256="b" * 64, require_signed=False,
+                   expected_execution_model="operator-openssh")
+
+    def test_stop_during_reply_wait_never_republishes(self):
+        spec = BastionSpec(execution_profile="structured_only", structured_backend="operator",
+                           spool_protocol="stream", worker_policy_sha256="b" * 64)
+        instance = {"instance": "a" * 32, "worker_sha256": "b" * 64}
+        class SnapshotControl(Mock):
+            def read_file_snapshot(self, path):
+                return self.snapshot
+
+        control = SnapshotControl()
+        control.stream_append.return_value = 0
+        control.stream_read.return_value = b""
+        transport = StructuredTransport(control, spec)
+        for op, status, stamp, error_code, unknown in (
+                ("attest", "running", 946684800, "session_pending_worker", False),
+                ("ssh_exec", "stopped", 1794050100, "remote_indeterminate", True)):
+            with self.subTest(op=op, status=status):
+                control.snapshot = json.dumps({
+                    "status": status, "instance_id": instance["instance"],
+                    "worker_sha256": instance["worker_sha256"],
+                }).encode(), stamp
+                control.reset_mock()
+                with patch.object(transport, "_stream_descriptor", return_value=instance), patch(
+                    "enclave_gateway.transports.rdp_vfs.time.monotonic", side_effect=itertools.count(0, 2)
+                ), self.assertRaises(OperationError) as result:
+                    transport._dispatch_stream({"op": op, "tx_id": "fixture_id"}, None, 10, 0)
+                self.assertEqual(result.exception.code, error_code)
+                self.assertEqual(result.exception.indeterminate, unknown)
+                control.stream_append.assert_called_once()
+
+
+@unittest.skipUnless(os.name != "nt" and os.environ.get("EGW_TEST_POWERSHELL"),
+                     "Portable PowerShell/.NET Unix pipe fixture")
+class OperatorWorkerTests(unittest.TestCase):
+    def test_actual_cli_routes_through_stream_and_persistent_peer(self):
+        self._exercise_worker(disconnect=False)
+
+    def test_idle_ssh_disconnect_retires_heartbeat_and_preserves_evidence(self):
+        self._exercise_worker(disconnect=True)
+
+    def test_corrupt_upload_attachment_retires_worker_without_writing_target(self):
+        self._exercise_worker(disconnect=False, corrupt_upload=True)
+
+    def _exercise_worker(self, *, disconnect, corrupt_upload=False):
+        import socket
+        import time
+        from enclave_gateway import cli
+        from enclave_gateway.control.qga_client import DirectHostControlChannel
+        from enclave_gateway.engine import EnclaveEngine
+        from unittest.mock import patch
+        import contextlib
+        import io
+
+        source = Path(operator_target.__file__).with_name("bastion_structured.ps1")
+        with tempfile.TemporaryDirectory(prefix="egw-op-", dir="/tmp") as directory:
+            root = Path(directory).resolve()
+            for name in ("state", "spool", "host"):
+                (root / name).mkdir()
+            policy = root / "policy.json"
+            policy.write_text(json.dumps({
+                "revision": 1, "owner_sid": "S-1-5-21-1000",
+                "operator_state_dir": str(root / "state"),
+                "targets": {"app01": {"host": "127.0.0.1", "port": 22, "user": "fixture",
+                                      "allow_exec": True, "allow_transfer": True, "allow_sudo": False}},
+            }))
+            worker = root / "bastion_structured.ps1"
+            script = source.read_text()
+            script = script.replace("if($env:OS -ne 'Windows_NT')", "if($false)")
+            script = script.replace("$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value", "$sid='S-1-5-21-1000'")
+            start = script.index("function Assert-Signature")
+            end = script.index("function Operator-Remaining", start)
+            script = script[:start] + (
+                "function Assert-Signature {return @{Status='Valid';SignerCertificate=@{Thumbprint='" + "A"*40 + "'}}}\n"
+            ) + script[end:]
+            start = script.index("    $acl=Get-Acl")
+            end = script.index("    $policy=[IO.File]", start)
+            script = script[:start] + script[end:]
+            script = script.replace("Assert-PlainPath $ssh $true", "")
+            start = script.index("function Open-OperatorPipes")
+            end = script.index("function Open-OperatorSlot", start)
+            script = script[:start] + r'''function Open-OperatorPipes{
+                $flags=[IO.Pipes.PipeOptions]::Asynchronous
+                $script:operatorInput=[IO.Pipes.NamedPipeServerStream]::new('fixtureIn','Out',1,'Byte',$flags)
+                $script:operatorOutput=[IO.Pipes.NamedPipeServerStream]::new('fixtureOut','In',1,'Byte',$flags)
+                $i=$operatorInput.WaitForConnectionAsync()
+                $o=$operatorOutput.WaitForConnectionAsync()
+                if(-not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($i,$o),4000)){throw 'No pipe peer'}
+                $requestTimer=[Diagnostics.Stopwatch]::StartNew()
+                if([Text.Encoding]::ASCII.GetString((Operator-Read 8 4000)) -cne "EGWSSH1`n"){throw 'Invalid peer'}
+            }
+''' + script[end:]
+            # Preserve a causal failure message in the private fixture log.
+            script = script.replace("            }catch{\n                $state=",
+                                    "            }catch{\n                Write-Warning $_.Exception.ToString()\n                $state=")
+            worker.write_text(script)
+            policy_pin = hashlib.sha256(policy.read_bytes()).hexdigest()
+            with (root / "worker.log").open("w+b") as log, contextlib.ExitStack() as stack:
+                def stop_process(proc):
+                    if proc.poll() is None:
+                        proc.kill()
+                    proc.wait(timeout=5)
+                process = subprocess.Popen(
+                    [os.environ["EGW_TEST_POWERSHELL"], "-NoProfile", "-File", str(worker),
+                     "-SpoolDir", str(root/"spool"), "-PolicyPath", str(policy), "-PolicySha256", policy_pin,
+                     "-TrustedSignerThumbprints", "A"*40, "-OperatorOpenSsh", "-LeaseSeconds", "60"],
+                    env={**os.environ, "TMPDIR": directory}, stdout=log, stderr=log,
+                )
+                stack.callback(stop_process, process)
+                peers=[]
+                for name in ("fixtureIn", "fixtureOut"):
+                    address=Path(directory)/("CoreFxPipe_"+name)
+                    peer=stack.enter_context(socket.socket(socket.AF_UNIX))
+                    for _ in range(300):
+                        try:
+                            peer.connect(str(address))
+                            break
+                        except (FileNotFoundError, ConnectionRefusedError):
+                            self.assertIsNone(process.poll(), (root/"worker.log").read_text())
+                            time.sleep(.01)
+                    else:
+                        self.fail((root/"worker.log").read_text())
+                    peers.append(peer)
+                server = subprocess.Popen(
+                    [sys.executable, str(Path(operator_target.__file__))], stdin=peers[0], stdout=peers[1],
+                    stderr=log, env={**os.environ, "SSH_ORIGINAL_COMMAND": "egw-operator-v1"},
+                )
+                stack.callback(stop_process, server)
+                for peer in peers:
+                    peer.close()
+                for _ in range(300):
+                    if (root/"spool"/"worker_state.json").is_file() and '"status":"running"' in (root/"spool"/"worker_state.json").read_text():
+                        break
+                    self.assertIsNone(process.poll(), (root/"worker.log").read_text())
+                    time.sleep(.01)
+                else:
+                    self.fail((root/"worker.log").read_text())
+                cfg = root/"config.json"
+                cfg.write_text(json.dumps({
+                    "appliance": {"hypervisor": "direct"},
+                    "bastion": {"appliance_spool_dir": r"C:\spool", "execution_profile": "structured_only",
+                                "spool_protocol": "stream", "structured_backend": "operator", "worker_policy_sha256": policy_pin},
+                    "security": {"mode": "standard", "require_signed_agents": True, "enforce_worker_attestation": True,
+                                 "worker_sha256": hashlib.sha256(worker.read_bytes()).hexdigest(), "trusted_signers": ["A"*40]},
+                    "targets": {"app01": {"host": "127.0.0.1", "port": 22, "user": "fixture"}},
+                }))
+
+                class StreamOnlyUploadControl(DirectHostControlChannel):
+                    def write_file(self, *args, **kwargs):
+                        raise AssertionError("The upload must use the attested Stream path")
+
+                    def stream_append(self, path, data, *, limit=None):
+                        if corrupt_upload and len(data) > 1024 * 1024:
+                            data = data[:-1] + bytes([data[-1] ^ 1])
+                        return super().stream_append(path, data, limit=limit)
+
+                def invoke(*args, expected=0):
+                    out, err = io.StringIO(), io.StringIO()
+                    with patch.object(cli, "EnclaveEngine", side_effect=lambda **kw: EnclaveEngine(
+                        control_override=StreamOnlyUploadControl(root), **kw,
+                    )), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                        code = cli.main(["-c", str(cfg), "--state-dir", str(root/"host"), *args])
+                    self.assertEqual(code, expected, out.getvalue()+err.getvalue()+(root/"worker.log").read_text()+(root/"spool"/"worker_state.json").read_text()+str((root/"spool"/"worker_state.json").stat().st_mtime-time.time()))
+                    return out.getvalue(), err.getvalue()
+
+                evidence=json.loads(invoke("agent-verify")[0])
+                self.assertTrue(evidence["verified"])
+                self.assertTrue(evidence["stream_upload_v1"])
+                self.assertTrue(evidence["stream_upload_deflate_v1"])
+                command = "printf fixture-output\n#" + "x" * 8192
+                self.assertIn("fixture-output", invoke("exec", "app01", command, "--timeout", "15")[0])
+                upload, download, remote = root/"upload", root/"download", root/"remote"
+                upload.write_bytes(random.Random(7).randbytes(1024 * 1024))
+                remote_spec = "app01:"+str(remote)
+                invoke("cp", str(upload), remote_spec, "--timeout", "15", expected=int(corrupt_upload))
+                if corrupt_upload:
+                    self.assertFalse(remote.exists())
+                    process.wait(timeout=3)
+                else:
+                    invoke("cp", remote_spec, str(download), "--timeout", "15")
+                    self.assertEqual(download.read_bytes(), upload.read_bytes())
+                    upload.write_bytes(b"test" * (256 * 1024))
+                    invoke("cp", str(upload), remote_spec, "--timeout", "15")
+                    self.assertEqual(remote.read_bytes(), upload.read_bytes())
+                if corrupt_upload:
+                    self.assertIn("Stream upload checksum mismatch", (root/"worker.log").read_text())
+                elif disconnect:
+                    stop_process(server)
+                    self.assertNotEqual(process.wait(timeout=3), 0)
+                    self.assertIn("OpenSSH disconnected", (root/"worker.log").read_text())
+                    self.assertIn("session_pending_worker", invoke("agent-verify", expected=1)[1])
+                else:
+                    invoke("agents", "stop", "--timeout", "15")
+                    self.assertEqual(process.wait(timeout=3), 0)
+
+                from enclave_gateway.spool_cleanup import cleanup_script
+                evidence = list((root/"spool").glob("ipc_*.bin"))
+                self.assertTrue(evidence)
+                cleaned = subprocess.run(
+                    [os.environ["EGW_TEST_POWERSHELL"], "-NoProfile", "-Command",
+                     cleanup_script(str(root/"spool"), execution_profile="structured_only",
+                                    structured_backend="operator")],
+                    capture_output=True, text=True, timeout=5,
+                )
+                self.assertEqual(cleaned.returncode, 0, cleaned.stderr)
+                details=json.loads(cleaned.stdout.split("APPLIANCE_CLEAN_OK:", 1)[1])
+                self.assertTrue(details["stopped_worker_verified"])
+                self.assertEqual(details["removed"], 0)
+                self.assertTrue(all(path.exists() for path in evidence))
+                self.assertTrue(list((root/"state"/".structured-transactions").glob("*.json")))

@@ -508,6 +508,13 @@ ConvertTo-Json $out -Compress -Depth 8
             )
         return False
 
+    def _operation_timeout(self, operation, node, timeout):
+        if self.config.bastion.structured_backend == "operator" and operation in ("exec_node", "transfer_file"):
+            target = self.config.targets.get(node)
+            if target and target.via in ("bastion", "@bastion"):
+                return min(budget(timeout), 15.0)
+        return timeout
+
     @tracked("exec_node")
     def exec_node(
         self,
@@ -1137,7 +1144,7 @@ Write-Output ("DIAG_CLOCK:"+$epoch+":UDP:"+[int]$udp)
         # The controller can clean expired unclaimed requests even when the
         # Bastion queue or the redirected drive is unavailable.
         try:
-            app=self.control.exec_powershell(cleanup_script(self.config.bastion.appliance_spool_dir,execution_profile=self.config.bastion.execution_profile),timeout_sec=budget(15,'clean.appliance'))
+            app=self.control.exec_powershell(cleanup_script(self.config.bastion.appliance_spool_dir,execution_profile=self.config.bastion.execution_profile,structured_backend=self.config.bastion.structured_backend),timeout_sec=budget(15,'clean.appliance'))
             app_ok=app.exit_code==0
             if app.stdout.startswith('APPLIANCE_CLEAN_OK:'):
                 details=json.loads(app.stdout.split(':',1)[1])
@@ -1455,7 +1462,8 @@ Write-Output 'BASTION_CLEAN_OK'
                       trusted_signers=settings.trusted_signers,require_signed=settings.require_signed_agents,
                       expected_account=settings.worker_account,require_process_isolation=settings.require_process_isolation,expected_runtime_sha256=settings.runtime_sha256,expected_version=settings.worker_version,
                       expected_execution_profile='structured_only' if self.config.bastion.execution_profile=='structured_only' else '',
-                      expected_policy_sha256=self.config.bastion.worker_policy_sha256 if self.config.bastion.execution_profile=='structured_only' else '')
+                      expected_policy_sha256=self.config.bastion.worker_policy_sha256 if self.config.bastion.execution_profile=='structured_only' else '',
+                      expected_execution_model='operator-openssh' if self.config.bastion.structured_backend=='operator' else '')
 
     def _scoped_sync(self,direction,local_dir,node,remote_dir,*,as_root,exclude,timeout_sec,actor):
         from enclave_gateway.agents.rooted_fs import request

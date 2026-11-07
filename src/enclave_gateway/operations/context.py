@@ -75,6 +75,7 @@ class OperationContext:
 
 _current: contextvars.ContextVar[OperationContext | None] = contextvars.ContextVar("egw_operation", default=None)
 _principal: contextvars.ContextVar[str] = contextvars.ContextVar("egw_principal", default="local")
+_track_dispatch: contextvars.ContextVar[bool] = contextvars.ContextVar("egw_track_dispatch", default=True)
 
 
 def current() -> OperationContext | None:
@@ -124,7 +125,18 @@ def mark_dispatched() -> None:
     context = current()
     if context:
         context.check()
-        context.dispatched = True
+        if _track_dispatch.get():
+            context.dispatched = True
+
+
+@contextmanager
+def read_only_preflight() -> Iterator[None]:
+    """Keep the caller's cancellation and deadline while reading readiness."""
+    token = _track_dispatch.set(False)
+    try:
+        yield
+    finally:
+        _track_dispatch.reset(token)
 
 
 @contextmanager

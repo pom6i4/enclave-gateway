@@ -2,7 +2,7 @@
 from __future__ import annotations
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import secrets
 from enclave_gateway.operations.context import mark_dispatched
 from enclave_gateway.security.quoting import ps_quote
@@ -107,7 +107,7 @@ def configuration_summary(config):
             'routes':resolved,'automatic_route_fallback':False,'bastion_worker_required':config.bastion.enabled,
             'spool_protocol':config.bastion.spool_protocol if config.bastion.enabled else None,'valid':True,'security_mode':security.mode,'targets':list(config.targets),'ssh_execution_hops':routes,
             'execution_profile':config.bastion.execution_profile if config.bastion.enabled else None,
-            'execution_model':'agentless-ssh' if not config.bastion.enabled else 'foreground-openssh' if config.bastion.execution_profile=='structured_only' else 'owned-process-job' if security.require_process_isolation else 'in-process-runspace',
+            'execution_model':'agentless-ssh' if not config.bastion.enabled else ('operator-openssh' if config.bastion.structured_backend=='operator' else 'foreground-openssh') if config.bastion.execution_profile=='structured_only' else 'owned-process-job' if security.require_process_isolation else 'in-process-runspace',
             'signed_agents':security.require_signed_agents,'signed_helpers':security.require_signed_helpers,
             'worker_attestation':security.enforce_worker_attestation,'owned_ssh_commands':security.owned_ssh_commands,
             'next_steps':next_steps+[
@@ -133,6 +133,9 @@ def agent_bundle(config, *, execution_policy='',migrate_legacy_state=False,persi
         command='& '+ps_quote(script)+' -SpoolDir '+ps_quote(config.bastion.bastion_spool_dir)
         command+=' -PolicyPath '+ps_quote(config.bastion.worker_policy_path)+' -PolicySha256 '+ps_quote(config.bastion.worker_policy_sha256)
         command+=' -TrustedSignerThumbprints @('+','.join(ps_quote(v) for v in security.trusted_signers)+')'
+        if config.bastion.structured_backend == 'operator':
+            local = str(PureWindowsPath(config.bastion.worker_policy_path).parent / 'bastion_structured.ps1')
+            command = command.replace(ps_quote(script), ps_quote(local), 1) + ' -OperatorOpenSsh'
         return {'bastion_structured.ps1':data},hashes,identity,command
     if execution_policy and (execution_policy!='RemoteSigned' or security.mode!='standard' or security.require_signed_agents):raise ValueError('Process RemoteSigned is an explicit Standard-only option; signed modes retain endpoint policy')
     if security.mode=='custom':raise ValueError('Agent deployment requires explicit security.mode: standard or enterprise; custom configurations are unchanged.')
