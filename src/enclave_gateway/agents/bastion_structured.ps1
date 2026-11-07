@@ -14,6 +14,7 @@ $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
 $utf8=[Text.UTF8Encoding]::new($false,$true)
 $operatorInput=$null;$operatorOutput=$null;$operatorRequests=$null;$operatorUploadReaders=@()
+$operatorSlotReaders=@()
 $operatorReadTask=$null;$operatorReadBuffer=[byte[]]::new(4096);$operatorFrameData=[IO.MemoryStream]::new()
 $operatorLead=[byte[]]::new(1);$operatorLeadTask=$null
 $operatorSlots=@{};$operatorCursor=0L;$operatorTicket=0L;$operatorBroken=$false
@@ -39,6 +40,81 @@ function Quote-Windows([string]$Value){
     return '"'+[regex]::Replace([regex]::Replace($Value,'(\\*)"','$1$1\"'),'(\\+)$','$1$1')+'"'
 }
 function Quote-Posix([string]$Value){return "'"+$Value.Replace("'",("'"+'"'+"'"+'"'+"'"))+"'"}
+function New-OperatorCopyCommand($Request){
+    if($Request.remote_path.EndsWith('/')){throw 'Chunked copy needs a remote file path'}
+    $target=Quote-Posix $Request.remote_path
+    $stage=Quote-Posix ($Request.remote_path+'.egw-'+$Request.transfer_id+'.parts')
+    $offset=$Request.copy_offset;$length=$Request.copy_length
+    if($Request.copy_action -cin @('push_part','pull_part','push_commit')){
+        if(($offset -isnot [int] -and $offset -isnot [long]) -or $offset -lt 0 -or $offset -gt 536870912){
+            throw 'Invalid chunked copy offset'
+        }
+    }
+    if($Request.copy_action -cin @('push_part','pull_part')){
+        $blockSize=1048576
+        if(($length -isnot [int] -and $length -isnot [long]) -or $length -lt 0 -or $length -gt $blockSize -or
+           $offset % $blockSize -ne 0 -or $offset+$length -gt 536870912 -or
+           ($length -eq 0 -and ($offset -ne 0 -or $Request.copy_action -ceq 'pull_part'))){
+            throw 'Invalid chunked copy range'
+        }
+    }
+    if($Request.copy_action -cin @('push_part','push_commit') -and [string]$Request.sha256 -cnotmatch '^[a-f0-9]{64}$'){
+        throw 'Invalid chunked upload checksum'
+    }
+
+    $body='set -eu; export LC_ALL=C; target='+$target+'; stage='+$stage+'; payload="$stage/payload"; '
+    $body+='offset='+(Quote-Posix $offset)+'; count='+(Quote-Posix $length)+'; sha='+(Quote-Posix $Request.sha256)+'; '
+    $command=switch -CaseSensitive ([string]$Request.copy_action){
+        'push_part' {
+            @'
+if test "$offset" -eq 0; then
+    umask 077
+    mkdir -- "$stage"
+    (set -C; : > "$payload")
+fi
+test -d "$stage" && test ! -L "$stage" && test -f "$payload" && test ! -L "$payload" || exit 1
+test "$(wc -c < "$payload")" -eq "$offset"
+cat >> "$payload"
+test "$(wc -c < "$payload")" -eq "$((offset+count))"
+printf 'PART:%s\n' "$sha"
+'@
+        }
+        'push_commit' {
+            @'
+test -d "$stage" && test ! -L "$stage" && test -f "$payload" && test ! -L "$payload" || exit 1
+test "$(wc -c < "$payload")" -eq "$offset"
+hash=$(sha256sum < "$payload")
+test "${hash%% *}" = "$sha"
+python3 -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' "$payload" "$target"
+rmdir -- "$stage" || :
+printf 'VERIFIED:%s\n' "$sha"
+'@
+        }
+        'pull_info' {
+            @'
+test -f "$target"
+size=$(wc -c < "$target")
+test "$size" -le 536870912
+hash=$(sha256sum < "$target")
+printf 'FILE:%d:%s\n' "$size" "${hash%% *}"
+'@
+        }
+        'pull_part' {
+            @'
+test -f "$target"
+python3 -c 'import hashlib, sys
+with open(sys.argv[1], "rb") as stream:
+    stream.seek(int(sys.argv[2]))
+    data = stream.read(int(sys.argv[3]))
+out = sys.stdout.buffer
+out.write(hashlib.sha256(data).hexdigest().encode("ascii") + b"\n")
+out.write(data)' "$target" "$offset" "$count"
+'@
+        }
+        default {throw 'Unsupported chunked copy action'}
+    }
+    return $body+$command.Replace([string][char]13,'')
+}
 function Write-Atomic([string]$Path,[string]$Text,[switch]$Transient){
     Assert-PlainPath $Path
     $temporary=$Path+'.'+[Guid]::NewGuid().ToString('N')+'.tmp'
@@ -123,18 +199,18 @@ function Read-OperatorUpload([string]$Path,[string]$Expected,[long]$Deadline){
         return ,$bytes
     }finally{$file.Dispose()}
 }
-function Read-OperatorUploadAttachment([long]$Offset,[int]$Length,[string]$Expected,[long]$Deadline,[int]$PlainLength,[string]$StreamToPeer,[hashtable]$Record){
+function Read-OperatorUploadAttachment($Readers,[long]$Offset,[int]$Length,[string]$Expected,[long]$Deadline,[int]$PlainLength,[string]$StreamToPeer,[hashtable]$Record){
     $payload=[byte[]]::new($Length)
     $parts=@()
     try{
         # On .NET Framework, ReadAsync on a synchronous FileStream runs the
         # read on the thread pool without querying the redirected file length.
-        $partBytes=[int][Math]::Ceiling($Length/[double]$operatorUploadReaders.Count)
-        for($i=0;$i -lt $operatorUploadReaders.Count -and $i*$partBytes -lt $Length;$i++){
+        $partBytes=[int][Math]::Ceiling($Length/[double]$Readers.Count)
+        for($i=0;$i -lt $Readers.Count -and $i*$partBytes -lt $Length;$i++){
             [void](Operator-Remaining $Deadline)
             $start=$i*$partBytes
             $size=[Math]::Min($partBytes,$Length-$start)
-            $file=$operatorUploadReaders[$i]
+            $file=$Readers[$i]
             $file.Position=$Offset+$start
             $initial=if($StreamToPeer -and $i -eq 0){[Math]::Min($size,65536)}else{$size}
             $parts+=@{File=$file;Start=$start;Length=$size;Task=$file.ReadAsync($payload,$start,$initial)}
@@ -199,28 +275,29 @@ function Read-OperatorUploadAttachment([long]$Offset,[int]$Length,[string]$Expec
         throw
     }
 }
-function Write-OperatorDownload([string]$Path,[byte[]]$Bytes,[long]$Deadline){
+function Get-OperatorDownload([byte[]]$Bytes,[long]$Deadline,[int]$CopyLength){
     $end=[Array]::IndexOf($Bytes,[byte]10,0,[Math]::Min(100,$Bytes.Length))
     if($end -lt 64){throw 'Missing remote checksum'}
     $expected=[Text.Encoding]::ASCII.GetString($Bytes,0,64)
     if($expected -cnotmatch '^[a-f0-9]{64}$'){throw 'Invalid remote checksum'}
     $start=$end+1;$count=$Bytes.Length-$start
     if($count -gt 67108864){throw 'Transfer limit exceeded'}
+    if($CopyLength -ge 0 -and $count -ne $CopyLength){throw 'Invalid download block length'}
     $sha=[Security.Cryptography.SHA256]::Create()
     try{$actual=[BitConverter]::ToString($sha.ComputeHash($Bytes,$start,$count)).Replace('-','').ToLowerInvariant()}
     finally{$sha.Dispose()}
     if($actual -cne $expected){throw 'Download checksum mismatch'}
     [void](Operator-Remaining $Deadline)
-    $file=[IO.File]::Open($Path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
-    try{$file.Write($Bytes,$start,$count)}finally{$file.Dispose()}
-    return 'SHA256:'+$expected
+    return @{Start=$start;Count=$count;Digest=$expected}
 }
-function Invoke-OperatorSsh([string]$Remote,[string]$InputFile,[string]$InputText,[string]$OutputFile,[long]$Deadline,[string]$Id,[ref]$Dispatched,[string]$ExpectedUploadHash,[hashtable]$Record,[long]$UploadOffset,[int]$UploadBytes,[int]$UploadPlainBytes){
-    $pipeline=$UploadBytes -ge 262144 -and -not $UploadPlainBytes
+function Invoke-OperatorSsh([string]$Remote,[string]$InputFile,[string]$InputText,[string]$OutputFile,[long]$Deadline,[string]$Id,[ref]$Dispatched,[string]$ExpectedUploadHash,[hashtable]$Record,[long]$UploadOffset,[int]$UploadBytes,[int]$UploadPlainBytes,[int]$SlotBytes,[int]$DownloadLength=-1){
+    $readers=$operatorUploadReaders
+    if($SlotBytes){$readers=$operatorSlotReaders;$UploadOffset=4096;$UploadBytes=$SlotBytes}
+    $pipeline=$SlotBytes -gt 0 -or ($UploadBytes -ge 262144 -and -not $UploadPlainBytes)
     if($pipeline){$inputBytes=$UploadBytes}
     elseif($UploadBytes){
         $phaseStarted=$requestTimer.ElapsedMilliseconds
-        try{[byte[]]$payload=Read-OperatorUploadAttachment $UploadOffset $UploadBytes $ExpectedUploadHash $Deadline $UploadPlainBytes}
+        try{[byte[]]$payload=Read-OperatorUploadAttachment $readers $UploadOffset $UploadBytes $ExpectedUploadHash $Deadline $UploadPlainBytes}
         catch{$Record.operator_failure_phase='rdp_stream_read';throw}
         finally{$Record.rdp_stream_read_ms=$requestTimer.ElapsedMilliseconds-$phaseStarted}
     }elseif($InputFile){
@@ -230,8 +307,9 @@ function Invoke-OperatorSsh([string]$Remote,[string]$InputFile,[string]$InputTex
         finally{$Record.rdp_stage_read_ms=$requestTimer.ElapsedMilliseconds-$phaseStarted}
     }else{[byte[]]$payload=[Text.Encoding]::UTF8.GetBytes($InputText)}
     if(-not $pipeline){$inputBytes=$payload.Length}
+    $outputLimit=if($DownloadLength -ge 0){$DownloadLength+65}elseif($OutputFile){67108964}else{8388608}
     $header=[Text.Encoding]::UTF8.GetBytes((@{id=$Id;command=$Remote;input_bytes=$inputBytes;
-        output_limit=$(if($OutputFile){67108964}else{8388608});timeout_ms=(Operator-Remaining $Deadline)}|ConvertTo-Json -Compress))
+        output_limit=$outputLimit;timeout_ms=(Operator-Remaining $Deadline)}|ConvertTo-Json -Compress))
     if($header.Length -gt 2097152 -or $inputBytes -gt 67108864){throw 'Operator SSH input limit exceeded'}
     # Once pipe writing begins, a broken pipe or timeout has an unknown outcome.
     # Never reuse the connection after partial I/O or retry a dispatched operation.
@@ -248,7 +326,7 @@ function Invoke-OperatorSsh([string]$Remote,[string]$InputFile,[string]$InputTex
             $Record.ssh_write_ms=$requestTimer.ElapsedMilliseconds-$phaseStarted
             $ioPhase='rdp_ssh_pipeline';$phaseStarted=$requestTimer.ElapsedMilliseconds
             $Record.rdp_read_wait_ms=0;$Record.ssh_pipe_wait_ms=0
-            Read-OperatorUploadAttachment $UploadOffset $UploadBytes $ExpectedUploadHash $Deadline 0 $Id $Record
+            Read-OperatorUploadAttachment $readers $UploadOffset $UploadBytes $ExpectedUploadHash $Deadline 0 $Id $Record
             $Record.rdp_ssh_pipeline_ms=$requestTimer.ElapsedMilliseconds-$phaseStarted
         }else{
             if($inputBytes){Operator-Write $payload $Deadline $Id}
@@ -261,7 +339,7 @@ function Invoke-OperatorSsh([string]$Remote,[string]$InputFile,[string]$InputTex
         if($length -lt 2 -or $length -gt 4096){throw 'Operator SSH reply header limit exceeded'}
         $reply=$utf8.GetString((Operator-Read $length $Deadline $Id))|ConvertFrom-Json
         if($reply.id -cne $Id -or ($reply.exit_code -isnot [int] -and $reply.exit_code -isnot [long]) -or $reply.exit_code -lt 0 -or $reply.exit_code -gt 255 -or
-            ($reply.output_bytes -isnot [int] -and $reply.output_bytes -isnot [long]) -or $reply.output_bytes -lt 0 -or $reply.output_bytes -gt $(if($OutputFile){67108964}else{8388608}) -or
+           ($reply.output_bytes -isnot [int] -and $reply.output_bytes -isnot [long]) -or $reply.output_bytes -lt 0 -or $reply.output_bytes -gt $outputLimit -or
             ($reply.error_bytes -isnot [int] -and $reply.error_bytes -isnot [long]) -or $reply.error_bytes -lt 0 -or $reply.error_bytes -gt 1048576){throw 'Invalid operator SSH reply'}
         $output=Operator-Read $reply.output_bytes $Deadline $Id
         $errors=Operator-Read $reply.error_bytes $Deadline $Id
@@ -269,11 +347,21 @@ function Invoke-OperatorSsh([string]$Remote,[string]$InputFile,[string]$InputTex
         if($reply.indeterminate -isnot [bool] -or $reply.indeterminate){throw 'Remote process outcome requires reconciliation'}
         Watch-OperatorPeer
         $ioPhase='rdp_stage_write';$phaseStarted=$requestTimer.ElapsedMilliseconds
-        $text=if(-not $OutputFile){[Text.Encoding]::UTF8.GetString($output)}
-        elseif(-not $reply.exit_code){Write-OperatorDownload $OutputFile $output $Deadline}
-        else{''}
-        if($OutputFile -and -not $reply.exit_code){$Record.rdp_stage_write_ms=$requestTimer.ElapsedMilliseconds-$phaseStarted}
-        return @{Code=$reply.exit_code;Output=$text;Error=[Text.Encoding]::UTF8.GetString($errors)}
+        $data=$null
+        $text=if(-not $OutputFile -and $DownloadLength -lt 0){[Text.Encoding]::UTF8.GetString($output)}
+        elseif(-not $reply.exit_code){
+            $verified=Get-OperatorDownload $output $Deadline $DownloadLength
+            if($OutputFile){
+                $file=[IO.File]::Open($OutputFile,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+                try{$file.Write($output,$verified.Start,$verified.Count)}finally{$file.Dispose()}
+                $Record.rdp_stage_write_ms=$requestTimer.ElapsedMilliseconds-$phaseStarted
+            }else{
+                $data=[byte[]]::new($verified.Count)
+                [Array]::Copy($output,$verified.Start,$data,0,$verified.Count)
+            }
+            'SHA256:'+$verified.Digest
+        }else{''}
+        return @{Code=$reply.exit_code;Output=$text;Error=[Text.Encoding]::UTF8.GetString($errors);Data=$data}
     }catch{
         $Record.operator_failure_phase=$ioPhase
         $Record.operator_failure_phase_ms=$requestTimer.ElapsedMilliseconds-$phaseStarted
@@ -323,8 +411,12 @@ function Start-OperatorStream{
     $requestPath=[IO.Path]::Combine($SpoolDir,$name)
     [IO.File]::Open($requestPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None).Dispose()
     $script:operatorRequests=[IO.FileStream]::new($requestPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite,1)
+    $slotPath=[IO.Path]::Combine($SpoolDir,('ipc_upload_'+$instance+'.bin'))
+    $slot=[IO.File]::Open($slotPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+    try{$slot.SetLength(4096+1048576)}finally{$slot.Dispose()}
     for($i=0;$i -lt 4;$i++){
         $script:operatorUploadReaders+=[IO.FileStream]::new($requestPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite,1)
+        $script:operatorSlotReaders+=[IO.FileStream]::new($slotPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite,1)
     }
     $script:operatorSlots[0L]=Open-OperatorSlot 0
     $script:operatorSlots[1L]=Open-OperatorSlot 1
@@ -386,9 +478,10 @@ function Receive-OperatorFrames([int]$Maximum=8){
         }else{$operatorQueue.Enqueue($frame)}
     }
 }
-function Send-OperatorFrame($Value){
+function Send-OperatorFrame($Value,[byte[]]$Data){
     $body=[Text.Encoding]::UTF8.GetBytes(($Value|ConvertTo-Json -Compress))
     if($body.Length -gt 32768){
+        if($null -ne $Data){throw 'Download response metadata exceeds its limit'}
         $path=[IO.Path]::Combine($SpoolDir,('res_'+$Value.tx_id+'.json'))
         Write-Atomic $path ([Text.Encoding]::UTF8.GetString($body)) -Transient
         $body=[Text.Encoding]::UTF8.GetBytes((@{tx_id=$Value.tx_id;worker_instance=$instance;worker_sha256=$loadedHash;legacy_result=$true}|ConvertTo-Json -Compress))
@@ -396,7 +489,10 @@ function Send-OperatorFrame($Value){
     $frame=[Text.Encoding]::ASCII.GetBytes(('EGWS1 '+(Hash-Bytes $body)+' '+[Convert]::ToBase64String($body)+"`n"))
     $file=$operatorSlots[$operatorTicket]
     if($null -eq $file){$file=Open-OperatorSlot $operatorTicket}
-    try{$file.Write($frame,0,$frame.Length)}finally{$file.Dispose();$operatorSlots.Remove($operatorTicket)}
+    try{
+        $file.Write($frame,0,$frame.Length)
+        if($null -ne $Data){$file.Write($Data,0,$Data.Length)}
+    }finally{$file.Dispose();$operatorSlots.Remove($operatorTicket)}
 }
 
 Assert-PlainPath $PSCommandPath ([bool]$OperatorOpenSsh)
@@ -465,11 +561,11 @@ try{
         [IO.File]::SetLastWriteTimeUtc($statePath,[DateTime]::UtcNow)
         $script:lastPulse=$started.ElapsedMilliseconds
     }
-    function Response([string]$Id,[int]$Code,[string]$Output,[string]$ErrorText,[string]$State='completed'){
+    function Response([string]$Id,[int]$Code,[string]$Output,[string]$ErrorText,[string]$State='completed',[byte[]]$Data){
         $value=@{tx_id=$Id;exit_code=$Code;state=$State;worker_instance=$instance;worker_sha256=$loadedHash;
             stdout_b64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Output));
             stderr_b64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($ErrorText));duration_ms=[int]$requestTimer.ElapsedMilliseconds}
-        if($OperatorOpenSsh){Send-OperatorFrame $value;return}
+        if($OperatorOpenSsh){Send-OperatorFrame $value $Data;return}
         $path=[IO.Path]::Combine($SpoolDir,('res_'+$Id+'.json'))
         $text=$value|ConvertTo-Json -Compress
         if($directProbeReply){
@@ -590,7 +686,7 @@ try{
                     $request=[IO.File]::ReadAllText($path)|ConvertFrom-Json
                 }
                 $allowed=@('tx_id','op','timeout_ms','expires_unix_ms','operation_id','expected_worker_instance','expected_worker_sha256','target','expected_host','expected_port','expected_user','command','as_root','transfer_id','remote_path','sha256','attestation_nonce','probe_direct_reply')
-                if($OperatorOpenSsh){$allowed+=@('upload_bytes','upload_plain_bytes')}
+                if($OperatorOpenSsh){$allowed+=@('upload_bytes','upload_plain_bytes','upload_slot_bytes','copy_action','copy_offset','copy_length')}
                 if(@($request.PSObject.Properties.Name|Where-Object{$_ -notin $allowed}).Count -or $request.tx_id -cne $id){throw 'Unsupported request fields'}
                 if($OperatorOpenSsh -and (-not $request.expected_worker_instance -or -not $request.expected_worker_sha256)){throw 'Operator stream requires worker identity'}
                 if($request.expected_worker_instance -and $request.expected_worker_instance -cne $instance){throw 'Worker instance changed'}
@@ -602,6 +698,11 @@ try{
                 $deadline=$requestTimer.ElapsedMilliseconds+[Math]::Min($limit,$remaining)
                 if($remaining -le 0 -or ($OperatorOpenSsh -and $operatorCancelled.Contains($id)) -or (-not $OperatorOpenSsh -and [IO.File]::Exists([IO.Path]::Combine($SpoolDir,('cancel_'+$id+'.json'))))){Response $id 125 '' 'Cancelled before dispatch' 'cancelled';continue}
                 if(($request.PSObject.Properties.Name -contains 'as_root') -and $request.as_root -isnot [bool]){throw 'Invalid privilege option'}
+                if($request.PSObject.Properties['upload_slot_bytes'] -and (
+                    $request.op -cne 'ssh_copy' -or $request.copy_action -cne 'push_part' -or
+                    ($request.upload_slot_bytes -isnot [int] -and $request.upload_slot_bytes -isnot [long]) -or
+                    $request.upload_slot_bytes -lt 1 -or $request.upload_slot_bytes -gt 1048576 -or
+                    $request.upload_slot_bytes -ne $request.copy_length)){throw 'Invalid upload slot request'}
                 $probe=$id.StartsWith('probe_',[StringComparison]::Ordinal)
                 if($probe -and [string]$request.op -cnotin @('attest','ping')){throw 'Probe IDs are reserved for attestation and ping'}
                 if($request.PSObject.Properties.Name -contains 'probe_direct_reply'){
@@ -620,7 +721,7 @@ try{
                     }finally{$claim.Dispose()}
                     $claimed=$true
                 }
-                $out='';$code=0;$err='';$state='completed'
+                $out='';$code=0;$err='';$state='completed';$data=$null
                 switch -CaseSensitive ([string]$request.op){
                     'ping' {$out='VFS_PONG'}
                     'clean' {$out='STRUCTURED_CLEAN: durable outcomes and unclaimed evidence preserved'}
@@ -632,13 +733,14 @@ try{
                         $out=@{protocol_revision=1;version='0.3.0';nonce=$request.attestation_nonce;instance_id=$instance;loaded_sha256=$loadedHash;
                             current_sha256=(Hash-File $PSCommandPath);loaded_signature_status=$signatureStatus;loaded_signer=$signer;
                             signature_status=$freshStatus;signer=$freshSigner;sid=$sid;execution_model=$model;
-                            execution_profile='structured_only';policy_sha256=$PolicySha256;stream_upload_v1=[bool]$OperatorOpenSsh;stream_upload_deflate_v1=[bool]$OperatorOpenSsh}|ConvertTo-Json -Compress
+                            execution_profile='structured_only';policy_sha256=$PolicySha256;stream_upload_v1=[bool]$OperatorOpenSsh;stream_upload_deflate_v1=[bool]$OperatorOpenSsh;chunked_copy_v1=[bool]$OperatorOpenSsh;chunked_copy_slots_v1=[bool]$OperatorOpenSsh}|ConvertTo-Json -Compress
                     }
-                    {$_ -in @('ssh_exec','ssh_push','ssh_pull')} {
+                    {$_ -cin @('ssh_exec','ssh_push','ssh_pull','ssh_copy')} {
                         $phase='policy';$node=Target $request
+                        if($request.op -ceq 'ssh_copy' -and -not $OperatorOpenSsh){throw 'Chunked copy requires the operator backend'}
                         if($request.as_root -and $node.allow_sudo -ne $true){throw 'sudo is not approved for this target'}
                         $prefix=if($request.as_root){'sudo -n sh -c '}else{'sh -c '}
-                        $inputFile='';$outputFile='';$inputText=''
+                        $inputFile='';$outputFile='';$inputText='';$downloadLength=-1
                         if($request.op -eq 'ssh_exec'){
                             if($node.allow_exec -ne $true -or $request.command -isnot [string] -or $request.command.Length -gt 1048576){throw 'Command execution is not approved'}
                             $remote=if($request.as_root){'sudo -n sh -s'}else{'sh -s'};$inputText=$request.command+"`n"
@@ -648,7 +750,17 @@ try{
                             $transfer=[IO.Path]::Combine($SpoolDir,('structured_'+$request.transfer_id+'.bin'))
                             if(-not $OperatorOpenSsh){Assert-PlainPath $transfer}
                             $remotePath=Quote-Posix $request.remote_path
-                            if($request.op -eq 'ssh_push'){
+                            if($request.op -ceq 'ssh_copy'){
+                                $body=New-OperatorCopyCommand $request
+                                $recordData.copy_action=$request.copy_action
+                                $recordData.transfer_id=$request.transfer_id
+                                $recordData.copy_offset=$request.copy_offset
+                                if($request.copy_action -ceq 'push_part'){
+                                    if($request.copy_length -gt 0 -and -not $request.upload_slot_bytes){throw 'Upload slot is required'}
+                                    if($request.copy_length -eq 0 -and $request.sha256 -cne (Hash-Bytes ([byte[]]::new(0)))){throw 'Invalid empty upload checksum'}
+                                }
+                                if($request.copy_action -ceq 'pull_part'){$downloadLength=$request.copy_length}
+                            }elseif($request.op -eq 'ssh_push'){
                                 if([string]$request.sha256 -cnotmatch '^[a-f0-9]{64}$'){throw 'Invalid upload checksum'}
                                 if(-not $OperatorOpenSsh){
                                     if((New-Object IO.FileInfo($transfer)).Length -gt 67108864){throw 'Transfer limit exceeded'}
@@ -664,9 +776,10 @@ try{
                             $remote=$prefix+(Quote-Posix $body)
                         }
                         $phase='ssh'
-                        $result=if($OperatorOpenSsh){Invoke-OperatorSsh $remote $inputFile $inputText $outputFile $deadline $id ([ref]$dispatched) ([string]$request.sha256) $recordData $item.UploadOffset $request.upload_bytes $request.upload_plain_bytes}
+                        $result=if($OperatorOpenSsh){Invoke-OperatorSsh $remote $inputFile $inputText $outputFile $deadline $id ([ref]$dispatched) ([string]$request.sha256) $recordData $item.UploadOffset $request.upload_bytes $request.upload_plain_bytes $request.upload_slot_bytes $downloadLength}
                         else{Run-Ssh $node $remote $inputFile $inputText $outputFile $deadline $id ([ref]$dispatched)}
                         $code=$result.Code;$out=$result.Output;$err=$result.Error
+                        $data=$result.Data
                         if($code){$state='failed'}
                         if(-not $OperatorOpenSsh -and $request.op -eq 'ssh_pull' -and -not $code){
                             # Split the remote hash header from the binary stream without decoding file data.
@@ -689,7 +802,7 @@ try{
                     $recordData.state=$state;$recordData.exit_code=$code
                     Write-Atomic $record ($recordData|ConvertTo-Json -Compress)
                 }
-                Response $id $code $out $err $state
+                Response $id $code $out $err $state $data
                 if($request.op -eq 'stop'){return}
             }catch{
                 $state=if($dispatched){'indeterminate'}else{'failed'}
@@ -727,6 +840,7 @@ try{
             if($operatorInput){$operatorInput.Dispose()};if($operatorOutput){$operatorOutput.Dispose()}
             $operatorFrameData.Dispose()
             foreach($reader in $operatorUploadReaders){$reader.Dispose()}
+            foreach($reader in $operatorSlotReaders){$reader.Dispose()}
             if($operatorRequests){$operatorRequests.Dispose()};foreach($slot in $operatorSlots.Values){$slot.Dispose()}
         }finally{
             if($sessionLease){$sessionLease.Dispose()}

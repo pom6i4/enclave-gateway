@@ -42,13 +42,13 @@ class OperationContext:
     def check(self, stage: str | None = None) -> None:
         if stage:
             self.stage = stage
-        code = "cancelled" if self.cancelled.is_set() else "deadline_exceeded" if time.monotonic() >= self.deadline else ""
+        code = "cancelled" if self.cancelled.is_set() else "deadline_exceeded" if time.monotonic() >= min(self.deadline, _deadline_limit.get()) else ""
         if code:
             raise OperationError(code, self.stage, tx_id=self.tx_id, node=self.node, indeterminate=self.dispatched)
 
     def remaining(self, maximum: float | None = None) -> float:
         self.check()
-        remaining = self.deadline - time.monotonic()
+        remaining = min(self.deadline, _deadline_limit.get()) - time.monotonic()
         return min(remaining, maximum) if maximum is not None else remaining
 
     def cancel(self) -> None:
@@ -76,6 +76,17 @@ class OperationContext:
 _current: contextvars.ContextVar[OperationContext | None] = contextvars.ContextVar("egw_operation", default=None)
 _principal: contextvars.ContextVar[str] = contextvars.ContextVar("egw_principal", default="local")
 _track_dispatch: contextvars.ContextVar[bool] = contextvars.ContextVar("egw_track_dispatch", default=True)
+_deadline_limit: contextvars.ContextVar[float] = contextvars.ContextVar("egw_deadline_limit", default=math.inf)
+
+
+@contextmanager
+def limit_deadline(seconds: float) -> Iterator[None]:
+    """Cap nested IO while preserving the operation's cancellation and audit state."""
+    token = _deadline_limit.set(min(_deadline_limit.get(), time.monotonic() + budget(seconds)))
+    try:
+        yield
+    finally:
+        _deadline_limit.reset(token)
 
 
 def current() -> OperationContext | None:
@@ -112,13 +123,21 @@ def budget(maximum: float, stage: str = "") -> float:
     if context:
         context.check(stage or None)
         return context.remaining(maximum)
-    return maximum
+    deadline = _deadline_limit.get()
+    if deadline == math.inf:
+        return maximum
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise OperationError("deadline_exceeded", stage)
+    return min(maximum, remaining)
 
 
 def checkpoint(stage: str) -> None:
     context = current()
     if context:
         context.check(stage)
+    elif _deadline_limit.get() != math.inf and time.monotonic() >= _deadline_limit.get():
+        raise OperationError("deadline_exceeded", stage)
 
 
 def mark_dispatched() -> None:
@@ -165,5 +184,9 @@ def owned_cleanup(seconds: float = 2.0):
     """Short independent budget only for cleanup of resources created by us."""
     parent = current()
     cleanup = OperationContext(parent.tx_id if parent else "cleanup", parent.node if parent else "", principal(), time.monotonic() + seconds)
-    with activate(cleanup):
-        yield
+    token = _deadline_limit.set(math.inf)
+    try:
+        with activate(cleanup):
+            yield
+    finally:
+        _deadline_limit.reset(token)

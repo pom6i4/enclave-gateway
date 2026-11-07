@@ -216,6 +216,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_cp.add_argument("source", help="Source path or <node>:<remote_path>.")
     p_cp.add_argument("destination", help="Destination path or <node>:<remote_path>.")
     p_cp.add_argument("--timeout", type=float, default=900.0, help="Total file transfer budget in seconds.")
+    p_cp.add_argument("--chunked", action="store_true",
+                      help="Use bounded chunks for files up to 512 MiB via the structured operator backend.")
     p_cp.add_argument(
         "--sudo",
         action="store_true",
@@ -855,25 +857,27 @@ def _main(argv: list[str] | None = None) -> int:
     if args.command == "cp":
         src_node, src_path = _parse_copy_spec(args.source)
         dst_node, dst_path = _parse_copy_spec(args.destination)
+        transfer = engine.transfer_file_chunked if args.chunked else engine.transfer_file
+        delta_options = {} if args.chunked else {"use_delta": not args.no_delta}
         if src_node is None and dst_node is not None:
-            meta = engine.transfer_file(
+            meta = transfer(
                 "push",
                 src_path,
                 dst_node,
                 dst_path,
                 as_root=args.sudo,
-                use_delta=not args.no_delta,
+                **delta_options,
                 timeout_sec=args.timeout,
                 actor="cli", tx_id=args.tx_id,
             )
         elif src_node is not None and dst_node is None:
-            meta = engine.transfer_file(
+            meta = transfer(
                 "pull",
                 dst_path,
                 src_node,
                 src_path,
                 as_root=args.sudo,
-                use_delta=not args.no_delta,
+                **delta_options,
                 timeout_sec=args.timeout,
                 actor="cli", tx_id=args.tx_id,
             )

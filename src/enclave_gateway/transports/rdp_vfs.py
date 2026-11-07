@@ -436,16 +436,17 @@ class RdpVfsTransport:
         return self._dispatch_envelope(envelope, timeout_sec=timeout_sec)
 
     def _dispatch_envelope(
-        self, envelope: dict[str, Any], timeout_sec: float = 120.0, *, attachment: bytes | None = None
+        self, envelope: dict[str, Any], timeout_sec: float = 120.0, *, attachment: bytes | None = None,
+        download: bytearray | None = None,
     ) -> ExecResult:
         self.require_worker()
         context = current()
         if not context:
-            return self._dispatch_envelope_impl(envelope, timeout_sec, attachment=attachment)
+            return self._dispatch_envelope_impl(envelope, timeout_sec, attachment=attachment, download=download)
         request_id = str(envelope["tx_id"])
         with context.cancellation_hook("vfs_" + request_id, lambda: self.request_cancel(request_id)):
             try:
-                return self._dispatch_envelope_impl(envelope, timeout_sec, attachment=attachment)
+                return self._dispatch_envelope_impl(envelope, timeout_sec, attachment=attachment, download=download)
             except OperationError:
                 if context.dispatched and self.spec.structured_backend != "operator":
                     try:
@@ -455,7 +456,8 @@ class RdpVfsTransport:
                 raise
 
     def _dispatch_envelope_impl(
-        self, envelope: dict[str, Any], timeout_sec: float = 120.0, *, attachment: bytes | None = None
+        self, envelope: dict[str, Any], timeout_sec: float = 120.0, *, attachment: bytes | None = None,
+        download: bytearray | None = None,
     ) -> ExecResult:
         context=current()
         started=time.monotonic()
@@ -465,6 +467,12 @@ class RdpVfsTransport:
         if ready:
             with timed('vfs.preflight'):readiness=self._check_readiness(ready)
         evidence=self._verify_dispatch(envelope.get('op'))
+        if envelope.get("op") == "ssh_copy" and (
+            not operator or self.spec.spool_protocol != "stream"
+            or not evidence or evidence.get("chunked_copy_slots_v1") is not True
+        ):
+            raise OperationError("agent_attestation_failed", "vfs.publish",
+                                 message="The attested worker does not support chunked Stream copy slots.")
         if attachment is not None and (
             not operator or self.spec.spool_protocol != "stream"
             or not evidence or evidence.get("stream_upload_v1") is not True
@@ -488,7 +496,8 @@ class RdpVfsTransport:
         started = time.monotonic()
 
         if self.spec.spool_protocol == "stream":
-            return self._dispatch_stream(envelope, evidence, deadline, started, readiness, attachment=attachment)
+            return self._dispatch_stream(envelope, evidence, deadline, started, readiness,
+                                         attachment=attachment, download=download)
 
         try_read_fn = getattr(self.control, "try_read_bytes", None)
         publisher = getattr(self.control, "publish_bytes", None)
@@ -612,9 +621,10 @@ exit 124
             raise ValueError("Stream worker is not ready; stage and start agents with spool_protocol: stream")
         return descriptor(raw)
 
-    def _dispatch_stream(self, envelope, evidence, deadline, started, readiness=None, *, attachment=None):
+    def _dispatch_stream(self, envelope, evidence, deadline, started, readiness=None, *,
+                         attachment=None, download=None):
         from enclave_gateway.transports.stream_frames import (
-            Decoder, encode_frame, encode_upload_frame, MAX_STREAM, CONTROL_RESERVE, BLOCK, descriptor,
+            encode_frame, encode_upload_frame, MAX_STREAM, CONTROL_RESERVE, BLOCK, descriptor,
         )
         expiry=readiness.get('_heartbeat_expires_unix') if isinstance(readiness,dict) else None
         cached=readiness.get('_stream_descriptor') if isinstance(readiness,dict) else None
@@ -627,17 +637,45 @@ exit 124
             raise ValueError("Stream descriptor does not match the attested worker")
         envelope["expected_worker_instance"] = info["instance"]
         envelope["expected_worker_sha256"] = info["worker_sha256"]
+        root = self.spec.appliance_spool_dir.rstrip("\\/")
+        req = root + "\\ipc_req_" + info["instance"] + ".bin"
+        limit = MAX_STREAM if envelope.get("op") in ("stop", "attest") else MAX_STREAM-CONTROL_RESERVE
+        if attachment is not None and envelope.get("op") == "ssh_copy":
+            if envelope.get("copy_action") != "push_part" or envelope.get("copy_length") != len(attachment):
+                raise ValueError("Invalid upload slot request")
+            slot = root + "\\ipc_upload_" + info["instance"] + ".bin"
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise OperationError("deadline_exceeded", "vfs.publish")
+            with self.control.stream_slot_lock(slot, remaining):
+                with timed("vfs.upload_slot"):
+                    self.control.stream_fill_slot(slot, attachment)
+                frame = encode_frame({**envelope, "upload_slot_bytes": len(attachment)})
+                result = self._exchange_stream(req, frame, limit, envelope, info, deadline, started)
+                if not result.exit_code and result.stdout.strip() == "PART:" + envelope["sha256"]:
+                    spans = [(slot, BLOCK, len(attachment)), (slot, 0, 1)]
+                    with timed("vfs.erase"):
+                        if callable(getattr(type(self.control), "stream_erase_many", None)):
+                            self.control.stream_erase_many(spans)
+                        else:
+                            for span in spans:
+                                self.control.stream_erase(*span)
+                return result
         if attachment is None:
             frame = encode_frame(envelope)
         else:
             frame = encode_upload_frame(
                 envelope, attachment, allow_deflate=evidence.get("stream_upload_deflate_v1") is True,
             )
+        return self._exchange_stream(req, frame, limit, envelope, info, deadline, started, download=download)
+
+    def _exchange_stream(self, req, frame, limit, envelope, info, deadline, started, *, download=None):
+        from enclave_gateway.transports.stream_frames import BLOCK, Decoder, DownloadFrame
         root = self.spec.appliance_spool_dir.rstrip("\\/")
-        req = root + "\\ipc_req_" + info["instance"] + ".bin"
         cursor = 0
-        limit = MAX_STREAM if envelope.get("op") in ("stop", "attest") else MAX_STREAM-CONTROL_RESERVE
-        decoder = Decoder(cursor)
+        decoder = Decoder() if download is None else DownloadFrame(envelope["copy_length"])
+        if time.monotonic() >= deadline:
+            raise OperationError("deadline_exceeded", "vfs.publish")
         mark_dispatched()
         with timed("vfs.publish"):
             position = self.control.stream_append(req, frame, limit=limit)
@@ -648,19 +686,34 @@ exit 124
         while time.monotonic() < deadline:
             checkpoint("vfs.response")
             completed=[];matched=[]
+            def parse(value):
+                identity = {'instance_id':info['instance'],'loaded_sha256':info['worker_sha256']}
+                result = self._parse_worker_response(json.dumps(value),int((time.monotonic()-started)*1000),
+                                                     envelope['tx_id'],identity,strict=True)
+                if download is not None and not result.exit_code:
+                    if result.stdout.strip() != "SHA256:" + hashlib.sha256(decoder.payload).hexdigest():
+                        raise ValueError("Download block checksum or length mismatch")
+                return result
+
             def validate(data):
                 for offset,size,value in decoder.feed(data):
-                    if value.get('tx_id')!=envelope['tx_id']:continue
+                    if value.get('tx_id')!=envelope['tx_id']:
+                        if download is not None:
+                            raise ValueError("Download response transaction mismatch")
+                        continue
                     matched.append((offset,size,value))
-                    if value.get('legacy_result') is True:return []
-                    identity={'instance_id':info['instance'],'loaded_sha256':info['worker_sha256']}
-                    result=self._parse_worker_response(json.dumps(value),int((time.monotonic()-started)*1000),envelope['tx_id'],identity,strict=True)
-                    completed.append(result)
+                    if value.get('legacy_result') is True and download is None:return []
+                    completed.append(parse(value))
                     return [(req,position,len(frame)),(res,offset,size)]
                 return []
             combined=callable(getattr(type(self.control),'stream_read_committed',None))
             try:
-                data = self.control.stream_read_committed(res,cursor,validate) if combined else self.control.stream_read(res, cursor)
+                if download is not None:
+                    count = decoder.read_limit - cursor
+                    data = (self.control.stream_read_committed(res, cursor, validate, count=count)
+                            if combined else self.control.stream_read(res, cursor, count))
+                else:
+                    data = self.control.stream_read_committed(res,cursor,validate) if combined else self.control.stream_read(res, cursor)
             except QgaCommandError as error:
                 # A new result may be absent or exclusively held by its writer.
                 # Retry only this read-side open under the original deadline;
@@ -669,9 +722,13 @@ exit 124
                     raise
                 data = b""
             cursor += len(data)
-            if completed:return completed[0]
+            if completed:
+                if download is not None: download.extend(decoder.payload)
+                return completed[0]
             for offset, size, value in (matched if combined else decoder.feed(data)):
                 if value.get("tx_id") != envelope["tx_id"]:
+                    if download is not None:
+                        raise ValueError("Download response transaction mismatch")
                     continue
                 identity = {"instance_id": info["instance"], "loaded_sha256": info["worker_sha256"]}
                 raw = json.dumps(value)
@@ -680,7 +737,8 @@ exit 124
                     if value.get("worker_instance") != info["instance"] or value.get("worker_sha256") != info["worker_sha256"]:
                         raise ValueError("Stream delivery marker identity mismatch")
                     raw = self.control.read_bytes(legacy).decode("utf-8-sig")
-                result = self._parse_worker_response(raw, int((time.monotonic()-started)*1000), envelope["tx_id"], identity, strict=True)
+                result = (parse(value) if download is not None else
+                          self._parse_worker_response(raw, int((time.monotonic()-started)*1000), envelope["tx_id"], identity, strict=True))
                 with timed("vfs.erase"):
                     if callable(getattr(type(self.control), "stream_erase_many", None)):
                         self.control.stream_erase_many([(req, position, len(frame)), (res, offset, size)])
@@ -689,6 +747,7 @@ exit 124
                         self.control.stream_erase(res, offset, size)
                     if value.get("legacy_result") is True:
                         self.control.consume_file(legacy)
+                if download is not None: download.extend(decoder.payload)
                 return result
             if not data:
                 if operator and time.monotonic() >= next_state_check:

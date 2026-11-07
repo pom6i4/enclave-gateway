@@ -21,6 +21,54 @@ BLOCK = 4096
 REVISION = 3
 
 
+def upload_slot_data(data):
+    if not 0 < len(data) <= MAX_UPLOAD_ATTACHMENT:
+        raise ValueError("Invalid operator upload slot size")
+    return b"\x01" + bytes(BLOCK - 1) + data
+
+
+class DownloadFrame:
+    """One response slot with a hashed envelope followed by raw block bytes."""
+
+    HEADER_LIMIT = len(MAGIC) + 66 + ((32768 + 2) // 3) * 4
+
+    def __init__(self, length):
+        if not 1 <= length <= MAX_UPLOAD_ATTACHMENT:
+            raise ValueError("Invalid download attachment size")
+        self.length = length
+        self.read_limit = length + self.HEADER_LIMIT
+        self.data = bytearray()
+        self.header = None
+        self.payload = b""
+
+    def feed(self, data):
+        if len(self.data) + len(data) > self.read_limit:
+            raise ValueError("Download response exceeds its limit")
+        self.data.extend(data)
+        if self.header is None:
+            end = self.data.find(b"\n")
+            if end < 0:
+                if len(self.data) >= self.HEADER_LIMIT:
+                    raise ValueError("Download response metadata exceeds its limit")
+                return []
+            if end >= self.HEADER_LIMIT:
+                raise ValueError("Download response metadata exceeds its limit")
+            line = self.data[:end + 1]
+            frames = Decoder().feed(line)
+            if len(frames) != 1 or frames[0][:2] != (0, len(line)):
+                raise ValueError("Invalid download response frame")
+            self.header = frames[0]
+        _, end, value = self.header
+        expected = self.length if value.get("exit_code") == 0 else 0
+        received = len(self.data) - end
+        if received < expected:
+            return []
+        if received != expected:
+            raise ValueError("Invalid download attachment length")
+        self.payload = bytes(self.data[end:])
+        return [(0, len(self.data), value)]
+
+
 def _flat(value):
     # Protocol envelopes contain scalar fields; scripts, binary data and nested
     # attestation evidence travel inside Base64 strings, never object graphs.

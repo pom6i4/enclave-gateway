@@ -170,11 +170,42 @@ These commands cannot register startup in this profile:
 
 Arbitrary `exec @bastion` is rejected before publication. Direct Bastion file
 access is also rejected. TCP mux is unavailable.
-Windows TargetNodes and extra SSH jump hops are unsupported. Each transfer is
-limited to 64 MiB. Command stdout is limited to 8 MiB. Command stderr is limited
+Windows TargetNodes and extra SSH jump hops are unsupported. Ordinary copies
+are limited to 64 MiB. Command stdout is limited to 8 MiB. Command stderr is limited
 to 1 MiB. The default foreground lease is 900 seconds; the script accepts an
 explicit `-LeaseSeconds` between 1 and 3600. Lease expiration interrupts an active
 local SSH process and requires reconciliation of its remote effects.
+
+### Larger files with the operator backend
+
+Use `--chunked` for files up to 512 MiB when `egw agent-verify` reports
+`chunked_copy_slots_v1: true` for the approved signed adapter. The TargetNode
+policy must allow file transfers. The Linux endpoint uses `sha256sum` and
+`python3` in addition to its usual shell and core utilities.
+
+```sh
+egw cp --chunked --timeout 900 ./artifact.bin app01:/tmp/artifact.bin
+egw cp --chunked --timeout 900 app01:/tmp/artifact.bin ./received.bin
+```
+
+The CLI transfers 1 MiB blocks one at a time. The request stream carries only
+control messages. A single upload slot per worker instance holds the block
+data. The worker reads it through handles opened at startup and sends the last
+byte to OpenSSH only after verifying the block SHA-256. A valid receipt lets
+the CLI erase and reuse the slot. A lost receipt or interrupted slot cleanup
+can leave the slot occupied. Reconcile the transaction and start a new worker
+before uploading again. Download bytes follow the hashed metadata in the
+pre-opened response file and are verified before the CLI erases that response.
+The 15-second per-request limit and 10-second attestation limit still apply. For
+`--chunked`, `--timeout` budgets the whole copy. The foreground lease must
+also cover the copy. Ordinary `exec` and `cp` in operator mode keep their
+15-second total limit.
+
+The receiver publishes the destination atomically after verifying the whole
+file's SHA-256. A failed upload can leave a private directory named
+`<destination>.egw-<transfer-id>.parts` on the TargetNode. Preserve it while
+checking the transaction and destination. If the final acknowledgement was
+lost, verify the destination hash before retrying.
 
 ## State and failures
 

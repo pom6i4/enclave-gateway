@@ -1,20 +1,28 @@
 """Structured foreground system-OpenSSH dispatch through RDP."""
 from __future__ import annotations
 import hashlib
+import os
+import re
 import secrets
 import time
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 from enclave_gateway.operations.context import (
-    OperationContext, OperationError, activate, budget, current, principal, read_only_preflight, timed,
+    OperationContext, OperationError, activate, budget, checkpoint, current, limit_deadline, principal,
+    read_only_preflight, timed,
 )
 from enclave_gateway.transports.rdp_vfs import RdpVfsTransport, generate_tx_id
 from enclave_gateway.transports.ssh_hop import SshHopExecutor
 from enclave_gateway.transports.stream_frames import MAX_UPLOAD_ATTACHMENT
 
+DOWNLOAD_PART_BYTES = 1024 * 1024
+UPLOAD_PART_BYTES = MAX_UPLOAD_ATTACHMENT
+MAX_CHUNKED_COPY_BYTES = 512 * DOWNLOAD_PART_BYTES
+
 
 class StructuredTransport(RdpVfsTransport):
-    def request(self, op, timeout_sec=120, *, attachment=None, **fields):
+    def request(self, op, timeout_sec=120, *, attachment=None, download=None, **fields):
         tx_id=generate_tx_id()
         if op in ('attest','ping'):
             tx_id='probe_'+tx_id
@@ -22,7 +30,7 @@ class StructuredTransport(RdpVfsTransport):
         context=current()
         if context:envelope['operation_id']=context.tx_id
         if set(fields)&set(envelope):raise ValueError('Reserved envelope fields cannot be overridden')
-        return self._dispatch_envelope({**envelope,**fields},timeout_sec,attachment=attachment)
+        return self._dispatch_envelope({**envelope,**fields},timeout_sec,attachment=attachment,download=download)
 
     def exec_bastion(self, ps_script, timeout_sec=120, *, op='exec', extra_fields=None):
         if op not in ('attest','stop') or ps_script:
@@ -138,6 +146,103 @@ class StructuredSshExecutor(SshHopExecutor):
             return expected
         finally:
             if completed:self.control.consume_file(path)
+
+    def copy_chunked(self, direction, node, local_path, remote_path, *, timeout_sec, as_root, **options):
+        self._validate(node, options)
+        if direction not in ("push", "pull"):
+            raise ValueError("Chunked copy direction must be push or pull")
+        if not remote_path.startswith("/") or remote_path.endswith("/") or any(c in remote_path for c in "\r\n\0"):
+            raise ValueError("Chunked copy requires an absolute remote file path")
+        evidence = self.transport._verify_dispatch("ssh_copy")
+        if not evidence or evidence.get("chunked_copy_slots_v1") is not True:
+            raise OperationError("chunked_copy_unavailable", "attestation",
+                                 message="Start an approved signed operator worker that supports chunked copy.")
+        copy = self._push_chunked if direction == "push" else self._pull_chunked
+        return copy(local_path, node, remote_path, timeout_sec, as_root)
+
+    def _copy_step(self, node, remote_path, timeout_sec, as_root, action, token, **fields):
+        with limit_deadline(min(timeout_sec, 15.0)):
+            result = self.transport.request(
+                "ssh_copy", min(timeout_sec, 15.0), target=node.name, remote_path=remote_path,
+                as_root=as_root, transfer_id=token, copy_action=action, **self._identity(node), **fields,
+            )
+            checkpoint("ssh." + action)
+        if result.exit_code:
+            raise OperationError(
+                "structured_transfer_failed", "ssh." + action,
+                indeterminate=action == "push_commit",
+                message=f"Chunked copy failed at {action} ({token}). Inspect the worker journal and approved transfer policy.",
+            )
+        return result.stdout.strip()
+
+    def _push_chunked(self, source, node, remote_path, timeout_sec, as_root):
+        if not source.is_file():
+            raise FileNotFoundError(f"Local file not found: {source}")
+        token = secrets.token_hex(16)
+        digest = hashlib.sha256()
+        with source.open("rb") as stream:
+            initial = os.fstat(stream.fileno())
+            size = initial.st_size
+            if size > MAX_CHUNKED_COPY_BYTES:
+                raise ValueError("Chunked copy limit is 512 MiB")
+            for offset in range(0, max(size, 1), UPLOAD_PART_BYTES):
+                checkpoint("ssh.push_part")
+                count = min(UPLOAD_PART_BYTES, size - offset)
+                part = stream.read(count)
+                if len(part) != count:
+                    raise ValueError("Upload source changed during chunked copy")
+                digest.update(part)
+                part_hash = hashlib.sha256(part).hexdigest()
+                reply = self._copy_step(node, remote_path, timeout_sec, as_root, "push_part", token,
+                                        copy_offset=offset, copy_length=count, sha256=part_hash, attachment=part or None)
+                if reply != f"PART:{part_hash}":
+                    raise OperationError("structured_transfer_failed", "ssh.push_part", indeterminate=True,
+                                         message=f"Upload block receipt is invalid ({token}). Reconcile before retrying.")
+            final = os.fstat(stream.fileno())
+            if (initial.st_size, initial.st_mtime_ns, initial.st_ctime_ns) != (
+                    final.st_size, final.st_mtime_ns, final.st_ctime_ns):
+                raise ValueError("Upload source changed during chunked copy")
+        expected = digest.hexdigest()
+        reply = self._copy_step(node, remote_path, timeout_sec, as_root, "push_commit", token,
+                                copy_offset=size, sha256=expected)
+        if reply != f"VERIFIED:{expected}":
+            raise OperationError("structured_transfer_failed", "ssh.push_commit", indeterminate=True,
+                                 message=f"Upload commit receipt is invalid ({token}). Reconcile before retrying.")
+        return expected
+
+    def _pull_chunked(self, destination, node, remote_path, timeout_sec, as_root):
+        info = self._copy_step(node, remote_path, timeout_sec, as_root, "pull_info", secrets.token_hex(16))
+        metadata = re.fullmatch(r"FILE:([0-9]{1,9}):([a-f0-9]{64})", info)
+        if metadata is None:
+            raise ValueError("Invalid chunked download metadata")
+        size, expected = int(metadata[1]), metadata[2]
+        if size > MAX_CHUNKED_COPY_BYTES:
+            raise ValueError("Chunked copy limit is 512 MiB")
+        digest = hashlib.sha256()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = None
+        try:
+            with NamedTemporaryFile(dir=destination.parent, delete=False) as stream:
+                temporary = Path(stream.name)
+                for offset in range(0, size, DOWNLOAD_PART_BYTES):
+                    token = secrets.token_hex(16)
+                    count = min(DOWNLOAD_PART_BYTES, size - offset)
+                    part = bytearray()
+                    reply = self._copy_step(node, remote_path, timeout_sec, as_root, "pull_part", token,
+                                            copy_offset=offset, copy_length=count, download=part)
+                    checkpoint("ssh.pull_part")
+                    if len(part) != count or not reply.startswith("SHA256:"):
+                        raise ValueError("Download block checksum or length mismatch")
+                    stream.write(part)
+                    digest.update(part)
+            if digest.hexdigest() != expected:
+                raise ValueError("Download checksum mismatch: remote file may have changed")
+            checkpoint("ssh.pull_commit")
+            temporary.replace(destination)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        return expected
 
     def bootstrap_ssh_key(self,*args,**kwargs):
         raise ValueError('Approve the SSH key and host fingerprint on Bastion before using structured_only')

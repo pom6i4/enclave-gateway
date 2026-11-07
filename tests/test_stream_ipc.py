@@ -89,6 +89,37 @@ class StreamFramingTests(unittest.TestCase):
         self.assertTrue(failure.exception.indeterminate);self.assertEqual(validator.call_count,1)
         self.assertEqual(client.stream_erase_many.call_count,1)
 
+    def test_qga_reads_binary_response_with_one_open_and_sync(self):
+        client = QgaClient('/tmp/egw-download.sock')
+        first = b'x' * client.CHUNK_SIZE
+        @contextlib.contextmanager
+        def connection(*args):
+            yield None, None
+        client._connect_synced = Mock(side_effect=connection)
+        client._request = Mock(side_effect=[
+            17, {'buf-b64': base64.b64encode(first), 'count': len(first)},
+            {'buf-b64': 'AA==', 'count': 1, 'eof': True}, {},
+        ])
+        validator = Mock(return_value=[])
+        self.assertEqual(client.stream_read_committed('response', 0, validator, count=len(first) + 2), first + b'\0')
+        client._connect_synced.assert_called_once()
+        self.assertEqual([call.args[2] for call in client._request.call_args_list],
+                         ['guest-file-open', 'guest-file-read', 'guest-file-read', 'guest-file-close'])
+        validator.assert_called_once_with(first + b'\0')
+
+    def test_unacknowledged_upload_slot_cannot_be_overwritten(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'slot'
+            path.write_bytes(b'\0')
+            channel = DirectHostControlChannel()
+            with channel.stream_slot_lock(str(path), 1):
+                channel.stream_fill_slot(str(path), b'first')
+            unacknowledged = path.read_bytes()
+            with channel.stream_slot_lock(str(path), 1):
+                with self.assertRaisesRegex(OperationError, 'unacknowledged block'):
+                    channel.stream_fill_slot(str(path), b'second')
+            self.assertEqual(path.read_bytes(), unacknowledged)
+
     def test_file_gate_preserves_fifo_and_removes_timed_out_waiters(self):
         import threading
         import enclave_gateway.control.qga_client as module

@@ -15,7 +15,7 @@ from enclave_gateway.agents import operator_target
 from enclave_gateway.config import BastionSpec
 from enclave_gateway.operations.context import OperationError
 from enclave_gateway.security.attestation import verify
-from enclave_gateway.transports.structured import StructuredTransport
+from enclave_gateway.transports.structured import StructuredSshExecutor, StructuredTransport
 
 
 @unittest.skipIf(os.name == "nt", "The operator SSH peer runs on Linux")
@@ -75,6 +75,17 @@ class OperatorPeerTests(unittest.TestCase):
 
 
 class OperatorTransportTests(unittest.TestCase):
+    def test_chunked_copy_requires_attested_capability(self):
+        transport, control = Mock(), Mock()
+        transport._verify_dispatch.return_value = {"verified": True, "stream_upload_v1": True}
+        executor = StructuredSshExecutor(transport, control, Mock())
+        node = Mock(os="linux")
+        with self.assertRaises(OperationError) as error:
+            executor.copy_chunked("push", node, Path("artifact"), "/tmp/artifact", timeout_sec=120, as_root=False)
+        self.assertEqual(error.exception.code, "chunked_copy_unavailable")
+        transport.request.assert_not_called()
+        self.assertEqual(control.mock_calls, [])
+
     def test_operator_never_downgrades_to_legacy_or_files(self):
         for options in ({"spool_protocol": "stream"}, {"execution_profile": "structured_only"}):
             with self.assertRaises(ValueError):
@@ -141,7 +152,10 @@ class OperatorWorkerTests(unittest.TestCase):
     def test_corrupt_upload_attachment_retires_worker_without_writing_target(self):
         self._exercise_worker(disconnect=False, corrupt_upload=True)
 
-    def _exercise_worker(self, *, disconnect, corrupt_upload=False):
+    def test_chunked_cli_copy_exceeds_stream_capacity_and_checks_each_block(self):
+        self._exercise_worker(disconnect=False, chunked=True)
+
+    def _exercise_worker(self, *, disconnect, corrupt_upload=False, chunked=False):
         import socket
         import time
         from enclave_gateway import cli
@@ -202,7 +216,7 @@ class OperatorWorkerTests(unittest.TestCase):
                 process = subprocess.Popen(
                     [os.environ["EGW_TEST_POWERSHELL"], "-NoProfile", "-File", str(worker),
                      "-SpoolDir", str(root/"spool"), "-PolicyPath", str(policy), "-PolicySha256", policy_pin,
-                     "-TrustedSignerThumbprints", "A"*40, "-OperatorOpenSsh", "-LeaseSeconds", "60"],
+                     "-TrustedSignerThumbprints", "A"*40, "-OperatorOpenSsh", "-LeaseSeconds", "180"],
                     env={**os.environ, "TMPDIR": directory}, stdout=log, stderr=log,
                 )
                 stack.callback(stop_process, process)
@@ -244,9 +258,23 @@ class OperatorWorkerTests(unittest.TestCase):
                     "targets": {"app01": {"host": "127.0.0.1", "port": 22, "user": "fixture"}},
                 }))
 
+                corrupt_part = False
+                corrupt_download = False
+
                 class StreamOnlyUploadControl(DirectHostControlChannel):
                     def write_file(self, *args, **kwargs):
                         raise AssertionError("The upload must use the attested Stream path")
+
+                    def stream_fill_slot(self, path, data):
+                        if corrupt_part and data == b"tail":
+                            data = b"fail"
+                        return super().stream_fill_slot(path, data)
+
+                    def stream_read(self, path, offset, count=65536):
+                        data = super().stream_read(path, offset, count)
+                        if corrupt_download and count > 65536 and b"\n" in data and len(data) > 1024 * 1024:
+                            return data[:-1] + bytes([data[-1] ^ 1])
+                        return data
 
                     def stream_append(self, path, data, *, limit=None):
                         if corrupt_upload and len(data) > 1024 * 1024:
@@ -266,6 +294,8 @@ class OperatorWorkerTests(unittest.TestCase):
                 self.assertTrue(evidence["verified"])
                 self.assertTrue(evidence["stream_upload_v1"])
                 self.assertTrue(evidence["stream_upload_deflate_v1"])
+                self.assertTrue(evidence["chunked_copy_v1"])
+                self.assertTrue(evidence["chunked_copy_slots_v1"])
                 command = "printf fixture-output\n#" + "x" * 8192
                 self.assertIn("fixture-output", invoke("exec", "app01", command, "--timeout", "15")[0])
                 upload, download, remote = root/"upload", root/"download", root/"remote"
@@ -281,7 +311,51 @@ class OperatorWorkerTests(unittest.TestCase):
                     upload.write_bytes(b"test" * (256 * 1024))
                     invoke("cp", str(upload), remote_spec, "--timeout", "15")
                     self.assertEqual(remote.read_bytes(), upload.read_bytes())
+                if chunked:
+                    payload = random.Random(23).randbytes(1024 * 1024)
+                    with upload.open("wb") as stream:
+                        for _ in range(65):
+                            stream.write(payload)
+                        stream.write(b"tail")
+                    expected = hashlib.sha256(upload.read_bytes()).hexdigest()
+                    remote = root / "target with 'quotes'"
+                    remote_spec = "app01:" + str(remote)
+                    remote.write_bytes(b"keep this until commit")
+                    # Both directions cross the old 64 MiB request-stream limit.
+                    for src, dst in ((str(upload), remote_spec), (remote_spec, str(download))):
+                        result, _ = invoke("cp", src, dst, "--chunked", "--timeout", "120")
+                        self.assertEqual(json.loads(result)["sha256"], expected)
+                    self.assertEqual(hashlib.sha256(download.read_bytes()).hexdigest(), expected)
+                    slot, = (root/"spool").glob("ipc_upload_*.bin")
+                    self.assertEqual(slot.stat().st_size, 4096 + 1024 * 1024)
+                    self.assertFalse(any(slot.read_bytes()))
+                    req, = (root/"spool").glob("ipc_req_*.bin")
+                    self.assertLess(req.stat().st_size, 4 * 1024 * 1024)
+                    for data in (b"\x00", b""):
+                        upload.write_bytes(data)
+                        invoke("cp", str(upload), remote_spec, "--chunked")
+                        invoke("cp", remote_spec, str(download), "--chunked")
+                        self.assertEqual(download.read_bytes(), data)
+
+                    upload.write_bytes(payload + b"tail")
+                    invoke("cp", str(upload), remote_spec, "--chunked")
+                    corrupt_download = True
+                    download.write_bytes(b"keep local destination")
+                    _, error = invoke("cp", remote_spec, str(download), "--chunked", expected=1)
+                    self.assertIn("Download block checksum or length mismatch", error)
+                    self.assertEqual(download.read_bytes(), b"keep local destination")
+                    corrupt_download = False
+                    corrupt_part = True
+                    remote.write_bytes(b"keep remote destination")
+                    invoke("cp", str(upload), remote_spec, "--chunked", "--timeout", "120", expected=1)
+                    self.assertEqual(remote.read_bytes(), b"keep remote destination")
+                    staged, = root.glob("target*.parts/payload")
+                    self.assertEqual(staged.read_bytes(), payload)
+                    self.assertEqual(slot.read_bytes()[0], 1)
+                    process.wait(timeout=3)
                 if corrupt_upload:
+                    self.assertIn("Stream upload checksum mismatch", (root/"worker.log").read_text())
+                elif chunked:
                     self.assertIn("Stream upload checksum mismatch", (root/"worker.log").read_text())
                 elif disconnect:
                     stop_process(server)

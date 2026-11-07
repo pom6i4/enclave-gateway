@@ -355,22 +355,29 @@ class QgaClient:
             yield read
 
     def _stream_read_on_connection(self, sock, reader, path, offset, count):
-        if type(offset) is not int or offset < 0 or not 1 <= count <= self.CHUNK_SIZE:
+        from enclave_gateway.transports.stream_frames import MAX_FRAME
+        if type(offset) is not int or offset < 0 or not 1 <= count <= MAX_FRAME:
             raise ValueError("Invalid stream read range")
+        output = bytearray()
         with self._guest_file(sock, reader, path, "rb") as handle:
             if offset:
                 self._request(sock, reader, "guest-file-seek", {"handle": handle, "offset": offset, "whence": 0})
-            result = self._request(sock, reader, "guest-file-read", {"handle": handle, "count": count})
-            data = base64.b64decode(result.get("buf-b64", ""), validate=True)
-            if type(result.get("count")) is not int or len(data) != result["count"] or len(data) > count:
-                raise OSError("Invalid stream read count")
-            return data
+            while len(output) < count:
+                chunk = min(self.CHUNK_SIZE, count - len(output))
+                result = self._request(sock, reader, "guest-file-read", {"handle": handle, "count": chunk})
+                data = base64.b64decode(result.get("buf-b64", ""), validate=True)
+                if type(result.get("count")) is not int or len(data) != result["count"] or len(data) > chunk:
+                    raise OSError("Invalid stream read count")
+                output.extend(data)
+                if not data or result.get("eof") or len(data) < chunk:
+                    break
+        return bytes(output)
 
     def stream_read(self, path: str, offset: int, count: int = 65536) -> bytes:
         with self._connect_synced() as (sock, reader):
             return self._stream_read_on_connection(sock, reader, path, offset, count)
 
-    def stream_read_committed(self, path, offset, validate):
+    def stream_read_committed(self, path, offset, validate, *, count=65536):
         """Read, validate, then erase acknowledged spans without another sync.
 
         The callback performs no control-channel IO. Empty/incomplete and legacy
@@ -378,7 +385,7 @@ class QgaClient:
         """
         pending=[]
         with self._connect_synced() as (sock, reader):
-            data=self._stream_read_on_connection(sock, reader, path, offset, self.CHUNK_SIZE)
+            data=self._stream_read_on_connection(sock, reader, path, offset, count)
             spans=validate(data)
             if spans:
                 pending=self._validate_stream_spans(spans)
@@ -395,6 +402,27 @@ class QgaClient:
             except Exception as error:
                 raise OperationError('worker_result_cleanup_failed','vfs.erase',indeterminate=True) from error
         return data
+
+    def stream_slot_lock(self, path, timeout_sec):
+        lock = Path(str(self.socket_path.resolve()) + ".stream-upload.lock")
+        return _file_lock(lock, timeout_sec)
+
+    def stream_fill_slot(self, path, data):
+        from enclave_gateway.transports.stream_frames import upload_slot_data
+        data = upload_slot_data(data)
+        with self._connect_synced() as (sock, reader):
+            marker = self._stream_read_on_connection(sock, reader, path, 0, 1)
+            if marker != b"\0":
+                raise OperationError("upload_slot_unavailable", "vfs.publish",
+                                     message="The upload slot holds an unacknowledged block. Reconcile it and restart the worker.")
+            with self._guest_file(sock, reader, path, "r+b") as handle:
+                for start in range(0, len(data), self.CHUNK_SIZE):
+                    chunk = data[start:start+self.CHUNK_SIZE]
+                    result = self._request(sock, reader, "guest-file-write",
+                                           {"handle": handle, "buf-b64": base64.b64encode(chunk).decode()})
+                    if result.get("count") != len(chunk):
+                        raise OSError("Short upload slot write")
+                self._request(sock, reader, "guest-file-flush", {"handle": handle})
 
     def stream_append(self, path: str, data: bytes, *, limit: int | None = None) -> int:
         from enclave_gateway.transports.stream_frames import MAX_FRAME, MAX_STREAM, request_block
@@ -633,7 +661,8 @@ class DirectHostControlChannel:
         target.write_bytes(data)
 
     def stream_read(self, path: str, offset: int, count: int = 65536) -> bytes:
-        if type(offset) is not int or offset < 0 or not 1 <= count <= 65536:
+        from enclave_gateway.transports.stream_frames import MAX_FRAME
+        if type(offset) is not int or offset < 0 or not 1 <= count <= MAX_FRAME:
             raise ValueError("Invalid stream read range")
         from enclave_gateway.control.published import read_shared
         try:
@@ -646,6 +675,20 @@ class DirectHostControlChannel:
             if os.name == "nt" and getattr(error, "winerror", None) in (32, 33):
                 return b""
             raise
+
+    def stream_slot_lock(self, path, timeout_sec):
+        return _file_lock(Path(str(self._map_path(path).resolve()) + ".producer.lock"), timeout_sec)
+
+    def stream_fill_slot(self, path, data):
+        from enclave_gateway.transports.stream_frames import upload_slot_data
+        data = upload_slot_data(data)
+        with self._map_path(path).open("r+b", buffering=0) as stream:
+            if stream.read(1) != b"\0":
+                raise OperationError("upload_slot_unavailable", "vfs.publish",
+                                     message="The upload slot holds an unacknowledged block. Reconcile it and restart the worker.")
+            stream.seek(0)
+            if stream.write(data) != len(data):
+                raise OSError("Short upload slot write")
 
     def stream_append(self, path: str, data: bytes, *, limit: int | None = None) -> int:
         from enclave_gateway.transports.stream_frames import MAX_FRAME, MAX_STREAM, request_block

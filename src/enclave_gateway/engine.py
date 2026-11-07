@@ -590,12 +590,39 @@ ConvertTo-Json $out -Compress -Depth 8
         actor: str = "cli",
     ) -> dict[str, Any]:
         """Push or pull a file between Host and @appliance, @bastion, or a TargetNode."""
+        return self._transfer_file(direction, local_path, node, remote_path, as_root=as_root,
+                                   use_delta=use_delta, timeout_sec=timeout_sec, actor=actor)
+
+    @tracked("transfer_file_chunked")
+    def transfer_file_chunked(
+        self, direction: str, local_path: str | Path, node: str, remote_path: str, *,
+        as_root: bool = False, timeout_sec: float = 900.0, actor: str = "cli",
+    ) -> dict[str, Any]:
+        """Run a bounded multi-request copy through the operator backend."""
+        return self._transfer_file(direction, local_path, node, remote_path, as_root=as_root,
+                                   use_delta=False, timeout_sec=timeout_sec, actor=actor, chunked=True)
+
+    def _transfer_file(self, direction, local_path, node, remote_path, *,
+                       as_root, use_delta, timeout_sec, actor, chunked=False):
         tx_id = current().tx_id if current() else generate_tx_id()
         started = time.monotonic()
         lpath = Path(local_path).expanduser().resolve()
+        if chunked:
+            from enclave_gateway.transports.structured import StructuredSshExecutor
+
+            target = self._resolve_target(node)
+            hop, jump_node = self._resolve_hop_and_jump(target)
+            if not isinstance(hop, StructuredSshExecutor) or hop.spec.structured_backend != "operator":
+                raise ValueError("Chunked copy requires a Linux TargetNode through structured_backend: operator")
         self._verify_scoped_path(node, remote_path, timeout_sec)
 
-        if direction == "push":
+        if chunked:
+            sha = hop.copy_chunked(
+                direction, target, lpath, remote_path, as_root=as_root, timeout_sec=timeout_sec,
+                jump_node=jump_node, ssh_password=self._ssh_password(target),
+                sudo_password=self.vault.get(target.sudo_password_env) if as_root and target.sudo_password_env else "",
+            )
+        elif direction == "push":
             if not lpath.is_file():
                 raise FileNotFoundError(f"Local file not found: {lpath}")
             if node in ("@appliance", "appliance"):
