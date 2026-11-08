@@ -166,12 +166,18 @@ function Operator-Remaining([long]$Deadline){
     if($left -le 0){throw 'Operator SSH deadline reached'}
     return [int]$left
 }
-function Wait-OperatorIO($Task,[long]$Deadline,[string]$Id){
+function Wait-OperatorIO($Task,[long]$Deadline,[string]$Id,[int]$LocalDrainMs=0){
     do{
         if($Id -and $operatorCancelled.Contains($Id)){throw 'Operator SSH cancelled'}
+        if($Task.IsCompleted){[void]$Task.GetAwaiter().GetResult();return}
         if($Task.Wait([Math]::Min(100,(Operator-Remaining $Deadline)))){return}
-        if($Id){Receive-OperatorFrames}
-        if($operatorExecInProgress -and $started.ElapsedMilliseconds-$script:lastPulse -ge 5000){Pulse}
+        # The final reply window is for the local pipe alone. Redirected
+        # filesystem maintenance must not consume it.
+        if($Deadline-$requestTimer.ElapsedMilliseconds -gt $LocalDrainMs){
+            if($Id){Receive-OperatorFrames}
+            if($operatorExecInProgress -and $Deadline-$requestTimer.ElapsedMilliseconds -gt $LocalDrainMs -and
+               $started.ElapsedMilliseconds-$script:lastPulse -ge 5000){Pulse}
+        }
     }while($true)
 }
 function Operator-Write([byte[]]$Bytes,[long]$Deadline,[string]$Id,[int]$Offset=0,[int]$Count=-1){
@@ -179,11 +185,11 @@ function Operator-Write([byte[]]$Bytes,[long]$Deadline,[string]$Id,[int]$Offset=
     [void](Operator-Remaining $Deadline)
     Wait-OperatorIO ($operatorInput.WriteAsync($Bytes,$Offset,$Count)) $Deadline $Id
 }
-function Operator-Read([int]$Length,[long]$Deadline,[string]$Id=''){
+function Operator-Read([int]$Length,[long]$Deadline,[string]$Id='',[int]$LocalDrainMs=0){
     $bytes=New-Object byte[] $Length;$at=0
     while($at -lt $Length){
         $task=$operatorOutput.ReadAsync($bytes,$at,$Length-$at)
-        Wait-OperatorIO $task $Deadline $Id
+        Wait-OperatorIO $task $Deadline $Id $LocalDrainMs
         if($task.Result -le 0){throw 'Operator SSH response unavailable'}
         $at+=$task.Result
     }
@@ -197,10 +203,10 @@ function Watch-OperatorPeer{
 function Assert-OperatorPeerIdle{
     if($operatorLeadTask.IsCompleted){throw 'Operator OpenSSH disconnected or sent unsolicited data; start a new foreground session'}
 }
-function Read-OperatorReplyLength([long]$Deadline,[string]$Id){
-    Wait-OperatorIO $operatorLeadTask $Deadline $Id
+function Read-OperatorReplyLength([long]$Deadline,[string]$Id,[int]$LocalDrainMs=0){
+    Wait-OperatorIO $operatorLeadTask $Deadline $Id $LocalDrainMs
     if($operatorLeadTask.Result -ne 1){throw 'Operator SSH response unavailable'}
-    return ([Text.Encoding]::ASCII.GetString($operatorLead)+[Text.Encoding]::ASCII.GetString((Operator-Read 7 $Deadline $Id)))
+    return ([Text.Encoding]::ASCII.GetString($operatorLead)+[Text.Encoding]::ASCII.GetString((Operator-Read 7 $Deadline $Id $LocalDrainMs)))
 }
 function Read-OperatorUpload([string]$Path,[string]$Expected,[long]$Deadline){
     [void](Operator-Remaining $Deadline)
@@ -332,11 +338,13 @@ function Invoke-OperatorSsh([string]$Remote,[string]$InputFile,[string]$InputTex
     if(-not $pipeline){$inputBytes=$payload.Length}
     $outputLimit=if($DownloadLength -ge 0){$DownloadLength+65}elseif($OutputFile){67108964}else{8388608}
     $peerBudget=Operator-Remaining $Deadline
+    $localDrain=0
     if($operatorExecInProgress){
         # Reserve part of the original deadline for the pipe reply and VFS delivery.
         $reserve=[int][Math]::Min(1000,[Math]::Floor($peerBudget/4))
         if($reserve -lt 1){throw 'Insufficient time for an operator reply'}
         $Deadline=$requestTimer.ElapsedMilliseconds+$peerBudget-$reserve
+        $localDrain=$reserve
         $peerBudget-=2*$reserve
     }
     $fields=@{id=$Id;command=$Remote;input_bytes=$inputBytes;output_limit=$outputLimit;timeout_ms=$peerBudget}
@@ -365,16 +373,16 @@ function Invoke-OperatorSsh([string]$Remote,[string]$InputFile,[string]$InputTex
             $Record.ssh_write_ms=$requestTimer.ElapsedMilliseconds-$phaseStarted
         }
         $ioPhase='ssh_reply';$phaseStarted=$requestTimer.ElapsedMilliseconds
-        $lengthText=Read-OperatorReplyLength $Deadline $Id
+        $lengthText=Read-OperatorReplyLength $Deadline $Id $localDrain
         if($lengthText -cnotmatch '^0000[a-f0-9]{4}$'){throw 'Invalid operator SSH reply length'}
         $length=[Convert]::ToInt32($lengthText,16)
         if($length -lt 2 -or $length -gt 4096){throw 'Operator SSH reply header limit exceeded'}
-        $reply=$utf8.GetString((Operator-Read $length $Deadline $Id))|ConvertFrom-Json
+        $reply=$utf8.GetString((Operator-Read $length $Deadline $Id $localDrain))|ConvertFrom-Json
         if($reply.id -cne $Id -or ($reply.exit_code -isnot [int] -and $reply.exit_code -isnot [long]) -or $reply.exit_code -lt 0 -or $reply.exit_code -gt 255 -or
            ($reply.output_bytes -isnot [int] -and $reply.output_bytes -isnot [long]) -or $reply.output_bytes -lt 0 -or $reply.output_bytes -gt $outputLimit -or
             ($reply.error_bytes -isnot [int] -and $reply.error_bytes -isnot [long]) -or $reply.error_bytes -lt 0 -or $reply.error_bytes -gt 1048576){throw 'Invalid operator SSH reply'}
-        $output=Operator-Read $reply.output_bytes $Deadline $Id
-        $errors=Operator-Read $reply.error_bytes $Deadline $Id
+        $output=Operator-Read $reply.output_bytes $Deadline $Id $localDrain
+        $errors=Operator-Read $reply.error_bytes $Deadline $Id $localDrain
         $Record.ssh_reply_ms=$requestTimer.ElapsedMilliseconds-$phaseStarted
         if($reply.indeterminate -isnot [bool]){throw 'Invalid operator SSH reply outcome'}
         if($reply.indeterminate){
@@ -510,7 +518,7 @@ function Read-OperatorFrame{
     }
     $operatorFrameData.SetLength(0)
     $script:operatorCursor=$next
-    return @{Request=$value;Ticket=[long]($position/4096);UploadOffset=$offset}
+    return @{Request=$value;Ticket=[long]($position/4096);UploadOffset=$offset;ReceivedMs=$started.ElapsedMilliseconds}
 }
 function Receive-OperatorFrames([int]$Maximum=8){
     # Read ahead while waiting for SSH so a cancellation can close the pipe.
@@ -753,8 +761,13 @@ try{
                 $operatorExecInProgress=$extendedOperator -and $request.op -ceq 'ssh_exec'
                 $limit=if($operatorExecInProgress){[Math]::Min($request.timeout_ms,$OperatorExecMaxSec*1000)}
                        elseif($OperatorOpenSsh){[Math]::Min($request.timeout_ms,15000)}else{$request.timeout_ms}
-                $deadline=$requestTimer.ElapsedMilliseconds+[Math]::Min($limit,$remaining)
-                if($remaining -le 0 -or ($OperatorOpenSsh -and $operatorCancelled.Contains($id)) -or (-not $OperatorOpenSsh -and [IO.File]::Exists([IO.Path]::Combine($SpoolDir,('cancel_'+$id+'.json'))))){Response $id 125 '' 'Cancelled before dispatch' 'cancelled';continue}
+                if($OperatorOpenSsh){
+                    # UTC expiry can reject stale frames, but a slow Bastion
+                    # clock cannot extend the Host's dispatch budget.
+                    $limit-=$started.ElapsedMilliseconds-$item.ReceivedMs
+                }
+                $deadline=[Math]::Min($limit,$remaining)
+                if($deadline -le 0 -or ($OperatorOpenSsh -and $operatorCancelled.Contains($id)) -or (-not $OperatorOpenSsh -and [IO.File]::Exists([IO.Path]::Combine($SpoolDir,('cancel_'+$id+'.json'))))){Response $id 125 '' 'Cancelled before dispatch' 'cancelled';continue}
                 if(($request.PSObject.Properties.Name -contains 'as_root') -and $request.as_root -isnot [bool]){throw 'Invalid privilege option'}
                 if($request.PSObject.Properties['upload_slot_bytes'] -and (
                     $request.op -cne 'ssh_copy' -or $request.copy_action -cne 'push_part' -or

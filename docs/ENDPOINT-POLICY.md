@@ -94,7 +94,11 @@ to verify the policy and stage the exact adapter and Linux peer beside it. Then 
 `egw agents stage --execution-policy RemoteSigned`,
 `egw agents command --execution-policy RemoteSigned` and
 `egw heal --execution-policy RemoteSigned` request RemoteSigned for the current
-PowerShell process. Group Policy keeps precedence. In another CMD
+PowerShell process. Group Policy keeps precedence. With this option, staging
+prints a short copy command. It copies the installer to local NTFS, verifies
+its pinned SHA-256, and runs it from the local copy. The installer verifies
+the approved policy, adapter and Linux helper before installing them. The
+signed workflow keeps the inline copy command. In another CMD
 console in the same RDP session, run the quoted path to `attach-ssh.cmd` printed
 by the adapter. Each start regenerates this file in the operator's private local
 state directory for that instance. If the path contains CMD expansion characters,
@@ -125,13 +129,17 @@ the durable journal. An active worker or a failed identity check prevents prunin
 Target exec and ordinary copy default to a 15-second operation cap, including
 fresh attestation (at most 10 seconds), staging, remote work and response
 delivery. The optional startup wait in `agent-verify` ends before its fresh
-attestation begins. For an approved deployment that needs long commands, set
+attestation begins. A transient error on the first probe can be retried within
+the remaining readiness window. A trust mismatch ends the check immediately.
+For an approved deployment that needs long commands, set
 `bastion.operator_exec_max_sec` to a value above 15 and at most 300 seconds
 within the worker lease. Install the matching Linux helper, pin the new
 adapter hash and restart with the generated commands. The adapter uses
 `egw-operator-v2` for that session and advertises its cap in fresh attestation.
 The CLI's `--timeout` still bounds the entire request, with time reserved for
-the reply. A fully received command timeout leaves the session available for
+the reply. The Host sends only the time remaining after readiness and
+attestation. The adapter uses a monotonic timer and reserves local pipe time
+to read the peer's timeout reply. A fully received command timeout leaves the session available for
 the next request and records the previous outcome as `indeterminate`.
 Reconcile its external effects before retrying.
 When attestation advertises `stream_upload_v1`, uploads up to 1 MiB travel
@@ -224,6 +232,11 @@ operations. Reconcile their remote effects before retrying.
 
 On the managed Windows Appliance, `egw heal` applies `appliance.mtu` (1200
 bytes by default) to configured IPv4 adapters and disables RDP over UDP.
+`heal` starts a stopped managed VM and waits for QGA. Start an attach-only
+VM using its owner launcher. For the foreground `operator` backend, `heal`
+observes the RDP session and keeps existing staging. Use
+`egw heal --policy-source ./worker-policy.json --execution-policy RemoteSigned`
+to request explicit staging for an approved unsigned deployment.
 `egw doctor` compares the configured MTU with the values it reads from the
 VPN and Ethernet adapter names. With nested VPNs, verify the actual route.
 For a manual IPv4 DF ping, use an ICMP payload 28 bytes below the desired IP

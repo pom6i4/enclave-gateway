@@ -434,18 +434,38 @@ ConvertTo-Json $out -Compress -Depth 8
                                  message='Native credential update was not acknowledged. Verify the managed user session and stored credential before retrying; no script fallback was used.') from error
 
     @tracked("heal")
-    def heal(self, *, update_credentials: bool = False, execution_policy: str = "", actor: str = "cli") -> ExecResult:
+    def heal(self, *, update_credentials: bool = False, execution_policy: str = "",
+             policy_source: Path | None = None, actor: str = "cli") -> ExecResult:
         """Self-heal clock drift, MTU, RDP UDP policy, interactive credentials, and Bastion RDP session."""
         if update_credentials and not self.config.bastion.enabled:
             self.rdp_vfs.require_worker()
         if self._direct_posix:
             return ExecResult(0,'No managed Windows settings to repair in POSIX Direct mode. Run egw doctor --probe-targets.','',0)
+        operator = (self.config.bastion.enabled and self.config.bastion.execution_profile == 'structured_only'
+                    and self.config.bastion.structured_backend == 'operator')
+        if policy_source is not None and not operator:
+            raise ValueError('--policy-source requires the operator OpenSSH backend')
+        if execution_policy and (not self.config.bastion.enabled or self.config.security.mode == 'custom'):
+            raise ValueError('Process RemoteSigned requires a configured Standard Bastion worker')
+        if isinstance(self.control, QgaClient) and not self.hypervisor.is_running()[0]:
+            if self.config.appliance.external_control:
+                raise OperationError('appliance_not_running', 'heal.appliance', node='@appliance',
+                                     message='Start the attach-only Appliance with its owner launcher, then run egw heal again.')
+            mark_dispatched()
+            self.hypervisor.start()
+            self.control.wait_until_ready(60)
         tx_id = current().tx_id if current() else generate_tx_id()
         deployment=None
         if self.config.bastion.enabled and self.config.security.mode!='custom':
-            deployment=self.stage_agents(execution_policy=execution_policy) if execution_policy else self.stage_agents()
-        elif execution_policy:
-            raise ValueError('Process RemoteSigned requires a configured Standard Bastion worker')
+            # Foreground operator staging can include a policy chosen in a prior
+            # deployment. Leave it alone unless the caller explicitly restages.
+            if not operator or execution_policy or policy_source is not None:
+                options = {}
+                if execution_policy:
+                    options['execution_policy'] = execution_policy
+                if policy_source is not None:
+                    options['policy_source'] = policy_source
+                deployment = self.stage_agents(**options)
         sync_fn = getattr(self.control, "sync_guest_clock", None)
         if callable(sync_fn):
             sync_fn()
@@ -472,10 +492,11 @@ ConvertTo-Json $out -Compress -Depth 8
 }} -Mtu {self.config.appliance.mtu} -AdapterName {ps_quote(self.config.provider.adapter_name)} -BastionHost {ps_quote(self.config.bastion.host)} -BastionPort {self.config.bastion.port} -SkipBastion:${str(not self.config.bastion.enabled).lower()} -HostEpochUtc {host_epoch} -RoutesCsv {ps_quote(routes_csv)} -DnsServersCsv {ps_quote(dns_csv)}
 """
         if self.config.bastion.enabled:
+            supervisor_mode = '-ObserveOnly' if operator else '-ForceReconnect'
             combined_ps+=f"""
 & {{
 {sup_script}
-}} -BastionHost {ps_quote(self.config.bastion.host)} -BastionPort {self.config.bastion.port} -SpoolDir {ps_quote(self.config.bastion.appliance_spool_dir)} -ScheduledTaskName {ps_quote(self.config.bastion.scheduled_task_name)} -HeartbeatMaxAgeSec {self.config.bastion.heartbeat_max_age_sec} -SpoolProtocol {self.config.bastion.spool_protocol.title()} -ForceReconnect
+}} -BastionHost {ps_quote(self.config.bastion.host)} -BastionPort {self.config.bastion.port} -SpoolDir {ps_quote(self.config.bastion.appliance_spool_dir)} -ScheduledTaskName {ps_quote(self.config.bastion.scheduled_task_name)} -HeartbeatMaxAgeSec {self.config.bastion.heartbeat_max_age_sec} -SpoolProtocol {self.config.bastion.spool_protocol.title()} {supervisor_mode}
 """
         res = self._scrub_result(self.control.exec_powershell(combined_ps, timeout_sec=60.0))
         if deployment:
@@ -1582,17 +1603,49 @@ Write-Output 'BASTION_CLEAN_OK'
             raise ValueError('Worker readiness wait must be in (0, 120] seconds')
         deadline = time.monotonic() + timeout_sec
         with limit_deadline(timeout_sec):
-            while True:
+            while time.monotonic() < deadline:
                 try:
                     require_running_worker(self.control, self.config.bastion)
                     return
                 except OperationError as error:
-                    if error.code != 'session_pending_worker':
+                    if error.code == 'deadline_exceeded':
+                        break
+                    if error.code not in ('session_pending_worker', 'worker_state_unavailable'):
                         raise
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise
-                    time.sleep(min(0.25, remaining))
+                except TimeoutError:
+                    pass
+                time.sleep(max(0, min(0.5, deadline - time.monotonic())))
+        raise OperationError('session_pending_worker', 'vfs.preflight', node='@bastion',
+                             message='SESSION_PENDING_WORKER: readiness wait expired. Check RDP redirection and start the approved worker in the Bastion session.')
+
+    def attest_when_ready(self, timeout_sec: float):
+        from enclave_gateway.operations.context import limit_deadline
+
+        if not 0 < timeout_sec <= 120:
+            raise ValueError('Worker readiness wait must be in (0, 120] seconds')
+        deadline = time.monotonic() + timeout_sec
+        self.wait_for_worker_ready(timeout_sec)
+        attestation_budget = 10.0
+        while True:
+            try:
+                # A ready worker gets the normal attestation budget even when
+                # the readiness wait used almost all of its own window.
+                with limit_deadline(attestation_budget):
+                    return self.attest_worker(timeout_sec=attestation_budget)
+            except (OperationError, TimeoutError) as error:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or (isinstance(error, OperationError) and error.code not in (
+                    'session_pending_worker', 'worker_state_unavailable', 'worker_response_timeout', 'deadline_exceeded',
+                )):
+                    raise
+                time.sleep(min(0.5, remaining))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                self.wait_for_worker_ready(remaining)
+                attestation_budget = min(10.0, deadline - time.monotonic())
+                if attestation_budget <= 0:
+                    raise
 
     def _scoped_sync(self,direction,local_dir,node,remote_dir,*,as_root,exclude,timeout_sec,actor):
         from enclave_gateway.agents.rooted_fs import request

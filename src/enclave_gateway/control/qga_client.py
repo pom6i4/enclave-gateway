@@ -167,7 +167,13 @@ class QgaClient:
     @contextmanager
     def _open_synced(self, deadline):
         from enclave_gateway.control.local_socket import connect_local
-        with connect_local(self.socket_path,max(0.001,deadline-time.monotonic())) as sock:
+        checkpoint("control.connect")
+        try:
+            connection = connect_local(self.socket_path, max(0.001, deadline-time.monotonic()))
+        except OSError as error:
+            raise OperationError("qga_unavailable", "control.connect", node="@appliance",
+                                 message="Cannot connect to QEMU Guest Agent. Check that the Appliance is running and its QGA endpoint is accessible.") from error
+        with connection as sock:
             reader = SocketLineReader(sock, deadline)
             sync_id = random.getrandbits(63)
             payload = json.dumps({"execute": "guest-sync-delimited", "arguments": {"id": sync_id}})
@@ -181,6 +187,21 @@ class QgaClient:
                 if isinstance(response, dict) and type(response.get("return")) is int and response["return"] == sync_id:
                     break
             yield sock, reader
+
+    def wait_until_ready(self, timeout_sec: float) -> None:
+        deadline = time.monotonic() + budget(timeout_sec, "control.connect")
+        while (remaining := deadline - time.monotonic()) > 0:
+            try:
+                with self._connect_synced(min(2.0, remaining)):
+                    return
+            except OperationError as error:
+                if error.code != "qga_unavailable":
+                    raise
+            except (TimeoutError, ConnectionError):
+                pass
+            time.sleep(max(0, min(.5, deadline - time.monotonic())))
+        raise OperationError("qga_unavailable", "control.connect", node="@appliance",
+                             message="Appliance started, but QEMU Guest Agent did not become ready. Check the guest agent service and run egw heal again.")
 
     @staticmethod
     def _request(sock, reader, command: str, arguments: dict | None = None):

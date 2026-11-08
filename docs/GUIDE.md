@@ -100,8 +100,8 @@ An existing VM must have QEMU Guest Agent installed with its virtio-serial chann
 and the QGA socket matching `appliance.runtime_dir` and `appliance.name`. Use the
 same managed name, disk and matching UEFI variable store that were used to start
 it. A running VM in an arbitrary desktop hypervisor is not automatically a managed
-QEMU Appliance. `heal` repairs a reachable Appliance; it cannot invent its QGA
-channel, install a VPN license or authenticate an unapproved session.
+QEMU Appliance. `heal` starts a stopped managed Appliance and waits for QGA.
+For an attach-only Appliance, start the VM with its owner launcher first.
 
 For a new managed Appliance, `egw init --help` describes Windows/VirtIO installation
 media, disk creation and the QGA preparation flow. Boot and finish that installation
@@ -815,9 +815,11 @@ Choose how to trust the adapter:
 3. Run the staging receipt's `bastion_copy_command` in Bastion PowerShell.
    It verifies the policy, creates the state directory and copies the
    hash-verified adapter next to the policy. Then run `start_command`. If the
-   unsigned adapter needs RemoteSigned, request it with
-   `egw agents command --execution-policy RemoteSigned`. This applies to the
-   current PowerShell process and respects Group Policy.
+   unsigned adapter needs RemoteSigned, use
+   `egw agents stage --execution-policy RemoteSigned`. The short copy command
+   checks the installer's SHA-256 before running its local NTFS copy. The
+   policy selection applies to the current PowerShell process and respects
+   Group Policy.
 4. Open a separate CMD window in the same RDP session and run the OpenSSH
    command printed by the adapter.
 
@@ -836,6 +838,9 @@ The lease defaults to eight hours. `bastion.lease_seconds` accepts
 60–86,400 seconds. On a managed Windows Appliance, `egw heal` applies the
 IPv4 `appliance.mtu` (default 1200) and disables RDP over UDP. `egw doctor`
 reports the configured value and compares it with the managed adapter MTUs.
+For the foreground operator, `heal` observes the session and leaves the
+existing bundle in place. Use `egw heal --policy-source ./worker-policy.json`
+to explicitly stage the approved policy and worker.
 
 For files up to 512 MiB, use chunked copy after `egw agent-verify` reports
 `chunked_copy_slots_v1: true`. It transfers 1 MiB blocks, verifies SHA-256 on each

@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Use the remaining dispatch budget for operator SSH requests and reserve
+  local pipe time for a protocol v2 command timeout reply.
+- Give `agent-verify --wait-ready` a separate readiness window and report
+  startup expiry at preflight. Retry transient probes within that window.
+- Start managed Appliances from `heal` and report unavailable QGA endpoints
+  at connection. Preserve operator RDP sessions and existing staging by default.
+- Print a shorter hash-verified Bastion copy command for explicitly approved
+  unsigned deployments using `RemoteSigned`.
+- The source adapter `bastion_structured.ps1` has SHA-256
+  `26b759f3925b312cb11d484bb7f9b4a548be8ce8b387609ad697b7fb87b580a2`.
+  Recheck the deployment pin against the approved bytes before staging.
+
 ## 0.3.0 Beta 5
 
 Package version `0.3.0b5` and Git tag `v0.3.0-beta.5`.

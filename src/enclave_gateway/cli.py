@@ -158,7 +158,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_heal = sub.add_parser(
         "heal",
-        help="Apply the configured IPv4 MTU, disable RDP-over-UDP, and reconnect Bastion RDP session.",
+        help="Repair Appliance settings and reconnect the managed Bastion RDP session when applicable.",
     )
     p_heal.add_argument(
         "--update-credentials",
@@ -167,6 +167,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_heal.add_argument('--execution-policy', choices=['RemoteSigned'], default='',
                         help='Explicit process-only option for the printed Standard worker command.')
+    p_heal.add_argument('--policy-source', type=Path,
+                        help='Explicitly stage an approved local operator policy alongside the worker.')
 
     sub.add_parser(
         "clean",
@@ -663,9 +665,8 @@ def _main(argv: list[str] | None = None) -> int:
         print(json.dumps(result,indent=2))
         return 1 if result.get('cleanup_pending') else 0
     if args.command=='agent-verify':
-        if args.wait_ready is not None:
-            engine.wait_for_worker_ready(args.wait_ready)
-        print(json.dumps(engine.attest_worker(),indent=2))
+        evidence = engine.attest_worker() if args.wait_ready is None else engine.attest_when_ready(args.wait_ready)
+        print(json.dumps(evidence,indent=2))
         return 0
     if args.command == "capabilities":
         print(json.dumps(engine.capabilities(), indent=2))
@@ -790,7 +791,8 @@ def _main(argv: list[str] | None = None) -> int:
         )
 
     if args.command == "heal":
-        res = engine.heal(update_credentials=args.update_credentials, execution_policy=args.execution_policy, actor="cli")
+        res = engine.heal(update_credentials=args.update_credentials, execution_policy=args.execution_policy,
+                          policy_source=args.policy_source, actor="cli")
         if res.stdout:
             print(res.stdout)
         if res.stderr:

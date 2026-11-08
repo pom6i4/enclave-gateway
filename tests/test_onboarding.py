@@ -18,7 +18,8 @@ from enclave_gateway.cli import main,build_parser
 from enclave_gateway.config import EnclaveConfig,ProviderSpec,SecuritySpec,TargetNodeSpec,parse_yaml_or_json
 from enclave_gateway.onboarding import starter_configuration,configuration_summary,agent_bundle,stage_agents
 from enclave_gateway.transports.ssh_hop import _ssh_args
-from enclave_gateway.control.qga_client import ExecResult
+from enclave_gateway.control.qga_client import ExecResult, QgaClient
+from enclave_gateway.operations.context import OperationError, budget
 
 ROOT=Path(__file__).resolve().parents[1]
 
@@ -252,6 +253,85 @@ class AgentDeploymentTests(unittest.TestCase):
                 result=engine.heal()
             stage.assert_called_once();self.assertEqual(result.exit_code,124)
             self.assertIn('In the Bastion RDP session',result.stdout);self.assertIn('-Mode Standard',result.stdout)
+
+    def test_heal_boots_managed_appliance_and_preserves_operator_session(self):
+        from test_field_reliability import engine_at
+        from test_operator_ssh import operator_configuration
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = operator_configuration('a' * 64, 'b' * 64)
+            raw['appliance'] = {'hypervisor': 'auto'}
+            channel = Mock(spec=QgaClient)
+            engine = engine_at(root, channel, EnclaveConfig.from_dict(raw))
+            engine.hypervisor = Mock()
+            engine.hypervisor.is_running.return_value = (False, None)
+            channel.exec_powershell.return_value = ExecResult(0, 'SESSION_ACTIVE', '', 0)
+            sequence = Mock()
+            sequence.attach_mock(engine.hypervisor.start, 'start')
+            sequence.attach_mock(channel.wait_until_ready, 'ready')
+            sequence.attach_mock(channel.exec_powershell, 'repair')
+            with patch.object(engine, 'stage_agents') as stage:
+                result = engine.heal()
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual([call[0] for call in sequence.mock_calls], ['start', 'ready', 'repair'])
+            stage.assert_not_called()
+            self.assertTrue(channel.exec_powershell.call_args.args[0].strip().endswith('-ObserveOnly'))
+
+            engine.config.appliance.attach_only = True
+            channel.reset_mock()
+            engine.hypervisor.start.reset_mock()
+            with self.assertRaises(OperationError) as error:
+                engine.heal()
+            self.assertEqual((error.exception.code, error.exception.stage), ('appliance_not_running', 'heal.appliance'))
+            engine.hypervisor.start.assert_not_called()
+            self.assertEqual(channel.mock_calls, [])
+
+            engine.hypervisor.is_running.return_value = (True, 123)
+            policy = root / 'policy.json'
+            with patch.object(engine, 'stage_agents', return_value={'start_command': 'start'}) as stage:
+                engine.heal(policy_source=policy, execution_policy='RemoteSigned')
+            stage.assert_called_once_with(policy_source=policy, execution_policy='RemoteSigned')
+
+    def test_attest_wait_ready_uses_independent_budget_and_retries_only_transient_errors(self):
+        from test_field_reliability import engine_at
+
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = EnclaveConfig.from_dict(starter_configuration())
+            engine = engine_at(Path(directory), Mock(), cfg)
+            pending = OperationError('session_pending_worker', 'vfs.preflight')
+
+            def attest(*, timeout_sec):
+                self.assertGreater(budget(timeout_sec), 9.9)
+                return {'verified': True}
+
+            with patch('enclave_gateway.worker_channel.require_running_worker', side_effect=[pending, {}]) as probe, \
+                 patch.object(engine, 'attest_worker', side_effect=attest) as attestation:
+                self.assertEqual(engine.attest_when_ready(1), {'verified': True})
+            self.assertEqual(probe.call_count, 2)
+            attestation.assert_called_once_with(timeout_sec=10.0)
+
+            transient = OperationError('deadline_exceeded', 'control.receive')
+            with patch('enclave_gateway.worker_channel.require_running_worker', side_effect=transient):
+                with self.assertRaises(OperationError) as error:
+                    engine.attest_when_ready(1)
+            self.assertEqual((error.exception.code, error.exception.stage), ('session_pending_worker', 'vfs.preflight'))
+
+            trust_error = OperationError('agent_attestation_failed', 'attestation')
+            with patch.object(engine, 'wait_for_worker_ready') as readiness, \
+                 patch.object(engine, 'attest_worker', side_effect=[transient, trust_error]) as attestation:
+                with self.assertRaises(OperationError) as error:
+                    engine.attest_when_ready(3)
+            self.assertIs(error.exception, trust_error)
+            self.assertEqual(readiness.call_count, 2)
+            self.assertLess(attestation.call_args.kwargs['timeout_sec'], 3)
+
+    def test_missing_qga_endpoint_reports_connect_stage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = QgaClient(Path(directory) / 'not-running.sock')
+            with self.assertRaises(OperationError) as error:
+                client.exec_powershell('Write-Output unused', timeout_sec=1)
+            self.assertEqual((error.exception.code, error.exception.stage), ('qga_unavailable', 'control.connect'))
 
     def test_doctor_reports_connection_errors_and_skips_disabled_bastion(self):
         from enclave_gateway.engine import EnclaveEngine

@@ -490,6 +490,7 @@ class RdpVfsTransport:
         timeout_sec = budget(remaining, "vfs.dispatch")
         deadline = time.monotonic() + timeout_sec
         envelope=dict(envelope)
+        envelope['timeout_ms'] = min(envelope['timeout_ms'], max(1, int(timeout_sec * 1000)))
         envelope.setdefault('expires_unix_ms',int((time.time()+timeout_sec)*1000))
         if evidence:
             envelope['expected_worker_instance']=evidence['instance_id']
@@ -645,6 +646,11 @@ exit 124
         root = self.spec.appliance_spool_dir.rstrip("\\/")
         req = root + "\\ipc_req_" + info["instance"] + ".bin"
         limit = MAX_STREAM if envelope.get("op") in ("stop", "attest") else MAX_STREAM-CONTROL_RESERVE
+        if self.spec.structured_backend == "operator" and envelope["op"] == "ssh_exec":
+            remaining = deadline - time.monotonic()
+            if remaining < .001:
+                raise OperationError("deadline_exceeded", "vfs.publish")
+            envelope["timeout_ms"] = min(envelope["timeout_ms"], int(remaining * 1000))
         if attachment is not None and envelope.get("op") == "ssh_copy":
             if envelope.get("copy_action") != "push_part" or envelope.get("copy_length") != len(attachment):
                 raise ValueError("Invalid upload slot request")

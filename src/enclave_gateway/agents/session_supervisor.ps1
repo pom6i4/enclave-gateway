@@ -9,7 +9,8 @@ param(
     [string]$RdpDomainUser = "",
     [string]$RdpPassword = "",
     [string]$RdpPasswordB64 = "",
-    [switch]$ForceReconnect
+    [switch]$ForceReconnect,
+    [switch]$ObserveOnly
 )
 
 $ErrorActionPreference = "SilentlyContinue"
@@ -43,6 +44,21 @@ if($SpoolProtocol -eq 'Stream'){
         }
         $hbFresh=$null -ne $latest -and $latest.status -eq 'running'
     }catch{}
+    if(-not $hbFresh -and $null -eq $latest){
+        try{
+            $file=Get-Item -LiteralPath $stateFile -Force -ErrorAction Stop
+            $age=([DateTime]::UtcNow-$file.LastWriteTimeUtc).TotalSeconds
+            if(($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $file.Length -gt 65536 -or
+               $age -lt 0 -or $age -ge $HeartbeatMaxAgeSec){return $false}
+            $state=[IO.File]::ReadAllText($stateFile)|ConvertFrom-Json
+            $hbFresh=$state.status -ceq 'running' -and $state.spool_protocol -ceq 'stream' -and
+                $state.execution_profile -ceq 'structured_only' -and $state.structured_backend -ceq 'operator' -and
+                $state.instance_id -cmatch '^[a-f0-9]{32}$' -and $state.worker_sha256 -cmatch '^[a-f0-9]{64}$'
+            if($hbFresh -and $info -and ($info.instance -cne $state.instance_id -or $info.worker_sha256 -cne $state.worker_sha256)){
+                $hbFresh=$false
+            }
+        }catch{$hbFresh=$false}
+    }
 }elseif (Test-Path $stateFile) {
     $hbFresh = (((Get-Date) - (Get-Item $stateFile).LastWriteTime).TotalSeconds -lt $HeartbeatMaxAgeSec)
 } elseif (Test-Path $legacyHb) {
@@ -53,8 +69,12 @@ return $hbFresh
 }
 $hbFresh=Test-WorkerHeartbeat
 
-if (-not $ForceReconnect -and $conn -and $hbFresh) {
+if (($ObserveOnly -or -not $ForceReconnect) -and $conn -and $hbFresh) {
     Write-Output "SESSION_ACTIVE"
+    exit 0
+}
+if ($ObserveOnly) {
+    Write-Output 'SESSION_PENDING_OPERATOR: Open or reconnect the approved RDP session, start the adapter, attach OpenSSH, and run egw agent-verify.'
     exit 0
 }
 

@@ -36,6 +36,41 @@ def operator_configuration(worker_sha256, policy_sha256):
 
 
 class OperatorOnboardingTests(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get("EGW_TEST_POWERSHELL"), "Requires PowerShell")
+    def test_stream_supervisor_observes_structured_state_without_reconnecting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            supervisor = WORKER.with_name("session_supervisor.ps1")
+            state = {
+                "status": "running", "instance_id": "a" * 32, "worker_sha256": "b" * 64,
+                "spool_protocol": "stream", "execution_profile": "structured_only",
+                "structured_backend": "operator",
+            }
+            state_path = root / "worker_state.json"
+            wrapper = root / "observe.ps1"
+            wrapper.write_text(
+                "param($Supervisor,$Spool)\n"
+                "function Get-NetTCPConnection { @{State='Established'} }\n"
+                "function Get-CimInstance { [Environment]::Exit(99) }\n"
+                "function Start-ScheduledTask { [Environment]::Exit(99) }\n"
+                "& $Supervisor -SpoolDir $Spool -SpoolProtocol Stream -ObserveOnly\n",
+                encoding="utf-8",
+            )
+
+            def observe():
+                result = subprocess.run([os.environ["EGW_TEST_POWERSHELL"], "-NoProfile", "-File",
+                                         str(wrapper), str(supervisor), directory],
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return result.stdout.strip()
+
+            state_path.write_text(json.dumps(state))
+            self.assertEqual(observe(), "SESSION_ACTIVE")
+            os.utime(state_path, (1, 1))
+            self.assertTrue(observe().startswith("SESSION_PENDING_OPERATOR"))
+            state_path.write_text(json.dumps({**state, "status": "stopped"}))
+            self.assertTrue(observe().startswith("SESSION_PENDING_OPERATOR"))
+
     def test_stage_rejects_wrong_policy_before_appliance_write(self):
         from enclave_gateway.onboarding import stage_agents
         cfg = EnclaveConfig.from_dict(operator_configuration(hashlib.sha256(WORKER.read_bytes()).hexdigest(), "b" * 64))
@@ -77,15 +112,25 @@ class OperatorOnboardingTests(unittest.TestCase):
                 control = Mock()
                 control.exec_powershell.return_value = ExecResult(0, "", "", 0)
                 receipt = stage_agents(control, cfg, execution_policy="" if signed else "RemoteSigned")
-                self.assertEqual(set(receipt["files"]), {"bastion_structured.ps1", "operator_target.py"})
+                expected = {"bastion_structured.ps1", "operator_target.py"}
+                if not signed:
+                    expected.add("operator-install.ps1")
+                self.assertEqual(set(receipt["files"]), expected)
                 payloads = {call.args[1].rsplit("\\", 1)[-1]: call.args[0] for call in control.write_bytes.call_args_list}
                 self.assertEqual(payloads["operator_target.py"], Path(operator_target.__file__).read_bytes())
                 publish = control.exec_powershell.call_args_list[1].args[0]
                 self.assertIn("Get-FileHash", publish)
                 self.assertEqual("Get-AuthenticodeSignature" in publish, signed)
-                self.assertIn("operator_state_dir", receipt["bastion_copy_command"])
-                self.assertNotIn("\n", receipt["bastion_copy_command"])
-                self.assertIn(digest, receipt["bastion_copy_command"])
+                copy = receipt["bastion_copy_command"]
+                self.assertNotIn("\n", copy)
+                if signed:
+                    self.assertIn("operator_state_dir", copy)
+                    self.assertIn(digest, copy)
+                else:
+                    self.assertLess(len(copy), 1500)
+                    self.assertIn(receipt["files"]["operator-install.ps1"], copy)
+                    self.assertIn(digest, payloads["operator-install.ps1"].decode("utf-8-sig"))
+                    self.assertLess(copy.index("Staged installer hash mismatch"), copy.index("& $p $s"))
                 self.assertIn('command="/usr/bin/python3 ', receipt["target_authorized_keys_prefix"])
                 start = receipt["start_command"]
                 self.assertIn("-LeaseSeconds 86400", start)
@@ -280,7 +325,7 @@ class OperatorTransportTests(unittest.TestCase):
                 with patch.object(transport, "_stream_descriptor", return_value=instance), patch(
                     "enclave_gateway.transports.rdp_vfs.time.monotonic", side_effect=itertools.count(0, 2)
                 ), self.assertRaises(OperationError) as result:
-                    transport._dispatch_stream({"op": op, "tx_id": "fixture_id"}, None, 10, 0)
+                    transport._dispatch_stream({"op": op, "tx_id": "fixture_id", "timeout_ms": 10000}, None, 30, 0)
                 self.assertEqual(result.exception.code, error_code)
                 self.assertEqual(result.exception.indeterminate, unknown)
                 control.stream_append.assert_called_once()
@@ -383,12 +428,15 @@ throw 'Accepted an Everyone writer'
             cfg = EnclaveConfig.from_dict(raw)
             control = Mock()
             control.exec_powershell.return_value = ExecResult(0, "", "", 0)
-            receipt = stage_agents(control, cfg, policy_source=source)
+            receipt = stage_agents(control, cfg, policy_source=source, execution_policy="RemoteSigned")
             staged = root / "spool" / "agents" / receipt["bundle_sha256"]
             staged.mkdir(parents=True)
             (staged / WORKER.name).write_bytes(WORKER.read_bytes())
             (staged / "operator_target.py").write_bytes(Path(operator_target.__file__).read_bytes())
             (staged / policy.name).write_bytes(source.read_bytes())
+            installer = staged / "operator-install.ps1"
+            installer.write_bytes(next(call.args[0] for call in control.write_bytes.call_args_list
+                                       if call.args[1].endswith("\\operator-install.ps1")))
             command = receipt["bastion_copy_command"]
             result = self.powershell(command)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -397,6 +445,13 @@ throw 'Accepted an Everyone writer'
             path = str(policy).replace("'", "''")
             checked = self.powershell(f"(Get-Acl -LiteralPath '{path}').AreAccessRulesProtected")
             self.assertEqual(checked.stdout.strip(), "True", checked.stderr)
+            original = installer.read_bytes()
+            installer.write_text("throw 'Untrusted installer was executed'")
+            result = self.powershell(command)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Staged installer hash mismatch", result.stderr)
+            self.assertNotIn("Untrusted installer was executed", result.stderr)
+            installer.write_bytes(original)
             policy.write_text("local policy to preserve")
             result = self.powershell(command)
             self.assertNotEqual(result.returncode, 0)
@@ -428,12 +483,44 @@ class OperatorWorkerTests(unittest.TestCase):
     def test_extended_exec_and_timeout_keep_the_same_worker(self):
         self._exercise_worker(disconnect=False, extended=True)
 
+    def test_completed_pipe_reply_survives_a_slow_redirected_poll(self):
+        script = WORKER.read_text()
+        start = script.index("function Operator-Remaining")
+        end = script.index("function Operator-Write", start)
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / "reply.ps1"
+            fixture.write_text(
+                "$ErrorActionPreference='Stop'\n" + script[start:end] + """
+$operatorCancelled=[Collections.Generic.HashSet[string]]::new()
+$operatorExecInProgress=$false
+$LeaseSeconds=60
+function Receive-OperatorFrames {
+    $script:redirectedPolls++
+    Start-Sleep -Milliseconds 450
+}
+$started=[Diagnostics.Stopwatch]::StartNew()
+$script:redirectedPolls=0
+$requestTimer=[Diagnostics.Stopwatch]::StartNew()
+$task=[Threading.Tasks.Task]::Delay(200)
+Wait-OperatorIO $task 350 'fixture'
+if($redirectedPolls -ne 1 -or -not $task.IsCompletedSuccessfully){throw 'Completed reply was lost'}
+$script:redirectedPolls=0
+$requestTimer.Restart()
+$task=[Threading.Tasks.Task]::Delay(200)
+Wait-OperatorIO $task 400 'fixture' 400
+if($redirectedPolls -ne 0 -or -not $task.IsCompletedSuccessfully){throw 'Reply drain touched the redirected drive'}
+""", encoding="utf-8")
+            result = subprocess.run([os.environ["EGW_TEST_POWERSHELL"], "-NoProfile", "-File", str(fixture)],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def _exercise_worker(self, *, disconnect, corrupt_upload=False, chunked=False, unsigned=False, foreign_writer=False, extended=False):
         import socket
         import time
         from enclave_gateway import cli
         from enclave_gateway.control.qga_client import DirectHostControlChannel
         from enclave_gateway.engine import EnclaveEngine
+        from enclave_gateway.transports.stream_frames import Decoder, encode_frame
         from unittest.mock import patch
         import contextlib
         import io
@@ -551,6 +638,8 @@ function Get-Acl {
 
                 corrupt_part = False
                 corrupt_download = False
+                delay_timeout = False
+                published_budgets = []
 
                 class StreamOnlyUploadControl(DirectHostControlChannel):
                     def write_file(self, *args, **kwargs):
@@ -568,15 +657,42 @@ function Get-Acl {
                         return data
 
                     def stream_append(self, path, data, *, limit=None):
+                        if delay_timeout:
+                            for _, _, envelope in Decoder().feed(data):
+                                if envelope["op"] == "ssh_exec":
+                                    published_budgets.append(envelope["timeout_ms"])
+                                    # Simulate a Bastion whose UTC lags the Host by 1.5 s.
+                                    envelope["expires_unix_ms"] += 1500
+                                    data = encode_frame(envelope)
                         if corrupt_upload and len(data) > 1024 * 1024:
                             data = data[:-1] + bytes([data[-1] ^ 1])
                         return super().stream_append(path, data, limit=limit)
 
+                def make_engine(**kwargs):
+                    engine = EnclaveEngine(control_override=StreamOnlyUploadControl(root), **kwargs)
+                    if delay_timeout:
+                        ready = engine.rdp_vfs.readiness_guard
+                        attest = engine.rdp_vfs.attestation_guard
+                        readiness_delayed = False
+
+                        def slow_ready():
+                            nonlocal readiness_delayed
+                            if not readiness_delayed:
+                                readiness_delayed = True
+                                time.sleep(.9)
+                            return ready()
+
+                        def slow_attestation():
+                            time.sleep(1.1)
+                            return attest()
+
+                        engine.rdp_vfs.readiness_guard = slow_ready
+                        engine.rdp_vfs.attestation_guard = slow_attestation
+                    return engine
+
                 def invoke(*args, expected=0):
                     out, err = io.StringIO(), io.StringIO()
-                    with patch.object(cli, "EnclaveEngine", side_effect=lambda **kw: EnclaveEngine(
-                        control_override=StreamOnlyUploadControl(root), **kw,
-                    )), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    with patch.object(cli, "EnclaveEngine", side_effect=make_engine), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                         code = cli.main(["-c", str(cfg), "--state-dir", str(root/"host"), *args])
                     self.assertEqual(code, expected, out.getvalue()+err.getvalue()+(root/"worker.log").read_text()+(root/"spool"/"worker_state.json").read_text()+str((root/"spool"/"worker_state.json").stat().st_mtime-time.time()))
                     return out.getvalue(), err.getvalue()
@@ -599,9 +715,16 @@ function Get-Acl {
                 if extended:
                     self.assertEqual(evidence["operator_exec_max_sec"], 60)
                     self.assertIn("after-fifteen", invoke("exec", "app01", "sleep 16; printf after-fifteen", "--timeout", "25")[0])
-                    _, err = invoke("exec", "app01", "sleep 5", "--timeout", "2", expected=1)
+                    delay_timeout = True
+                    # The attestation probe itself must remain fast once the
+                    # injected preflight cost has already been paid.
+                    _, err = invoke("exec", "app01", "sleep 10", "--timeout", "4", expected=1)
+                    delay_timeout = False
                     failure = json.loads(err)["error"]
+                    self.assertEqual(failure["code"], "remote_indeterminate", failure)
                     self.assertTrue(failure["indeterminate"])
+                    self.assertEqual(len(published_budgets), 1)
+                    self.assertLessEqual(published_budgets[0], 2000)
                     saved = json.loads(invoke("transactions", "get", failure["tx_id"])[0])
                     self.assertEqual(saved["state"], "indeterminate")
                     self.assertEqual(json.loads(invoke("agent-verify")[0])["instance_id"], evidence["instance_id"])

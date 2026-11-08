@@ -200,6 +200,16 @@ def stage_agents(control,config,*,execution_policy='',migrate_legacy_state=False
             raise ValueError('Policy source exceeds 64 KiB or does not match the approved policy SHA-256')
         files['worker-policy.json'] = policy
         hashes['worker-policy.json'] = digest
+    operator = config.bastion.structured_backend == 'operator'
+    installer = operator and execution_policy == 'RemoteSigned'
+    if installer:
+        # The short command authenticates the entire installer before running
+        # its local copy. The installer authenticates every deployed file.
+        name = 'operator-install.ps1'
+        files[name] = ("param([string]$egwSource)\n" +
+                       _operator_copy_script(config.bastion, hashes, install_policy=policy_source is not None)).encode('utf-8-sig')
+        hashes[name] = hashlib.sha256(files[name]).hexdigest()
+    if operator:
         identity = hashlib.sha256(json.dumps(hashes,sort_keys=True).encode()).hexdigest()
     spool=config.bastion.appliance_spool_dir.rstrip('\\/')
     root=spool+'\\agents';target=root+'\\'+identity;temporary=root+'\\.incoming-'+secrets.token_hex(16)
@@ -248,9 +258,13 @@ function Assert-Bundle([string]$folder){
     receipt={'status':'staged','bundle_sha256':identity,'appliance_directory':target,
             'files':hashes,'start_command':command,'worker_started':False,
             'next_step':'Run start_command inside the Bastion RDP session. Then run egw doctor --probe-targets.'}
-    if config.bastion.structured_backend=='operator':
+    if operator:
+        source = config.bastion.bastion_spool_dir.rstrip('\\/') + '\\agents\\' + identity
+        copy_command = (_operator_installer_command(source, hashes['operator-install.ps1']) if installer else
+                        '$egwSource='+ps_quote(source)+';'+_operator_copy_script(
+                            config.bastion, hashes, install_policy=policy_source is not None))
         receipt.update(
-            bastion_copy_command=_operator_copy_command(config.bastion, identity, hashes, install_policy=policy_source is not None),
+            bastion_copy_command=copy_command,
             target_authorized_keys_prefix='command="/usr/bin/python3 /path/to/operator_target.py",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty',
             next_step='Provision the approved worker policy and target helper. Run bastion_copy_command and then start_command inside the Bastion RDP session.',
         )
@@ -259,13 +273,31 @@ function Assert-Bundle([string]$folder){
 
 def _operator_path_guard():
     return (r"function Assert-EgwLocalPath([string]$path){if($path -notmatch '^[a-zA-Z]:[\\/]'){throw 'Use an absolute local operator path'};"
+            r"$drive=[IO.DriveInfo]::new([IO.Path]::GetPathRoot($path));"
+            r"if($drive.DriveType -ne 'Fixed' -or $drive.DriveFormat -ne 'NTFS'){throw 'Use a local NTFS operator path'};"
             r"$p=if([IO.Directory]::Exists($path)){[IO.DirectoryInfo]::new($path)}else{[IO.FileInfo]::new($path)};"
             r"while($p){if($p.Exists -and ($p.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Linked operator path rejected'};"
             r"$p=if($p -is [IO.FileInfo]){$p.Directory}else{$p.Parent}}}")
 
 
-def _operator_copy_command(bastion,identity,hashes,*,install_policy=False):
-    source=bastion.bastion_spool_dir.rstrip('\\/')+'\\agents\\'+identity+'\\bastion_structured.ps1'
+def _operator_installer_command(source, digest):
+    return (
+        "$ErrorActionPreference='Stop';"
+        "if((Get-ExecutionPolicy) -eq 'AllSigned'){throw 'AllSigned requires an approved signed package'};"
+        +_operator_path_guard()+";$s="+ps_quote(source)+";"
+        "$d=[Environment]::GetFolderPath('LocalApplicationData');Assert-EgwLocalPath $d;"
+        "$p=Join-Path $d ([Guid]::NewGuid().ToString('N')+'.ps1');"
+        "[IO.File]::Copy((Join-Path $s 'operator-install.ps1'),$p,$false);try{"
+        "Assert-EgwLocalPath $p;$f=[IO.File]::Open($p,'Open','Read','Read');try{"
+        "if((Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLowerInvariant() -cne "+ps_quote(digest)+
+        "){throw 'Staged installer hash mismatch'};"
+        "Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned -Force;"
+        "& $p $s}finally{$f.Dispose()}"
+        "}finally{[IO.File]::Delete($p)}"
+    )
+
+
+def _operator_copy_script(bastion,hashes,*,install_policy=False):
     install = ''
     if install_policy:
         install = (
@@ -280,7 +312,7 @@ def _operator_copy_command(bastion,identity,hashes,*,install_policy=False):
             "if($rule.AccessControlType -eq 'Allow' -and ([int]$rule.FileSystemRights -band 852310) -ne 0 -and "
             "$rule.IdentityReference.Value -cnotin $egwAllowed){throw 'Use a private policy directory'}};"
             "$egwTemp=$egwPolicy+'.'+[Guid]::NewGuid().ToString('N')+'.tmp';try{"
-            "[IO.File]::Copy("+ps_quote(str(PureWindowsPath(source).with_name('worker-policy.json')))+",$egwTemp,$false);"
+            "[IO.File]::Copy((Join-Path $egwSource 'worker-policy.json'),$egwTemp,$false);"
             "if((Get-FileHash -LiteralPath $egwTemp -Algorithm SHA256).Hash.ToLowerInvariant() -cne "+
             ps_quote(bastion.worker_policy_sha256)+"){throw 'Approved worker policy hash mismatch'};"
             "$egwPolicyData=[IO.File]::ReadAllText($egwTemp)|ConvertFrom-Json;"
@@ -308,7 +340,7 @@ def _operator_copy_command(bastion,identity,hashes,*,install_policy=False):
         "function Copy-EgwPinned([string]$name,[string]$digest,[string]$label){"
         "$egwDestination=Join-Path $egwRoot $name;"
         "Assert-EgwLocalPath $egwDestination;$egwTemp=$egwDestination+'.'+[Guid]::NewGuid().ToString('N')+'.tmp';try{"
-        "[IO.File]::Copy((Join-Path "+ps_quote(str(PureWindowsPath(source).parent))+" $name),$egwTemp,$false);"
+        "[IO.File]::Copy((Join-Path $egwSource $name),$egwTemp,$false);"
         "if((Get-FileHash -LiteralPath $egwTemp -Algorithm SHA256).Hash.ToLowerInvariant() -cne $digest){throw ('Staged '+$label+' hash mismatch')};"
         "if([IO.File]::Exists($egwDestination)){[IO.File]::Replace($egwTemp,$egwDestination,[NullString]::Value)}"
         "else{[IO.File]::Move($egwTemp,$egwDestination)}"
