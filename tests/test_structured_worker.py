@@ -48,6 +48,8 @@ class StructuredContractTests(unittest.TestCase):
             state={'status':'running','execution_profile':'structured_only',
                    'spool_protocol':'files','last_heartbeat_utc':'2000-01-01T00:00:00Z'}
             path.write_text(json.dumps(state))
+            fresh=time.time()-1
+            os.utime(path,(fresh,fresh))
             channel=DirectHostControlChannel(root)
             spec=BastionSpec(appliance_spool_dir='C:\\spool',execution_profile='structured_only',
                              worker_policy_sha256='b'*64)
