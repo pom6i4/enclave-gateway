@@ -493,8 +493,34 @@ Fresh attestation was within 10 seconds. A command with an explicitly extended
 budget completed, and a separate deliberate timeout returned an indeterminate
 outcome while the same SSH session remained available for the next command.
 The controller used Direct control with actual RDP drive redirection on an
-isolated Windows Server 2022 x64 guest. Domain policy and the Appliance/QGA
-route require separate acceptance.
+isolated Windows Server 2022 x64 guest.
+
+### Beta 5 Appliance/QGA acceptance
+
+A separate run at the published Beta 5 tag used macOS, QEMU Guest Agent on a
+Windows 11 ARM64 Appliance, and the Appliance's `mstsc.exe` with NLA, server
+certificate verification and RDP drive redirection. The Windows Server 2022 x64
+Bastion ran the pinned unsigned adapter under a local non-administrator account
+and attached system OpenSSH to an isolated Linux target.
+
+| Direction | File size | Wall time | Slowest 1 MiB block |
+| --- | ---: | ---: | ---: |
+| Upload | 3 MiB | 9.701 s | 2.550 s |
+| Download | 3 MiB | 7.149 s | 2.229 s |
+| Upload | 65 MiB | 165.940 s | 3.108 s |
+| Download | 65 MiB | 156.076 s | 3.554 s |
+
+- All 136 blocks and auxiliary requests stayed within 15 seconds. Fresh
+  attestation took 3.513 seconds against a 10-second limit. SHA-256 matched for
+  all transfers.
+- Staging and `egw exec @appliance` succeeded over QGA. An explicitly extended
+  Linux command completed. A deliberate timeout returned `indeterminate`, and
+  the next command succeeded on the same worker instance.
+- `egw agents stop` received an acknowledgement. Two bounded `egw clean` calls
+  removed 154 zero-filled IPC files and retained two IPC files.
+- KES 14.1.0.423 logged no new events with AMSI, Behavior Detection and File
+  Threat Protection active. No exclusions were added. Customer VPN and the
+  deployment's domain and endpoint policies still require their own acceptance.
 
 A passing local-spool test is not RDP or KES acceptance. Keep failed runs and
 versioned evidence. Do not disable protection or add broad exclusions to obtain

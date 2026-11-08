@@ -24,7 +24,9 @@ exact tested scope and remaining acceptance. Beta 5 is a source and Python prere
   and mandatory SID-bound attestation. The earlier signed KES measurements
   apply to the earlier qualified builds.
 - Beta 5 adds bounded long operator commands, a manual CMD attachment script,
-  stopped-worker IPC cleanup and explicit managed QEMU endpoints.
+  stopped-worker IPC cleanup and explicit managed QEMU endpoints. The published
+  tag passed [isolated Appliance/QGA acceptance](ENDPOINT-POLICY.md#beta-5-applianceqga-acceptance)
+  with KES 14.1, including 3 MiB and 65 MiB transfers in both directions.
 
 The earlier tags retain their original source revisions and artifacts.
 
