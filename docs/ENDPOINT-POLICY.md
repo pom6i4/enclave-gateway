@@ -148,9 +148,13 @@ Preserve the failed transaction and compare these phases before retrying.
 A failure after dispatch can leave the outcome indeterminate; check the
 transaction before retrying a command or upload. If the OpenSSH connection
 ends, including while idle, the adapter stops advertising readiness and exits.
-Start the adapter and OpenSSH again from the approved RDP account. Stop and
-restart when the bounded stream fills. Generic Bastion shell access,
-interactive SSH, mux and multi-hop SSH remain unavailable in this mode.
+If RDP disconnects, reconnect as the approved operator. Returning to the same
+Windows session does not restore a lost adapter or its redirected file handles.
+If the worker is no longer ready, run the approved start command and attach
+system OpenSSH again in that session, then run `egw agent-verify`. Reconcile any
+indeterminate requests before retrying. Stop and restart when the bounded
+stream fills. Generic Bastion shell access, interactive SSH, mux and multi-hop
+SSH remain unavailable in this mode.
 
 ## Administrator preparation
 
@@ -521,6 +525,22 @@ and attached system OpenSSH to an isolated Linux target.
 - KES 14.1.0.423 logged no new events with AMSI, Behavior Detection and File
   Threat Protection active. No exclusions were added. Customer VPN and the
   deployment's domain and endpoint policies still require their own acceptance.
+
+### Operator reconnect with a lab domain and VPN
+
+A separate run used the Beta 5 adapter and Linux helper with the updated Host
+controller, an isolated OpenVPN route to Bastion, and a non-administrator Samba
+AD account. Wrong SID, policy hash and worker hash were rejected. Windows
+logged disconnect and reconnect for the same RDP session. While disconnected,
+`egw exec` failed before publication. The first attestation after reconnect
+failed because the worker was unavailable.
+
+After a manual adapter restart and OpenSSH attachment in the same session,
+fresh attestation took 2.70 s and a target command took 3.18 s. A 3 MiB copy in
+each direction matched SHA-256; the slowest block or auxiliary request took
+2.88 s. KES 14.1.0.423 logged no new events during this run, with AMSI, Behavior
+Detection and File Threat Protection active and no changes to exclusions.
+This verifies manual recovery on the lab route and policy.
 
 A passing local-spool test is not RDP or KES acceptance. Keep failed runs and
 versioned evidence. Do not disable protection or add broad exclusions to obtain
