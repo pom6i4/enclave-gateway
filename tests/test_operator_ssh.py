@@ -232,8 +232,11 @@ class OperatorTransportTests(unittest.TestCase):
 class WindowsOperatorPolicyTests(unittest.TestCase):
     def powershell(self, command):
         encoded = base64.b64encode(command.encode("utf-16-le")).decode("ascii")
-        return subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
-                              capture_output=True, text=True, errors="replace", timeout=30)
+        # A PowerShell 7 parent can export incompatible module paths for Windows PowerShell.
+        environment = {key: value for key, value in os.environ.items() if key.casefold() != "psmodulepath"}
+        powershell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+        return subprocess.run([str(powershell), "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+                              env=environment, capture_output=True, text=True, errors="replace", timeout=30)
 
     def test_operator_owned_policy_rejects_everyone_writer_on_ntfs(self):
         with tempfile.TemporaryDirectory(prefix="egw-acl-") as folder:
