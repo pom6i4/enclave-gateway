@@ -87,7 +87,8 @@ if([IO.File]::Exists($p)){
                 '_heartbeat_expires_unix':stamp+spec.heartbeat_max_age_sec,
                 'execution_profile':value.get('execution_profile'),
                 'structured_backend':value.get('structured_backend', 'spawn'),
-                'probe_direct_reply':value.get('probe_direct_reply') is True}
+                'probe_direct_reply':value.get('probe_direct_reply') is True,
+                'worker_state':value}
         if state['structured_backend'] == 'operator' and state['spool_protocol'] == 'stream':
             from enclave_gateway.transports.stream_frames import BLOCK, REVISION, descriptor
             state['_stream_descriptor'] = descriptor(json.dumps({

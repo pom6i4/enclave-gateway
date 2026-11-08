@@ -467,6 +467,11 @@ class RdpVfsTransport:
         if ready:
             with timed('vfs.preflight'):readiness=self._check_readiness(ready)
         evidence=self._verify_dispatch(envelope.get('op'))
+        if operator and envelope.get('op') == 'ssh_exec' and envelope['timeout_ms'] > 15000:
+            peer_limit = (evidence or {}).get('operator_exec_max_sec')
+            if type(peer_limit) is not int or not envelope['timeout_ms'] <= peer_limit * 1000 <= 300000:
+                raise OperationError('operator_exec_capability_missing', 'attestation',
+                                     message='Stage and start the approved extended-timeout adapter and Linux helper.')
         if envelope.get("op") == "ssh_copy" and (
             not operator or self.spec.spool_protocol != "stream"
             or not evidence or evidence.get("chunked_copy_slots_v1") is not True

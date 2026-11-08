@@ -36,6 +36,17 @@ def operator_configuration(worker_sha256, policy_sha256):
 
 
 class OperatorOnboardingTests(unittest.TestCase):
+    def test_stage_rejects_wrong_policy_before_appliance_write(self):
+        from enclave_gateway.onboarding import stage_agents
+        cfg = EnclaveConfig.from_dict(operator_configuration(hashlib.sha256(WORKER.read_bytes()).hexdigest(), "b" * 64))
+        with tempfile.TemporaryDirectory() as folder:
+            policy = Path(folder) / "worker-policy.json"
+            policy.write_text("{}")
+            control = Mock()
+            with self.assertRaisesRegex(ValueError, "approved policy SHA-256"):
+                stage_agents(control, cfg, policy_source=policy)
+            self.assertEqual(control.mock_calls, [])
+
     def test_config_and_preflight_require_the_unsigned_operator_pins(self):
         from enclave_gateway.diagnostics import preflight
         raw = operator_configuration(hashlib.sha256(WORKER.read_bytes()).hexdigest(), "b" * 64)
@@ -146,8 +157,55 @@ class OperatorPeerTests(unittest.TestCase):
             self.assertNotEqual(self.process.wait(timeout=3), 0)
             self.assertFalse(marker.exists())
 
+    def test_extended_protocol_raises_only_the_exec_budget(self):
+        from io import BytesIO
+
+        for operation, maximum in (("ssh_exec", 300000), ("ssh_push", 15000),
+                                   ("ssh_pull", 15000), ("ssh_copy", 15000)):
+            with self.subTest(operation=operation):
+                fields = {"id": "fixture_id", "op": operation, "command": "true",
+                          "input_bytes": 0, "output_limit": 1, "timeout_ms": maximum}
+                header = json.dumps(fields).encode()
+                self.assertEqual(operator_target._request(BytesIO(header), f"{len(header):08x}".encode(),
+                                                          extended=True), fields)
+                fields["timeout_ms"] += 1
+                header = json.dumps(fields).encode()
+                with self.assertRaisesRegex(ValueError, "Invalid operator request"):
+                    operator_target._request(BytesIO(header), f"{len(header):08x}".encode(), extended=True)
+
 
 class OperatorTransportTests(unittest.TestCase):
+    def test_status_uses_operator_snapshot_and_displays_starting(self):
+        import time
+        from enclave_gateway.control.qga_client import ExecResult
+        from test_field_reliability import engine_at
+
+        class Control:
+            state = {"status": "starting", "spool_protocol": "stream",
+                     "execution_profile": "structured_only", "structured_backend": "operator",
+                     "instance_id": "d" * 32, "worker_sha256": "a" * 64}
+            age = 0
+
+            def exec_powershell(self, script, timeout_sec):
+                return ExecResult(0, "{}", "", 0)
+
+            def read_file_snapshot(self, path):
+                return json.dumps(self.state).encode(), time.time() - self.age
+
+        cfg = EnclaveConfig.from_dict(operator_configuration("a" * 64, "b" * 64))
+        with tempfile.TemporaryDirectory() as folder:
+            control = Control()
+            engine = engine_at(Path(folder), control, cfg)
+            engine.hypervisor = Mock()
+            engine.hypervisor.is_running.return_value = (True, 123)
+            engine._direct_posix = False
+            self.assertEqual(engine.status()["bastion"]["worker_state"]["status"], "starting")
+            self.assertFalse(engine.status()["bastion"]["worker_healthy"])
+            control.state["status"] = "running"
+            self.assertTrue(engine.status()["bastion"]["worker_healthy"])
+            control.age = 60
+            self.assertFalse(engine.status()["bastion"]["worker_healthy"])
+
     def test_unsigned_attestation_rejects_each_mismatched_identity_pin(self):
         nonce = "e" * 64
         pins = dict(expected_sha256="b" * 64, expected_policy_sha256="c" * 64,
@@ -306,6 +364,42 @@ throw 'Accepted an Everyone writer'
             self.assertIn("Staged adapter hash mismatch", result.stderr)
             self.assertEqual(destination.read_bytes(), files[WORKER.name])
 
+    def test_generated_copy_command_installs_policy_once_with_private_acl(self):
+        from enclave_gateway.control.qga_client import ExecResult
+        from enclave_gateway.onboarding import stage_agents
+        with tempfile.TemporaryDirectory(prefix="egw-policy-") as folder:
+            root = Path(folder)
+            sid = self.powershell("[Security.Principal.WindowsIdentity]::GetCurrent().User.Value")
+            self.assertEqual(sid.returncode, 0, sid.stderr)
+            source = root / "approved.json"
+            source.write_text(json.dumps({"revision": 1, "owner_sid": sid.stdout.strip(),
+                                          "operator_state_dir": str(root / "state")}))
+            policy = root / "operator" / "worker-policy.json"
+            raw = operator_configuration(hashlib.sha256(WORKER.read_bytes()).hexdigest(),
+                                         hashlib.sha256(source.read_bytes()).hexdigest())
+            raw["bastion"].update(worker_policy_path=str(policy), bastion_spool_dir=str(root / "spool"))
+            cfg = EnclaveConfig.from_dict(raw)
+            control = Mock()
+            control.exec_powershell.return_value = ExecResult(0, "", "", 0)
+            receipt = stage_agents(control, cfg, policy_source=source)
+            staged = root / "spool" / "agents" / receipt["bundle_sha256"]
+            staged.mkdir(parents=True)
+            (staged / WORKER.name).write_bytes(WORKER.read_bytes())
+            (staged / policy.name).write_bytes(source.read_bytes())
+            command = receipt["bastion_copy_command"]
+            result = self.powershell(command)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(policy.read_bytes(), source.read_bytes())
+            self.assertEqual((policy.parent / WORKER.name).read_bytes(), WORKER.read_bytes())
+            path = str(policy).replace("'", "''")
+            checked = self.powershell(f"(Get-Acl -LiteralPath '{path}').AreAccessRulesProtected")
+            self.assertEqual(checked.stdout.strip(), "True", checked.stderr)
+            policy.write_text("local policy to preserve")
+            result = self.powershell(command)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Approved worker policy hash mismatch", result.stderr)
+            self.assertEqual(policy.read_text(), "local policy to preserve")
+
 
 @unittest.skipUnless(os.name != "nt" and os.environ.get("EGW_TEST_POWERSHELL"),
                      "Portable PowerShell/.NET Unix pipe fixture")
@@ -328,7 +422,10 @@ class OperatorWorkerTests(unittest.TestCase):
     def test_unsigned_adapter_rejects_foreign_policy_writer(self):
         self._exercise_worker(disconnect=False, unsigned=True, foreign_writer=True)
 
-    def _exercise_worker(self, *, disconnect, corrupt_upload=False, chunked=False, unsigned=False, foreign_writer=False):
+    def test_extended_exec_and_timeout_keep_the_same_worker(self):
+        self._exercise_worker(disconnect=False, extended=True)
+
+    def _exercise_worker(self, *, disconnect, corrupt_upload=False, chunked=False, unsigned=False, foreign_writer=False, extended=False):
         import socket
         import time
         from enclave_gateway import cli
@@ -384,7 +481,8 @@ function Get-Acl {
                 $o=$operatorOutput.WaitForConnectionAsync()
                 if(-not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($i,$o),4000)){throw 'No pipe peer'}
                 $requestTimer=[Diagnostics.Stopwatch]::StartNew()
-                if([Text.Encoding]::ASCII.GetString((Operator-Read 8 4000)) -cne "EGWSSH1`n"){throw 'Invalid peer'}
+                $protocol=if($extendedOperator){2}else{1}
+                if([Text.Encoding]::ASCII.GetString((Operator-Read 8 4000)) -cne "EGWSSH$protocol`n"){throw 'Invalid peer'}
             }
 ''' + script[end:]
             # Preserve a causal failure message in the private fixture log.
@@ -401,7 +499,8 @@ function Get-Acl {
                     [os.environ["EGW_TEST_POWERSHELL"], "-NoProfile", "-File", str(worker),
                      "-SpoolDir", str(root/"spool"), "-PolicyPath", str(policy), "-PolicySha256", policy_pin,
                      *(["-RequireSignedAgents:$false"] if unsigned else ["-TrustedSignerThumbprints", "A"*40]),
-                     "-OperatorOpenSsh", "-LeaseSeconds", "180"],
+                     "-OperatorOpenSsh", "-LeaseSeconds", "180",
+                     *(["-OperatorExecMaxSec", "60"] if extended else [])],
                     env={**os.environ, "TMPDIR": directory}, stdout=log, stderr=log,
                 )
                 stack.callback(stop_process, process)
@@ -426,7 +525,7 @@ function Get-Acl {
                     peers.append(peer)
                 server = subprocess.Popen(
                     [sys.executable, str(Path(operator_target.__file__))], stdin=peers[0], stdout=peers[1],
-                    stderr=log, env={**os.environ, "SSH_ORIGINAL_COMMAND": "egw-operator-v1"},
+                    stderr=log, env={**os.environ, "SSH_ORIGINAL_COMMAND": "egw-operator-v2" if extended else "egw-operator-v1"},
                 )
                 stack.callback(stop_process, server)
                 for peer in peers:
@@ -440,6 +539,8 @@ function Get-Acl {
                     self.fail((root/"worker.log").read_text())
                 cfg = root/"config.json"
                 raw = operator_configuration(hashlib.sha256(worker.read_bytes()).hexdigest(), policy_pin)
+                if extended:
+                    raw["bastion"]["operator_exec_max_sec"] = 60
                 raw["security"].update(require_signed_agents=not unsigned, trusted_signers=[] if unsigned else ["A"*40])
                 raw["security"]["agent_package_dir"] = str(root)
                 raw["targets"]["app01"]["host"] = "127.0.0.1"
@@ -492,6 +593,15 @@ function Get-Acl {
                 self.assertTrue(evidence["stream_upload_deflate_v1"])
                 self.assertTrue(evidence["chunked_copy_v1"])
                 self.assertTrue(evidence["chunked_copy_slots_v1"])
+                if extended:
+                    self.assertEqual(evidence["operator_exec_max_sec"], 60)
+                    self.assertIn("after-fifteen", invoke("exec", "app01", "sleep 16; printf after-fifteen", "--timeout", "25")[0])
+                    _, err = invoke("exec", "app01", "sleep 5", "--timeout", "2", expected=1)
+                    failure = json.loads(err)["error"]
+                    self.assertTrue(failure["indeterminate"])
+                    saved = json.loads(invoke("transactions", "get", failure["tx_id"])[0])
+                    self.assertEqual(saved["state"], "indeterminate")
+                    self.assertEqual(json.loads(invoke("agent-verify")[0])["instance_id"], evidence["instance_id"])
                 command = "printf fixture-output\n#" + "x" * 8192
                 self.assertIn("fixture-output", invoke("exec", "app01", command, "--timeout", "15")[0])
                 upload, download, remote = root/"upload", root/"download", root/"remote"

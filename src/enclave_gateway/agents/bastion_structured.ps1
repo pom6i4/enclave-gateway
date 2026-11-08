@@ -6,7 +6,8 @@ param(
     [string[]]$TrustedSignerThumbprints=@(),
     [ValidateRange(1,86400)][int]$LeaseSeconds=28800,
     [string]$StopFile='',
-    [switch]$OperatorOpenSsh
+    [switch]$OperatorOpenSsh,
+    [ValidateRange(15,300)][int]$OperatorExecMaxSec=15
 )
 # Foreground only. Fixed operations use system OpenSSH; request text is never
 # evaluated by PowerShell. The approved policy is provisioned independently.
@@ -20,6 +21,9 @@ $operatorLead=[byte[]]::new(1);$operatorLeadTask=$null
 $operatorSlots=@{};$operatorCursor=0L;$operatorTicket=0L;$operatorBroken=$false
 $operatorQueue=[Collections.Generic.Queue[object]]::new()
 $operatorCancelled=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$extendedOperator=$OperatorOpenSsh -and $OperatorExecMaxSec -gt 15
+if($OperatorExecMaxSec -gt 15 -and (-not $OperatorOpenSsh -or $OperatorExecMaxSec -gt $LeaseSeconds)){throw 'Extended operator execution must fit the worker lease'}
+$operatorExecInProgress=$false
 $backend=if($OperatorOpenSsh){'operator'}else{'spawn'}
 $model=if($OperatorOpenSsh){'operator-openssh'}else{'foreground-openssh'}
 if($env:OS -ne 'Windows_NT'){throw 'The structured worker requires Windows system OpenSSH'}
@@ -28,7 +32,13 @@ function Assert-PlainPath([string]$Path,[bool]$Local=$false){
     $parent=if([IO.Directory]::Exists($Path)){New-Object IO.DirectoryInfo($Path)}else{New-Object IO.FileInfo($Path)}
     while($parent){if($parent.Exists -and ($parent.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Linked worker paths are forbidden'};$parent=if($parent -is [IO.FileInfo]){$parent.Directory}else{$parent.Parent}}
 }
-function Hash-File([string]$Path){return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()}
+function Hash-File([string]$Path){
+    $file=[IO.File]::OpenRead($Path)
+    try{
+        $sha=[Security.Cryptography.SHA256]::Create()
+        try{return [BitConverter]::ToString($sha.ComputeHash($file)).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+    }finally{$file.Dispose()}
+}
 function Assert-PolicyAcl([string]$Path,[string]$WorkerSid,[bool]$AllowWorkerOwnership){
     $approvedPrincipals=@('S-1-5-18','S-1-5-32-544')
     if($AllowWorkerOwnership){$approvedPrincipals+=@($WorkerSid)}
@@ -152,8 +162,8 @@ function Assert-Signature([string]$Path,[bool]$Microsoft=$false){
     return $signature
 }
 function Operator-Remaining([long]$Deadline){
-    $left=[Math]::Min(15000,$Deadline-$requestTimer.ElapsedMilliseconds)
-    if($left -le 0 -or $started.Elapsed.TotalSeconds -ge $LeaseSeconds){throw 'Operator SSH deadline reached'}
+    $left=[Math]::Min($Deadline-$requestTimer.ElapsedMilliseconds,($LeaseSeconds*1000L)-$started.ElapsedMilliseconds)
+    if($left -le 0){throw 'Operator SSH deadline reached'}
     return [int]$left
 }
 function Wait-OperatorIO($Task,[long]$Deadline,[string]$Id){
@@ -161,6 +171,7 @@ function Wait-OperatorIO($Task,[long]$Deadline,[string]$Id){
         if($Id -and $operatorCancelled.Contains($Id)){throw 'Operator SSH cancelled'}
         if($Task.Wait([Math]::Min(100,(Operator-Remaining $Deadline)))){return}
         if($Id){Receive-OperatorFrames}
+        if($operatorExecInProgress -and $started.ElapsedMilliseconds-$script:lastPulse -ge 5000){Pulse}
     }while($true)
 }
 function Operator-Write([byte[]]$Bytes,[long]$Deadline,[string]$Id,[int]$Offset=0,[int]$Count=-1){
@@ -302,7 +313,7 @@ function Get-OperatorDownload([byte[]]$Bytes,[long]$Deadline,[int]$CopyLength){
     [void](Operator-Remaining $Deadline)
     return @{Start=$start;Count=$count;Digest=$expected}
 }
-function Invoke-OperatorSsh([string]$Remote,[string]$InputFile,[string]$InputText,[string]$OutputFile,[long]$Deadline,[string]$Id,[ref]$Dispatched,[string]$ExpectedUploadHash,[hashtable]$Record,[long]$UploadOffset,[int]$UploadBytes,[int]$UploadPlainBytes,[int]$SlotBytes,[int]$DownloadLength=-1){
+function Invoke-OperatorSsh([string]$Remote,[string]$InputFile,[string]$InputText,[string]$OutputFile,[long]$Deadline,[string]$Id,[ref]$Dispatched,[string]$ExpectedUploadHash,[hashtable]$Record,[long]$UploadOffset,[int]$UploadBytes,[int]$UploadPlainBytes,[int]$SlotBytes,[int]$DownloadLength=-1,[string]$Operation){
     $readers=$operatorUploadReaders
     if($SlotBytes){$readers=$operatorSlotReaders;$UploadOffset=4096;$UploadBytes=$SlotBytes}
     $pipeline=$SlotBytes -gt 0 -or ($UploadBytes -ge 262144 -and -not $UploadPlainBytes)
@@ -320,8 +331,17 @@ function Invoke-OperatorSsh([string]$Remote,[string]$InputFile,[string]$InputTex
     }else{[byte[]]$payload=[Text.Encoding]::UTF8.GetBytes($InputText)}
     if(-not $pipeline){$inputBytes=$payload.Length}
     $outputLimit=if($DownloadLength -ge 0){$DownloadLength+65}elseif($OutputFile){67108964}else{8388608}
-    $header=[Text.Encoding]::UTF8.GetBytes((@{id=$Id;command=$Remote;input_bytes=$inputBytes;
-        output_limit=$outputLimit;timeout_ms=(Operator-Remaining $Deadline)}|ConvertTo-Json -Compress))
+    $peerBudget=Operator-Remaining $Deadline
+    if($operatorExecInProgress){
+        # Reserve part of the original deadline for the pipe reply and VFS delivery.
+        $reserve=[int][Math]::Min(1000,[Math]::Floor($peerBudget/4))
+        if($reserve -lt 1){throw 'Insufficient time for an operator reply'}
+        $Deadline=$requestTimer.ElapsedMilliseconds+$peerBudget-$reserve
+        $peerBudget-=2*$reserve
+    }
+    $fields=@{id=$Id;command=$Remote;input_bytes=$inputBytes;output_limit=$outputLimit;timeout_ms=$peerBudget}
+    if($extendedOperator){$fields.op=$Operation}
+    $header=[Text.Encoding]::UTF8.GetBytes(($fields|ConvertTo-Json -Compress))
     if($header.Length -gt 2097152 -or $inputBytes -gt 67108864){throw 'Operator SSH input limit exceeded'}
     # Once pipe writing begins, a broken pipe or timeout has an unknown outcome.
     # Never reuse the connection after partial I/O or retry a dispatched operation.
@@ -356,7 +376,14 @@ function Invoke-OperatorSsh([string]$Remote,[string]$InputFile,[string]$InputTex
         $output=Operator-Read $reply.output_bytes $Deadline $Id
         $errors=Operator-Read $reply.error_bytes $Deadline $Id
         $Record.ssh_reply_ms=$requestTimer.ElapsedMilliseconds-$phaseStarted
-        if($reply.indeterminate -isnot [bool] -or $reply.indeterminate){throw 'Remote process outcome requires reconciliation'}
+        if($reply.indeterminate -isnot [bool]){throw 'Invalid operator SSH reply outcome'}
+        if($reply.indeterminate){
+            if(-not $operatorExecInProgress -or $reply.outcome -cne 'command_timeout' -or
+               $reply.exit_code -ne 125 -or $reply.output_bytes -ne 0){throw 'Remote process outcome requires reconciliation'}
+            Watch-OperatorPeer
+            return @{Code=125;Output='';Error=[Text.Encoding]::UTF8.GetString($errors);State='indeterminate'}
+        }
+        if($reply.PSObject.Properties['outcome']){throw 'Invalid operator SSH reply outcome'}
         Watch-OperatorPeer
         $ioPhase='rdp_stage_write';$phaseStarted=$requestTimer.ElapsedMilliseconds
         $data=$null
@@ -406,13 +433,17 @@ function Open-OperatorPipes{
     }
     # Compression is confined to this dedicated, forwarding-disabled SSH session.
     $known=$target.known_hosts_path.Replace('\','/')
-    $line='"'+$ssh+'" -F NUL -T -C -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o PermitLocalCommand=no -o ProxyCommand=none -o ProxyJump=none -o IdentityAgent=none -o ForwardAgent=no -o ClearAllForwardings=yes -o ConnectTimeout=15 -o "UserKnownHostsFile='+$known+'" -o GlobalKnownHostsFile=NUL -i "'+$target.key_path+'" -p '+$target.port+' '+$target.user+'@'+$target.host+' egw-operator-v1 < \\.\pipe\EgwIn'+$instance+' > \\.\pipe\EgwOut'+$instance
+    $protocol=if($extendedOperator){2}else{1}
+    $line='"'+$ssh+'" -F NUL -T -C -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o PermitLocalCommand=no -o ProxyCommand=none -o ProxyJump=none -o IdentityAgent=none -o ForwardAgent=no -o ClearAllForwardings=yes -o ConnectTimeout=15 -o "UserKnownHostsFile='+$known+'" -o GlobalKnownHostsFile=NUL -i "'+$target.key_path+'" -p '+$target.port+' '+$target.user+'@'+$target.host+' egw-operator-v'+$protocol+' < \\.\pipe\EgwIn'+$instance+' > \\.\pipe\EgwOut'+$instance
     $inTask=$operatorInput.WaitForConnectionAsync();$outTask=$operatorOutput.WaitForConnectionAsync()
+    # CMD opens its redirects before OpenSSH authenticates. Use one startup
+    # deadline for both events and keep the worker unavailable until the greeting.
+    $requestTimer=[Diagnostics.Stopwatch]::StartNew()
+    $attachDeadline=90000
     Write-Host 'Run this exact command from a separate CMD console in the same RDP session:'
     Write-Host $line
-    if(-not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($inTask,$outTask),[Math]::Min(90000,$LeaseSeconds*1000))){throw 'Operator OpenSSH was not attached'}
-    $requestTimer=[Diagnostics.Stopwatch]::StartNew()
-    if([Text.Encoding]::ASCII.GetString((Operator-Read 8 15000)) -cne "EGWSSH1`n"){throw 'The approved Linux SSH endpoint did not start the operator protocol'}
+    if(-not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($inTask,$outTask),(Operator-Remaining $attachDeadline))){throw 'Operator OpenSSH was not attached'}
+    if([Text.Encoding]::ASCII.GetString((Operator-Read 8 $attachDeadline)) -cne "EGWSSH$protocol`n"){throw 'The approved Linux SSH endpoint did not start the expected operator protocol'}
 }
 function Open-OperatorSlot([long]$Slot){
     $name='ipc_res_'+$instance+'_'+$Slot+'.bin'
@@ -663,7 +694,16 @@ try{
             $process.Dispose();if($inputStream){$inputStream.Dispose()};if($outputStream){$outputStream.Dispose()};if($errorStream){$errorStream.Dispose()}
         }
     }
-    if($OperatorOpenSsh){Open-OperatorPipes;Watch-OperatorPeer;Start-OperatorStream;Assert-OperatorPeerIdle}
+    if($OperatorOpenSsh){
+        Heartbeat 'starting'
+        Open-OperatorPipes
+        Watch-OperatorPeer
+        Start-OperatorStream
+        Assert-OperatorPeerIdle
+        # Start the reader before publishing readiness so a cold read can
+        # begin before the host starts the first attestation deadline.
+        Receive-OperatorFrames 1
+    }
     Heartbeat
     $publishedRunning=$true
     while($started.Elapsed.TotalSeconds -lt $LeaseSeconds -and -not ($StopFile -and [IO.File]::Exists($StopFile))){
@@ -701,7 +741,9 @@ try{
                 if(($request.timeout_ms -isnot [int] -and $request.timeout_ms -isnot [long]) -or $request.timeout_ms -lt 1 -or $request.timeout_ms -gt 86400000){throw 'Invalid deadline'}
                 if($request.expires_unix_ms -isnot [int] -and $request.expires_unix_ms -isnot [long]){throw 'Invalid request expiry'}
                 $remaining=[double]$request.expires_unix_ms-[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-                $limit=if($OperatorOpenSsh){[Math]::Min($request.timeout_ms,15000)}else{$request.timeout_ms}
+                $operatorExecInProgress=$extendedOperator -and $request.op -ceq 'ssh_exec'
+                $limit=if($operatorExecInProgress){[Math]::Min($request.timeout_ms,$OperatorExecMaxSec*1000)}
+                       elseif($OperatorOpenSsh){[Math]::Min($request.timeout_ms,15000)}else{$request.timeout_ms}
                 $deadline=$requestTimer.ElapsedMilliseconds+[Math]::Min($limit,$remaining)
                 if($remaining -le 0 -or ($OperatorOpenSsh -and $operatorCancelled.Contains($id)) -or (-not $OperatorOpenSsh -and [IO.File]::Exists([IO.Path]::Combine($SpoolDir,('cancel_'+$id+'.json'))))){Response $id 125 '' 'Cancelled before dispatch' 'cancelled';continue}
                 if(($request.PSObject.Properties.Name -contains 'as_root') -and $request.as_root -isnot [bool]){throw 'Invalid privilege option'}
@@ -737,10 +779,12 @@ try{
                         if([string]$request.attestation_nonce -cnotmatch '^[a-f0-9]{64}$'){throw 'Invalid challenge'}
                         $freshStatus='NotSigned';$freshSigner=''
                         if($RequireSignedAgents){$fresh=Assert-Signature $PSCommandPath;$freshStatus='Valid';$freshSigner=$fresh.SignerCertificate.Thumbprint}
-                        $out=@{protocol_revision=1;version='0.3.0';nonce=$request.attestation_nonce;instance_id=$instance;loaded_sha256=$loadedHash;
+                        $evidence=@{protocol_revision=1;version='0.3.0';nonce=$request.attestation_nonce;instance_id=$instance;loaded_sha256=$loadedHash;
                             current_sha256=(Hash-File $PSCommandPath);loaded_signature_status=$signatureStatus;loaded_signer=$signer;
                             signature_status=$freshStatus;signer=$freshSigner;sid=$sid;execution_model=$model;
-                            execution_profile='structured_only';policy_sha256=$PolicySha256;stream_upload_v1=[bool]$OperatorOpenSsh;stream_upload_deflate_v1=[bool]$OperatorOpenSsh;chunked_copy_v1=[bool]$OperatorOpenSsh;chunked_copy_slots_v1=[bool]$OperatorOpenSsh}|ConvertTo-Json -Compress
+                            execution_profile='structured_only';policy_sha256=$PolicySha256;stream_upload_v1=[bool]$OperatorOpenSsh;stream_upload_deflate_v1=[bool]$OperatorOpenSsh;chunked_copy_v1=[bool]$OperatorOpenSsh;chunked_copy_slots_v1=[bool]$OperatorOpenSsh}
+                        if($extendedOperator){$evidence.operator_exec_max_sec=$OperatorExecMaxSec}
+                        $out=$evidence|ConvertTo-Json -Compress
                     }
                     {$_ -cin @('ssh_exec','ssh_push','ssh_pull','ssh_copy')} {
                         $phase='policy';$node=Target $request
@@ -783,11 +827,11 @@ try{
                             $remote=$prefix+(Quote-Posix $body)
                         }
                         $phase='ssh'
-                        $result=if($OperatorOpenSsh){Invoke-OperatorSsh $remote $inputFile $inputText $outputFile $deadline $id ([ref]$dispatched) ([string]$request.sha256) $recordData $item.UploadOffset $request.upload_bytes $request.upload_plain_bytes $request.upload_slot_bytes $downloadLength}
+                        $result=if($OperatorOpenSsh){Invoke-OperatorSsh $remote $inputFile $inputText $outputFile $deadline $id ([ref]$dispatched) ([string]$request.sha256) $recordData $item.UploadOffset $request.upload_bytes $request.upload_plain_bytes $request.upload_slot_bytes $downloadLength $request.op}
                         else{Run-Ssh $node $remote $inputFile $inputText $outputFile $deadline $id ([ref]$dispatched)}
                         $code=$result.Code;$out=$result.Output;$err=$result.Error
                         $data=$result.Data
-                        if($code){$state='failed'}
+                        if($result.State){$state=$result.State}elseif($code){$state='failed'}
                         if(-not $OperatorOpenSsh -and $request.op -eq 'ssh_pull' -and -not $code){
                             # Split the remote hash header from the binary stream without decoding file data.
                             $source=[IO.File]::OpenRead($outputFile);$temporary=$outputFile+'.verified'
@@ -815,7 +859,7 @@ try{
                 $state=if($dispatched){'indeterminate'}else{'failed'}
                 if($claimed){$recordData.state=$state;$recordData.failure_stage=$phase;$recordData.error_type=$_.Exception.GetType().FullName;Write-Atomic $record ($recordData|ConvertTo-Json -Compress)}
                 Response $id 125 '' ('Structured operation failed at '+$phase+' ('+$_.Exception.GetType().Name+'); inspect approved policy and reconcile durable outcomes before retrying') $state
-            }finally{if($path){[IO.File]::Delete($path)};if($OperatorOpenSsh){[void]$operatorCancelled.Remove($id)}}
+            }finally{$operatorExecInProgress=$false;if($path){[IO.File]::Delete($path)};if($OperatorOpenSsh){[void]$operatorCancelled.Remove($id)}}
             if($operatorBroken){return}
         }
         if($OperatorOpenSsh){

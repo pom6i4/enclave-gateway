@@ -154,6 +154,7 @@ class BastionSpec:
     worker_policy_sha256: str = ''
     structured_backend: str = 'spawn'
     lease_seconds: int = 28800
+    operator_exec_max_sec: int = 15
 
     def __post_init__(self):
         if self.transport!='rdp_vfs':
@@ -173,6 +174,10 @@ class BastionSpec:
             raise ValueError("spool_protocol must be files or stream")
         if type(self.lease_seconds) is not int or not 60 <= self.lease_seconds <= 86400:
             raise ValueError('bastion.lease_seconds must be in 60..86400')
+        if type(self.operator_exec_max_sec) is not int or not 15 <= self.operator_exec_max_sec <= min(300, self.lease_seconds):
+            raise ValueError('bastion.operator_exec_max_sec must be in 15..300 and fit the worker lease')
+        if self.operator_exec_max_sec != 15 and self.structured_backend != 'operator':
+            raise ValueError('bastion.operator_exec_max_sec requires the operator OpenSSH backend')
         if type(self.heartbeat_max_age_sec) is not int or not 5<=self.heartbeat_max_age_sec<=300:
             raise ValueError('heartbeat_max_age_sec must be in 5..300')
         # A binary block is embedded in a script, then in the 8 MiB envelope.

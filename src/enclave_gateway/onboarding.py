@@ -150,6 +150,8 @@ def agent_bundle(config, *, execution_policy='',migrate_legacy_state=False,persi
         else:
             command+=' -RequireSignedAgents:$false'
         if operator:
+            if config.bastion.operator_exec_max_sec > 15:
+                command+=f' -OperatorExecMaxSec {config.bastion.operator_exec_max_sec}'
             prefix="$ErrorActionPreference='Stop';"
             if execution_policy:
                 prefix+="if((Get-ExecutionPolicy) -eq 'AllSigned'){throw 'AllSigned requires an approved signed package'};Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned -Force;"
@@ -184,9 +186,20 @@ def agent_bundle(config, *, execution_policy='',migrate_legacy_state=False,persi
     return files,hashes,identity,command
 
 
-def stage_agents(control,config,*,execution_policy='',migrate_legacy_state=False,persist_autostart=False):
+def stage_agents(control,config,*,execution_policy='',migrate_legacy_state=False,persist_autostart=False,policy_source=None):
     if not config.bastion.enabled:raise ValueError('Agent deployment requires bastion.enabled: true')
     files,hashes,identity,command=agent_bundle(config,execution_policy=execution_policy,migrate_legacy_state=migrate_legacy_state,persist_autostart=persist_autostart)
+    if policy_source is not None:
+        if config.bastion.structured_backend != 'operator':
+            raise ValueError('--policy-source requires the operator OpenSSH backend')
+        with Path(policy_source).expanduser().open('rb') as source:
+            policy = source.read(65537)
+        digest = hashlib.sha256(policy).hexdigest()
+        if not 0 < len(policy) <= 65536 or digest != config.bastion.worker_policy_sha256:
+            raise ValueError('Policy source exceeds 64 KiB or does not match the approved policy SHA-256')
+        files['worker-policy.json'] = policy
+        hashes['worker-policy.json'] = digest
+        identity = hashlib.sha256(json.dumps(hashes,sort_keys=True).encode()).hexdigest()
     spool=config.bastion.appliance_spool_dir.rstrip('\\/')
     root=spool+'\\agents';target=root+'\\'+identity;temporary=root+'\\.incoming-'+secrets.token_hex(16)
     def execute(script):
@@ -236,7 +249,7 @@ function Assert-Bundle([string]$folder){
             'next_step':'Run start_command inside the Bastion RDP session. Then run egw doctor --probe-targets.'}
     if config.bastion.structured_backend=='operator':
         receipt.update(
-            bastion_copy_command=_operator_copy_command(config.bastion,identity,hashes['bastion_structured.ps1']),
+            bastion_copy_command=_operator_copy_command(config.bastion,identity,hashes['bastion_structured.ps1'], install_policy=policy_source is not None),
             target_authorized_keys_prefix='command="/usr/bin/python3 /path/to/operator_target.py",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty',
             next_step='Provision the approved worker policy and target helper. Run bastion_copy_command and then start_command inside the Bastion RDP session.',
         )
@@ -250,11 +263,40 @@ def _operator_path_guard():
             r"$p=if($p -is [IO.FileInfo]){$p.Directory}else{$p.Parent}}}")
 
 
-def _operator_copy_command(bastion,identity,digest):
+def _operator_copy_command(bastion,identity,digest,*,install_policy=False):
     source=bastion.bastion_spool_dir.rstrip('\\/')+'\\agents\\'+identity+'\\bastion_structured.ps1'
+    install = ''
+    if install_policy:
+        install = (
+            "if(-not [IO.File]::Exists($egwPolicy)){"
+            "$egwParent=[IO.Path]::GetDirectoryName($egwPolicy);"
+            "Assert-EgwLocalPath $egwParent;[void][IO.Directory]::CreateDirectory($egwParent);"
+            "$egwSid=[Security.Principal.WindowsIdentity]::GetCurrent().User;"
+            "$egwAllowed=@($egwSid.Value,'S-1-5-18','S-1-5-32-544');"
+            "$egwParentAcl=Get-Acl -LiteralPath $egwParent;"
+            "if($egwParentAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value -cnotin $egwAllowed){throw 'Use a private policy directory'};"
+            "foreach($rule in $egwParentAcl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){"
+            "if($rule.AccessControlType -eq 'Allow' -and ([int]$rule.FileSystemRights -band 852310) -ne 0 -and "
+            "$rule.IdentityReference.Value -cnotin $egwAllowed){throw 'Use a private policy directory'}};"
+            "$egwTemp=$egwPolicy+'.'+[Guid]::NewGuid().ToString('N')+'.tmp';try{"
+            "[IO.File]::Copy("+ps_quote(str(PureWindowsPath(source).with_name('worker-policy.json')))+",$egwTemp,$false);"
+            "if((Get-FileHash -LiteralPath $egwTemp -Algorithm SHA256).Hash.ToLowerInvariant() -cne "+
+            ps_quote(bastion.worker_policy_sha256)+"){throw 'Approved worker policy hash mismatch'};"
+            "$egwPolicyData=[IO.File]::ReadAllText($egwTemp)|ConvertFrom-Json;"
+            "if($egwPolicyData.revision -ne 1 -or $egwPolicyData.owner_sid -cne $egwSid.Value){throw 'Invalid policy or worker SID'};"
+            "$egwAcl=[Security.AccessControl.FileSecurity]::new();$egwAcl.SetOwner($egwSid);"
+            "$egwAcl.SetAccessRuleProtection($true,$false);"
+            "foreach($id in $egwAllowed){"
+            "$egwAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new("
+            "[Security.Principal.SecurityIdentifier]::new($id),'FullControl','Allow'))};"
+            "if($PSVersionTable.PSEdition -eq 'Desktop'){[IO.File]::SetAccessControl($egwTemp,$egwAcl)}"
+            "else{[IO.FileSystemAclExtensions]::SetAccessControl([IO.FileInfo]::new($egwTemp),$egwAcl)};"
+            "Assert-EgwLocalPath $egwPolicy;[IO.File]::Move($egwTemp,$egwPolicy)"
+            "}finally{[IO.File]::Delete($egwTemp)}};"
+        )
     return (
         "$ErrorActionPreference='Stop';"+_operator_path_guard()+";$egwPolicy="+ps_quote(bastion.worker_policy_path)+
-        ";Assert-EgwLocalPath $egwPolicy;$egwPolicyLease=[IO.File]::Open($egwPolicy,'Open','Read','Read');try{"
+        ";Assert-EgwLocalPath $egwPolicy;"+install+"$egwPolicyLease=[IO.File]::Open($egwPolicy,'Open','Read','Read');try{"
         "if((Get-FileHash -LiteralPath $egwPolicy -Algorithm SHA256).Hash.ToLowerInvariant() -cne "+
         ps_quote(bastion.worker_policy_sha256)+"){throw 'Approved worker policy hash mismatch'};"
         "$egwSettings=[IO.File]::ReadAllText($egwPolicy)|ConvertFrom-Json;"

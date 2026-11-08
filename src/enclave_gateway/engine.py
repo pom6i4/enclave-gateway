@@ -300,13 +300,14 @@ class EnclaveEngine:
             return report
 
         provider = self.config.provider
+        operator = self.config.bastion.structured_backend == 'operator'
         worker_probe=(f"""
 $statePath = Join-Path {ps_quote(self.config.bastion.appliance_spool_dir)} 'worker_state.json'
 if (Test-Path -LiteralPath $statePath) {{
     $age = ((Get-Date) - (Get-Item -LiteralPath $statePath).LastWriteTime).TotalSeconds
     if ($age -ge 0 -and $age -lt {self.config.bastion.heartbeat_max_age_sec}) {{ $stateJson = [IO.File]::ReadAllText($statePath).Trim() }}
 }}
-""" if self.config.bastion.enabled else '')
+""" if self.config.bastion.enabled and not operator else '')
         adapter = provider_adapter(provider.type)
         probe_ps = adapter.probe_script(provider) + f"""
 $adapterName = {ps_quote(provider.adapter_name)}
@@ -349,7 +350,22 @@ ConvertTo-Json $out -Compress -Depth 8
         except Exception as exc:
             report["provider"]["details"] = f"Status probe error: {exc}"
 
-        if self.config.bastion.enabled and self.config.bastion.spool_protocol=='stream':
+        if self.config.bastion.enabled and operator:
+            from enclave_gateway.worker_channel import _structured_worker_state
+            path = self.config.bastion.appliance_spool_dir.rstrip('\\/') + '\\worker_state.json'
+            try:
+                state = _structured_worker_state(self.control, path, self.config.bastion)
+            except Exception:
+                state = {}
+            report['bastion']['worker_state'] = state.get('worker_state')
+            report['bastion']['worker_healthy'] = (
+                state.get('running') is True
+                and 0 <= state['age_sec'] < self.config.bastion.heartbeat_max_age_sec
+                and state['execution_profile'] == 'structured_only'
+                and state['structured_backend'] == 'operator'
+                and state['spool_protocol'] == 'stream'
+            )
+        elif self.config.bastion.enabled and self.config.bastion.spool_protocol=='stream':
             from enclave_gateway.worker_channel import stream_worker_state
             try:snapshot=stream_worker_state(self.control,self.config.bastion)
             except Exception:snapshot=None
@@ -392,7 +408,7 @@ ConvertTo-Json $out -Compress -Depth 8
                                  message='Native credential update was not acknowledged. Verify the managed user session and stored credential before retrying; no script fallback was used.') from error
 
     @tracked("heal")
-    def heal(self, *, update_credentials: bool = False, actor: str = "cli") -> ExecResult:
+    def heal(self, *, update_credentials: bool = False, execution_policy: str = "", actor: str = "cli") -> ExecResult:
         """Self-heal clock drift, MTU, RDP UDP policy, interactive credentials, and Bastion RDP session."""
         if update_credentials and not self.config.bastion.enabled:
             self.rdp_vfs.require_worker()
@@ -401,7 +417,9 @@ ConvertTo-Json $out -Compress -Depth 8
         tx_id = current().tx_id if current() else generate_tx_id()
         deployment=None
         if self.config.bastion.enabled and self.config.security.mode!='custom':
-            deployment=self.stage_agents()
+            deployment=self.stage_agents(execution_policy=execution_policy) if execution_policy else self.stage_agents()
+        elif execution_policy:
+            raise ValueError('Process RemoteSigned requires a configured Standard Bastion worker')
         sync_fn = getattr(self.control, "sync_guest_clock", None)
         if callable(sync_fn):
             sync_fn()
@@ -515,7 +533,8 @@ ConvertTo-Json $out -Compress -Depth 8
         if self.config.bastion.structured_backend == "operator" and operation in ("exec_node", "transfer_file"):
             target = self.config.targets.get(node)
             if target and target.via in ("bastion", "@bastion"):
-                return min(budget(timeout), 15.0)
+                cap = self.config.bastion.operator_exec_max_sec if operation == 'exec_node' else 15
+                return min(budget(timeout), cap)
         return timeout
 
     @tracked("exec_node")
@@ -1512,6 +1531,27 @@ Write-Output 'BASTION_CLEAN_OK'
                       expected_execution_profile='structured_only' if self.config.bastion.execution_profile=='structured_only' else '',
                       expected_policy_sha256=self.config.bastion.worker_policy_sha256 if self.config.bastion.execution_profile=='structured_only' else '',
                       expected_execution_model='operator-openssh' if self.config.bastion.structured_backend=='operator' else '')
+
+    def wait_for_worker_ready(self, timeout_sec: float) -> None:
+        from enclave_gateway.operations.context import limit_deadline
+        from enclave_gateway.worker_channel import require_running_worker
+
+        self.rdp_vfs.require_worker()
+        if not 0 < timeout_sec <= 120:
+            raise ValueError('Worker readiness wait must be in (0, 120] seconds')
+        deadline = time.monotonic() + timeout_sec
+        with limit_deadline(timeout_sec):
+            while True:
+                try:
+                    require_running_worker(self.control, self.config.bastion)
+                    return
+                except OperationError as error:
+                    if error.code != 'session_pending_worker':
+                        raise
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise
+                    time.sleep(min(0.25, remaining))
 
     def _scoped_sync(self,direction,local_dir,node,remote_dir,*,as_root,exclude,timeout_sec,actor):
         from enclave_gateway.agents.rooted_fs import request

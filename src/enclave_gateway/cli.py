@@ -53,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     agents=sub.add_parser('agents',help='Stage an immutable worker bundle or print its Bastion startup command.')
     agents.add_argument('agents_action',choices=['stage','command','prune','stop','unregister-autostart-command'])
     agents.add_argument('--execution-policy',choices=['RemoteSigned'],default='',help='Explicit process-only Standard startup option; never weakens AllSigned or Group Policy.')
+    agents.add_argument('--policy-source', type=Path, help='Stage the independently approved operator policy from this Host file.')
     agents.add_argument('--persist-autostart',action='store_true',help='Opt-in HKCU Run persistence; requires endpoint policy approval and may be blocked by EDR.')
     agents.add_argument('--unregister-autostart',action='store_true',help='Remove the current worker user HKCU startup value before acknowledged stop.')
     agents.add_argument('--migrate-legacy-state',action='store_true',help='Approve one-time journal migration after stopping the old worker.')
@@ -157,13 +158,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_heal = sub.add_parser(
         "heal",
-        help="Enforce MTU=1350, disable RDP-over-UDP, and reconnect Bastion RDP session.",
+        help="Apply the configured IPv4 MTU, disable RDP-over-UDP, and reconnect Bastion RDP session.",
     )
     p_heal.add_argument(
         "--update-credentials",
         action="store_true",
         help="Re-inject Bastion domain credentials into the interactive session.",
     )
+    p_heal.add_argument('--execution-policy', choices=['RemoteSigned'], default='',
+                        help='Explicit process-only option for the printed Standard worker command.')
 
     sub.add_parser(
         "clean",
@@ -474,7 +477,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_provider.add_argument('--apply',action='store_true')
     p_provider.add_argument('--approval-digest',default='')
     p_provider.add_argument('--tx-id',default=None)
-    sub.add_parser('agent-verify',help='Verify fresh evidence from the running Bastion worker.')
+    p_verify = sub.add_parser('agent-verify',help='Verify fresh evidence from the running Bastion worker.')
+    p_verify.add_argument('--wait-ready',type=float,default=None,metavar='SECONDS',
+                          help='Wait for startup before beginning the independent attestation (up to 120 seconds).')
     sub.add_parser("capabilities", help="Report local capabilities without contacting a live enclave.")
     p_tx = sub.add_parser("transactions", help="Retrieve durable results and request cancellation without replaying work.")
     p_tx.add_argument("action", choices=["get", "list", "cancel", "reconcile", "maintain"])
@@ -540,7 +545,7 @@ def _main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command=='agents' and args.agents_action=='unregister-autostart-command':
-        if args.execution_policy or args.persist_autostart or args.unregister_autostart or args.migrate_legacy_state or args.apply or args.remove or args.keep or args.min_age_hours!=168 or args.timeout!=45:
+        if args.execution_policy or args.policy_source or args.persist_autostart or args.unregister_autostart or args.migrate_legacy_state or args.apply or args.remove or args.keep or args.min_age_hours!=168 or args.timeout!=45:
             parser.error('Offline autostart removal command accepts no deployment, stop or pruning options')
         from enclave_gateway.onboarding import unregister_autostart_command
         print(unregister_autostart_command());return 0
@@ -568,6 +573,8 @@ def _main(argv: list[str] | None = None) -> int:
         result=preflight(cfg);print(json.dumps(result,indent=2));return 0 if result['healthy'] else 1
     if args.command=='agents' and args.agents_action!='prune' and (args.apply or args.remove or args.keep or args.min_age_hours!=168):
         parser.error('Maintenance flags require agents prune')
+    if args.command=='agents' and args.policy_source and args.agents_action!='stage':
+        parser.error('--policy-source requires agents stage')
     if args.command=='agents' and args.agents_action not in ('stage','command') and (args.execution_policy or args.migrate_legacy_state or args.persist_autostart):
         parser.error('Startup options require agents stage or command')
     if args.command=='agents' and args.agents_action!='stop' and args.unregister_autostart:
@@ -656,6 +663,8 @@ def _main(argv: list[str] | None = None) -> int:
         print(json.dumps(result,indent=2))
         return 1 if result.get('cleanup_pending') else 0
     if args.command=='agent-verify':
+        if args.wait_ready is not None:
+            engine.wait_for_worker_ready(args.wait_ready)
         print(json.dumps(engine.attest_worker(),indent=2))
         return 0
     if args.command == "capabilities":
@@ -763,7 +772,7 @@ def _main(argv: list[str] | None = None) -> int:
             result=engine.stop_worker(timeout_sec=args.timeout,unregister_autostart=args.unregister_autostart)
             print(json.dumps({'exit_code':result.exit_code,'stdout':result.stdout,'stderr':result.stderr,'tx_id':result.tx_id}))
             return result.exit_code
-        else:print(json.dumps(engine.stage_agents(execution_policy=args.execution_policy,migrate_legacy_state=args.migrate_legacy_state,persist_autostart=args.persist_autostart),indent=2))
+        else:print(json.dumps(engine.stage_agents(execution_policy=args.execution_policy,migrate_legacy_state=args.migrate_legacy_state,persist_autostart=args.persist_autostart,policy_source=args.policy_source),indent=2))
         return 0
 
     if args.command == "doctor":
@@ -781,7 +790,7 @@ def _main(argv: list[str] | None = None) -> int:
         )
 
     if args.command == "heal":
-        res = engine.heal(update_credentials=args.update_credentials, actor="cli")
+        res = engine.heal(update_credentials=args.update_credentials, execution_policy=args.execution_policy, actor="cli")
         if res.stdout:
             print(res.stdout)
         if res.stderr:

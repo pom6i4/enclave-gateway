@@ -47,9 +47,9 @@ at a root-managed path. Restrict a dedicated SSH key to that command (for
 example, an `authorized_keys` entry with
 `restrict,command="/usr/bin/python3 /usr/local/lib/egw-operator-target.py"`).
 The dedicated SSH session enables OpenSSH compression and disables forwarding.
-The peer accepts the literal SSH command `egw-operator-v1`. The dedicated key
-grants the Linux account's privileges, including its shell permissions. Apply
-the target's own account and sudo policy accordingly.
+The default peer invocation is the literal SSH command `egw-operator-v1`.
+The dedicated key grants the Linux account's privileges, including its shell
+permissions. Apply the target's own account and sudo policy accordingly.
 
 Set these options in the Standard [starter configuration](../config/enclave.structured.example.yaml):
 
@@ -81,25 +81,33 @@ against writes and attestation checks the current adapter digest.
   is required. Microsoft system OpenSSH still requires a valid Microsoft
   signature. This mode trusts the operator and the protected control channel.
 
-Run `egw agents stage` on Host. Install the staged `operator_target.py` on the
+Run `egw agents stage` on Host. For initial provisioning, `egw agents stage
+--policy-source ./worker-policy.json` can include an independently approved,
+hash-pinned policy in the private spool bundle. Its `bastion_copy_command`
+installs the policy only if the local file is missing, checks the operator
+SID and restricts its Windows ACL. An existing policy must match the pin.
+Install the staged `operator_target.py` on the
 Linux target and use `target_authorized_keys_prefix` with the real helper path
 and dedicated public key. In PowerShell on Bastion, run `bastion_copy_command`
 to verify the policy and stage the exact script beside it. Then run
 `start_command` in that RDP session. For an approved unsigned deployment,
-`egw agents stage --execution-policy RemoteSigned` or
-`egw agents command --execution-policy RemoteSigned` requests RemoteSigned
-for the current PowerShell process. Group Policy keeps precedence. In another CMD
+`egw agents stage --execution-policy RemoteSigned`,
+`egw agents command --execution-policy RemoteSigned` and
+`egw heal --execution-policy RemoteSigned` request RemoteSigned for the current
+PowerShell process. Group Policy keeps precedence. In another CMD
 console in the same RDP session, run the command printed by the adapter. It
 starts system OpenSSH with the fixed target, key and known-hosts file from the
 approved policy. The adapter exchanges framed data over two local named pipes
 that allow the worker SID and deny network access. It does not launch the SSH
 client, run PowerShell from requests, start on logon, or open a TCP proxy.
 Host-key checks remain enabled. No SSH password is accepted.
+The adapter gives CMD attachment and the authenticated Linux greeting one
+shared 90-second startup window, bounded by the remaining worker lease.
 
 When the worker is ready, use the regular CLI:
 
 ```sh
-egw agent-verify
+egw agent-verify --wait-ready 25
 egw exec app01 'uname -s' --timeout 15
 egw cp ./artifact.bin app01:/tmp/artifact.bin --timeout 15
 egw cp app01:/tmp/artifact.bin ./received.bin --timeout 15
@@ -110,9 +118,18 @@ For the `operator` backend, `egw clean` checks that the adapter has stopped
 and preserves the Stream evidence. Retire the spool separately under the
 endpoint's retention policy after collecting any needed evidence.
 
-Target exec and copy share a maximum 15-second operation budget, including
+Target exec and ordinary copy default to a 15-second operation cap, including
 fresh attestation (at most 10 seconds), staging, remote work and response
-delivery. This is a deadline, not a throughput guarantee for large files.
+delivery. The optional startup wait in `agent-verify` ends before its fresh
+attestation begins. For an approved deployment that needs long commands, set
+`bastion.operator_exec_max_sec` to a value above 15 and at most 300 seconds
+within the worker lease. Install the matching Linux helper, pin the new
+adapter hash and restart with the generated commands. The adapter uses
+`egw-operator-v2` for that session and advertises its cap in fresh attestation.
+The CLI's `--timeout` still bounds the entire request, with time reserved for
+the reply. A fully received command timeout leaves the session available for
+the next request and records the previous outcome as `indeterminate`.
+Reconcile its external effects before retrying.
 When attestation advertises `stream_upload_v1`, uploads up to 1 MiB travel
 in the existing request stream. An adapter advertising `stream_upload_deflate_v1`
 also accepts Deflate when it saves at least one aligned block. The original
@@ -234,8 +251,7 @@ handle on the pre-opened response slot (`ipc_res_<instance>_<slot>.bin`). It
 verifies the bytes before erasing the response.
 The 15-second per-request limit and 10-second attestation limit still apply. For
 `--chunked`, `--timeout` budgets the whole copy. The foreground lease must
-also cover the copy. Ordinary `exec` and `cp` in operator mode keep their
-15-second total limit.
+also cover the copy. The extended command budget applies only to `exec`.
 
 The receiver publishes the destination atomically after verifying the whole
 file's SHA-256. A failed upload can leave a private directory named

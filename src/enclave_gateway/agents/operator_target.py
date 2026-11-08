@@ -20,6 +20,7 @@ MAX_INPUT = 64 * 1024 * 1024
 MAX_OUTPUT = MAX_INPUT + 100
 MAX_ERROR = 1024 * 1024
 READY = b"EGWSSH1\n"
+READY_V2 = b"EGWSSH2\n"
 
 
 def _read_exact(source, length):
@@ -29,13 +30,17 @@ def _read_exact(source, length):
     return data
 
 
-def _request(source, size):
+def _request(source, size, *, extended=False):
     if not re.fullmatch(rb"[0-9a-f]{8}", size) or not 2 <= int(size, 16) <= MAX_HEADER:
         raise ValueError("Invalid operator request header length")
     request = json.loads(_read_exact(source, int(size, 16)))
+    fields = {"id", "command", "input_bytes", "output_limit", "timeout_ms"}
+    if extended:
+        fields.add("op")
     if (
         not isinstance(request, dict)
-        or set(request) != {"id", "command", "input_bytes", "output_limit", "timeout_ms"}
+        or set(request) != fields
+        or (extended and request["op"] not in ("ssh_exec", "ssh_push", "ssh_pull", "ssh_copy"))
         or not isinstance(request["id"], str)
         or not re.fullmatch(r"[A-Za-z0-9_]{1,128}", request["id"])
         or not isinstance(request["command"], str)
@@ -46,7 +51,7 @@ def _request(source, size):
         or type(request["output_limit"]) is not int
         or not 1 <= request["output_limit"] <= MAX_OUTPUT
         or type(request["timeout_ms"]) is not int
-        or not 1 <= request["timeout_ms"] <= 15_000
+        or not 1 <= request["timeout_ms"] <= (300_000 if extended and request["op"] == "ssh_exec" else 15_000)
     ):
         raise ValueError("Invalid operator request")
     return request
@@ -54,7 +59,7 @@ def _request(source, size):
 
 def _execute(command, payload, output_limit, deadline, session=None):
     if time.monotonic() >= deadline:
-        return 125, b"", b"Expired before Linux dispatch\n", False
+        return 125, b"", b"Expired before Linux dispatch\n", ""
     process = subprocess.Popen(
         ["/bin/sh", "-c", command],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -102,9 +107,11 @@ def _execute(command, payload, output_limit, deadline, session=None):
                                 raise ValueError("Linux command output limit exceeded")
                             buffers[stream].extend(block)
         code = process.wait(timeout=max(0, deadline - time.monotonic()))
-        return code if code >= 0 else 128 - code, buffers[process.stdout], buffers[process.stderr], False
-    except (TimeoutError, subprocess.TimeoutExpired, ValueError):
-        return 125, b"", b"Linux command interrupted; reconcile its effects\n", True
+        return code if code >= 0 else 128 - code, buffers[process.stdout], buffers[process.stderr], ""
+    except (TimeoutError, subprocess.TimeoutExpired):
+        return 125, b"", b"Linux command timed out; reconcile its effects\n", "timeout"
+    except ValueError:
+        return 125, b"", b"Linux command exceeded its output limit; reconcile its effects\n", "output_limit"
     finally:
         try:
             os.killpg(process.pid, signal.SIGKILL)
@@ -115,33 +122,38 @@ def _execute(command, payload, output_limit, deadline, session=None):
             stream.close()
 
 
-def serve(source, sink):
-    sink.write(READY)
+def serve(source, sink, *, extended=False):
+    sink.write(READY_V2 if extended else READY)
     sink.flush()
     while size := source.read(8):
-        request = _request(source, size)
+        request = _request(source, size, extended=extended)
         deadline = time.monotonic() + request["timeout_ms"] / 1000
         payload = _read_exact(source, request["input_bytes"])
-        code, stdout, stderr, unknown = _execute(
+        code, stdout, stderr, interrupted = _execute(
             request["command"], payload, request["output_limit"], deadline,
             session=source if source is sys.stdin.buffer else None,
         )
-        header = json.dumps({
+        reply = {
             "id": request["id"], "exit_code": code, "output_bytes": len(stdout),
-            "error_bytes": len(stderr), "indeterminate": unknown,
-        }, separators=(",", ":")).encode("ascii")
+            "error_bytes": len(stderr), "indeterminate": bool(interrupted),
+        }
+        recoverable = extended and request["op"] == "ssh_exec" and interrupted == "timeout"
+        if recoverable:
+            reply["outcome"] = "command_timeout"
+        header = json.dumps(reply, separators=(",", ":")).encode("ascii")
         for part in (f"{len(header):08x}".encode("ascii"), header, stdout, stderr):
             sink.write(part)
         sink.flush()
-        if unknown:
+        if interrupted and not recoverable:
             return
 
 
 if __name__ == "__main__":
     # Do not enable this endpoint for existing multipurpose SSH credentials.
-    if os.environ.get("SSH_ORIGINAL_COMMAND") != "egw-operator-v1":
+    invocation = os.environ.get("SSH_ORIGINAL_COMMAND")
+    if invocation not in ("egw-operator-v1", "egw-operator-v2"):
         sys.exit("Expected the approved Enclave Gateway SSH command")
     try:
-        serve(sys.stdin.buffer, sys.stdout.buffer)
+        serve(sys.stdin.buffer, sys.stdout.buffer, extended=invocation == "egw-operator-v2")
     except (OSError, ValueError, EOFError, RecursionError):
         sys.exit("Operator SSH protocol failed; reconcile any dispatched operation")
