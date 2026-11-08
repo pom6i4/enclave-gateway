@@ -136,7 +136,9 @@ on Bastion.
 The worker profiles are:
 
 - `structured_only` provides fixed foreground operations through system OpenSSH.
-  It requires a signed worker and an independently approved local target policy.
+  It requires an independently approved local target policy. Spawn requires a
+  signed worker. Standard operator mode also supports an unsigned adapter with
+  pinned worker and policy SHA-256, operator SID and mandatory attestation.
   It supports Files only.
 - `legacy` retains the existing worker behavior under its configured security
   mode. Stream is available here when explicitly selected.

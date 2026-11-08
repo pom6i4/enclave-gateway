@@ -1,10 +1,13 @@
-# Unreleased foreground profile. Administrator approval and real pins are required.
+# Foreground profile. Deployment approval and independently verified pins are required.
+appliance:
+  mtu: 1200
 security:
   mode: standard
   require_signed_agents: true
   enforce_worker_attestation: true
   agent_package_dir: './approved-agents'
   worker_sha256: ''
+  worker_account: '' # Required for an unsigned operator adapter. Use the Windows SID.
   trusted_signers: []
 bastion:
   host: '10.0.1.10'
@@ -13,6 +16,7 @@ bastion:
   spool_protocol: files
   worker_policy_path: 'C:\ProgramData\EnclaveGateway\worker-policy.json'
   worker_policy_sha256: ''
+  lease_seconds: 28800
 provider:
   type: custom
   installer_path: ''

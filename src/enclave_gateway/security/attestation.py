@@ -18,6 +18,10 @@ def verify(evidence, nonce, *, expected_sha256, trusted_signers=(), require_sign
     require(evidence.get('loaded_sha256')==expected_sha256.lower(),'Running worker does not match pinned release')
     require(evidence.get('current_sha256')==evidence.get('loaded_sha256'),'Worker file changed since startup')
     require(bool(re.fullmatch('[a-f0-9]{32}',evidence.get('instance_id',''))),'Missing worker instance identity')
+    if expected_execution_profile=='structured_only' and not require_signed:
+        require(expected_execution_model=='operator-openssh' and expected_account
+                and bool(re.fullmatch('[a-f0-9]{64}',expected_policy_sha256)),
+                'Unsigned operator attestation requires an expected SID, policy hash and backend')
     if expected_execution_profile:
         require(evidence.get('execution_profile')==expected_execution_profile,'Worker execution profile mismatch')
     if expected_execution_model:
@@ -38,4 +42,4 @@ def verify(evidence, nonce, *, expected_sha256, trusted_signers=(), require_sign
         if require_signed:
             require(evidence.get('runtime_signature_status')=='Valid' and evidence.get('runtime_signer','').upper() in {item.replace(' ','').upper() for item in trusted_signers},'Runtime signature is not trusted')
         require(evidence.get('runtime_loaded_sha256')==expected_runtime_sha256.lower() and evidence.get('runtime_current_sha256')==expected_runtime_sha256.lower(),'Runtime binary changed or does not match the pinned release')
-    return {**evidence,'verified':True,'verified_checks':{'nonce':True,'hash':True,'version':True,'signer':require_signed,'account':bool(expected_account),'process_isolation':require_process_isolation},'trust_boundary':'approved-worker-and-protected-control-channel'}
+    return {**evidence,'verified':True,'verified_checks':{'nonce':True,'hash':True,'version':True,'signer':require_signed,'account':bool(expected_account),'policy':bool(expected_policy_sha256),'process_isolation':require_process_isolation},'trust_boundary':'approved-worker-and-protected-control-channel'}

@@ -37,7 +37,7 @@ class ApplianceSpec:
     display_device: str = "ramfb"
     network_restrict: bool = False
     ssh_forward_port: int = 0
-    mtu: int = 1350
+    mtu: int = 1200
     socks5_port: int = 1080
     rdp_forward_port: int = 13389
     vm_rdp_forward_port: int = 13390
@@ -153,6 +153,7 @@ class BastionSpec:
     worker_policy_path: str = r'C:\ProgramData\EnclaveGateway\worker-policy.json'
     worker_policy_sha256: str = ''
     structured_backend: str = 'spawn'
+    lease_seconds: int = 28800
 
     def __post_init__(self):
         if self.transport!='rdp_vfs':
@@ -170,6 +171,8 @@ class BastionSpec:
             if not re.fullmatch('[a-f0-9]{64}',self.worker_policy_sha256):raise ValueError('Pin the independently approved Bastion worker policy SHA-256')
         if self.spool_protocol not in ("files", "stream"):
             raise ValueError("spool_protocol must be files or stream")
+        if type(self.lease_seconds) is not int or not 60 <= self.lease_seconds <= 86400:
+            raise ValueError('bastion.lease_seconds must be in 60..86400')
         if type(self.heartbeat_max_age_sec) is not int or not 5<=self.heartbeat_max_age_sec<=300:
             raise ValueError('heartbeat_max_age_sec must be in 5..300')
         # A binary block is embedded in a script, then in the 8 MiB envelope.
@@ -316,8 +319,13 @@ class EnclaveConfig(_ConfigurationOrigin):
             security=self.security
             if not self.bastion.enabled or security.mode!='standard' or security.require_process_isolation:
                 raise ValueError('structured_only requires Bastion and does not provide Enterprise native process isolation')
-            if not security.require_signed_agents or not security.worker_sha256 or not security.trusted_signers or not security.enforce_worker_attestation:
-                raise ValueError('structured_only requires signed agents, trusted publishers, a worker SHA-256 and fresh worker attestation')
+            if not security.worker_sha256 or not security.enforce_worker_attestation:
+                raise ValueError('structured_only requires a worker SHA-256 and fresh worker attestation')
+            if security.require_signed_agents:
+                if not security.trusted_signers:
+                    raise ValueError('Signed structured workers require trusted publishers')
+            elif self.bastion.structured_backend != 'operator' or not security.worker_account:
+                raise ValueError('An unsigned structured worker requires the operator backend and a pinned security.worker_account SID')
             if self.bastion.structured_backend == 'operator' and len(self.targets) != 1:
                 raise ValueError('The operator OpenSSH backend requires exactly one TargetNode')
             if any(t.os not in ('linux','posix','unix') or t.via not in ('bastion','@bastion') for t in self.targets.values()):

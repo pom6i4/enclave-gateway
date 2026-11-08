@@ -125,7 +125,7 @@ class FieldContracts(unittest.TestCase):
 
     def test_doctor_and_active_cleanup_allow_slow_round_trip_without_hiding_failure(self):
         with tempfile.TemporaryDirectory() as folder:
-            control=Mock();control.exec_powershell.return_value=ExecResult(0,'DIAG_CLOCK:'+str(int(time.time()))+':UDP:1','',1)
+            control=Mock();control.exec_powershell.return_value=ExecResult(0,'DIAG_CLOCK:'+str(int(time.time()))+':UDP:1\nDIAG_MTU:1200','',1)
             config=EnclaveConfig.from_dict({'appliance':{'hypervisor':'direct'},'targets':{'app01':{'host':'10.0.0.10'}}})
             engine=engine_at(Path(folder),control,config)
             engine.status=Mock(return_value={'appliance':{'running':True,'hypervisor':'direct'},'provider':{'tunnel_up':True,'probe_host':'10.0.0.10','probe_port':3389},'bastion':{'worker_healthy':True}})

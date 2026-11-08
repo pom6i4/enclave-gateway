@@ -43,14 +43,20 @@ journal and reconcile indeterminate operations instead of blindly replaying them
 
 ## Endpoint policy
 
-The experimental `structured_only` foreground profile in `0.3.0b3` uses an independently
+The experimental `structured_only` foreground profile in `0.3.0b4` uses an independently
 approved Bastion policy and the Microsoft-signed system OpenSSH client.
-It does not install code in AppData or register startup. Request data cannot
+Installation is explicit and there is no startup registration. Request data cannot
 select a Bastion interpreter or arbitrary SSH options. The default `spawn`
 backend uses Files. The opt-in `operator` backend uses Stream and an
-operator-started OpenSSH session linked to the signed adapter over local named
+operator-started OpenSSH session linked to the adapter over local named
 pipes. It requires a dedicated key forced to run `operator_target.py` on one
-Linux target. Both backends use the signed Standard trust model.
+Linux target. Spawn requires a signed script. Standard operator deployment can
+use an unsigned adapter with independently approved SHA-256 pins for the
+adapter and policy, a pinned operator SID, and mandatory fresh attestation.
+The operator can own the pinned policy in a private directory. Only the
+operator SID, SYSTEM and Administrators may have write or ownership-changing
+rights. This Standard trust boundary trusts the operator, RDP session and
+controller. It does not establish Enterprise code provenance or isolation.
 Fresh attestation reports the transfer features for the approved worker.
 
 - `stream_upload_v1` advertises the ordinary streamed upload path for files up

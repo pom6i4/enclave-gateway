@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.0 Beta 4
+
+Package version `0.3.0b4` and Git tag `v0.3.0-beta.4`.
+
+- Standard `operator` can run under a non-administrator Windows SID with an
+  unsigned adapter when policy allows it. The controller requires exact
+  adapter and policy SHA-256 pins, the operator SID and fresh attestation.
+  Microsoft system OpenSSH still requires a valid Microsoft signature.
+- The operator may own the pinned policy. Unapproved principals with write
+  or ownership-changing rights are rejected. Signed `operator` deployment
+  still validates the adapter's publisher.
+- `egw agents stage` ships the Linux peer, prints a verified local copy command,
+  and supplies the forced-command prefix for the dedicated target SSH key.
+- The foreground lease defaults to eight hours and is configurable in
+  `bastion.lease_seconds`. The IPv4 Appliance MTU defaults to 1200, and
+  `egw doctor` compares configured and observed adapter MTU values.
+
 ## 0.3.0 Beta 3
 
 Package version `0.3.0b3` and Git tag `v0.3.0-beta.3`.

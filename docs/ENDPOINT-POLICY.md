@@ -1,6 +1,6 @@
 # Endpoint policy and the foreground OpenSSH profile
 
-This describes the experimental foreground profile in `0.3.0b3` (Beta 3).
+This describes the experimental foreground profile in `0.3.0b4` (Beta 4).
 It does not change the published `v0.2.0` tag or certify antivirus compatibility. Deployment on a
 managed endpoint requires its administrator's approval. An active security
 incident must be resolved through the organization's incident process first.
@@ -19,7 +19,7 @@ The foreground worker does not perform these actions:
 
 - Register startup through the Windows registry.
 - Register scheduled tasks.
-- Install scripts or executables in AppData.
+- Install scripts or executables automatically.
 - Evaluate PowerShell supplied in a request.
 - Create runspace pools.
 - Open raw TCP sockets.
@@ -51,25 +51,44 @@ The peer accepts the literal SSH command `egw-operator-v1`. The dedicated key
 grants the Linux account's privileges, including its shell permissions. Apply
 the target's own account and sudo policy accordingly.
 
-Set these options in the signed Standard [starter configuration](../config/enclave.structured.example.yaml):
+Set these options in the Standard [starter configuration](../config/enclave.structured.example.yaml):
 
 ```yaml
 bastion:
   execution_profile: structured_only
   structured_backend: operator
   spool_protocol: stream
+  lease_seconds: 28800
 ```
 
 Add `operator_state_dir` to the independently approved Windows worker policy.
 Provision that directory on local NTFS with write access limited to the worker
 SID and trusted administrators. Use a dedicated spool and state directory;
 reconcile outstanding transactions before changing either directory or its
-policy pin. Install the exact signed `bastion_structured.ps1` beside the policy
-in the administrator-owned directory. The process holds both files against
-writes and verifies the script's current signature and digest on every
-attestation. The operator's RDP account and administrators remain trusted.
+policy pin. The operator may provision the pinned policy in a private local
+profile directory. Its `owner_sid` must match the running account in both
+deployment modes. Only SYSTEM, Administrators and that SID may have write or
+ownership-changing permissions on the policy. The process holds both files
+against writes and attestation checks the current adapter digest.
 
-Run the local start command printed by `egw agents command`. In another CMD
+- With corporate signing, set `security.require_signed_agents: true` and pin
+  the approved publisher and signed script bytes. The worker verifies its
+  signature at startup and on each attestation.
+- If endpoint policy permits an unsigned adapter, set
+  `security.require_signed_agents: false` and pin the adapter SHA-256, policy
+  SHA-256 and `security.worker_account` (Windows SID). Keep
+  `security.enforce_worker_attestation: true`. No custom signing certificate
+  is required. Microsoft system OpenSSH still requires a valid Microsoft
+  signature. This mode trusts the operator and the protected control channel.
+
+Run `egw agents stage` on Host. Install the staged `operator_target.py` on the
+Linux target and use `target_authorized_keys_prefix` with the real helper path
+and dedicated public key. In PowerShell on Bastion, run `bastion_copy_command`
+to verify the policy and stage the exact script beside it. Then run
+`start_command` in that RDP session. For an approved unsigned deployment,
+`egw agents stage --execution-policy RemoteSigned` or
+`egw agents command --execution-policy RemoteSigned` requests RemoteSigned
+for the current PowerShell process. Group Policy keeps precedence. In another CMD
 console in the same RDP session, run the command printed by the adapter. It
 starts system OpenSSH with the fixed target, key and known-hosts file from the
 approved policy. The adapter exchanges framed data over two local named pipes
@@ -113,6 +132,8 @@ restart when the bounded stream fills. Generic Bastion shell access,
 interactive SSH, mux and multi-hop SSH remain unavailable in this mode.
 
 ## Administrator preparation
+
+These steps apply to the signed `spawn` backend.
 
 1. Review the exact `bastion_structured.ps1` source and sign the approved bytes.
    Place the signed script in the Host's `security.agent_package_dir`.
@@ -162,7 +183,7 @@ egw agents stop
 egw clean
 ```
 
-These commands cannot register startup in this profile:
+Spawn rejects these options:
 
 - `--persist-autostart`
 - `--migrate-legacy-state`
@@ -172,14 +193,21 @@ Arbitrary `exec @bastion` is rejected before publication. Direct Bastion file
 access is also rejected. TCP mux is unavailable.
 Windows TargetNodes and extra SSH jump hops are unsupported. Ordinary copies
 are limited to 64 MiB. Command stdout is limited to 8 MiB. Command stderr is limited
-to 1 MiB. The default foreground lease is 900 seconds; the script accepts an
-explicit `-LeaseSeconds` between 1 and 3600. Lease expiration interrupts an active
-local SSH process and requires reconciliation of its remote effects.
+to 1 MiB. The foreground lease defaults to 28,800 seconds (eight hours).
+`bastion.lease_seconds` accepts 60–86,400 seconds. Lease expiry interrupts active
+operations. Reconcile their remote effects before retrying.
+
+On the managed Windows Appliance, `egw heal` applies `appliance.mtu` (1200
+bytes by default) to configured IPv4 adapters and disables RDP over UDP.
+`egw doctor` compares the configured MTU with the values it reads from the
+VPN and Ethernet adapter names. With nested VPNs, verify the actual route.
+For a manual IPv4 DF ping, use an ICMP payload 28 bytes below the desired IP
+MTU (1172 bytes for MTU 1200).
 
 ### Larger files with the operator backend
 
 Use `--chunked` for files up to 512 MiB when `egw agent-verify` reports
-`chunked_copy_slots_v1: true` for the approved signed adapter. The matching
+`chunked_copy_slots_v1: true` for the approved adapter. The matching
 operator worker also reports the related protocol capabilities.
 
 - `chunked_copy_v1: true`
@@ -225,8 +253,8 @@ Protect the Appliance spool and its parents against untrusted writers.
 
 The durable ledger rejects repeated transaction identifiers, including after
 restart. Attestation and ping use reserved probe identifiers and require no
-durable ledger writes. Attestation still verifies the current signature and
-file hash and returns the Host's challenge. Probe identifiers cannot execute
+durable ledger writes. Attestation verifies the current file hash and, in
+signed mode, the signature. It returns the Host's challenge. Probe identifiers cannot execute
 SSH or change worker state. The worker atomically publishes its running and
 stopped states. Between transitions it refreshes the state file's modification
 time, which the Host uses only as a liveness hint. Use matching Host and worker
@@ -237,8 +265,7 @@ request deadline. Running or interrupted operations must be reconciled.
 Disconnect is not remote rollback.
 The foreground worker exits on channel failure and does not relaunch itself.
 Stopping SSH does not prove termination of a remote background process; this
-profile does not make an Enterprise owned-process claim. It is available as a
-signed Standard deployment with fresh worker attestation.
+profile uses Standard trust with fresh worker attestation.
 
 Failed or ambiguous file transfers retain their redirected staging file for
 investigation. Its name is `structured_<transfer-id>.bin`. Successful transfers

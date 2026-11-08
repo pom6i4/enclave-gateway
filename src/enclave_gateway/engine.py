@@ -435,7 +435,10 @@ ConvertTo-Json $out -Compress -Depth 8
 """
         res = self._scrub_result(self.control.exec_powershell(combined_ps, timeout_sec=60.0))
         if deployment:
-            res.stdout+='\nBastion worker staged. In the Bastion RDP session run:\n'+deployment['start_command']+'\n'
+            res.stdout+='\nBastion worker staged. In the Bastion RDP session run:\n'
+            if 'bastion_copy_command' in deployment:
+                res.stdout+=deployment['bastion_copy_command']+'\nThen start the adapter:\n'
+            res.stdout+=deployment['start_command']+'\n'
         self.recorder.record(
             tx_id=tx_id,
             actor=actor,
@@ -1103,23 +1106,41 @@ echo "SYNC_PACK_OK"
             checks.append(row)
         vm_ok=bool(st['appliance']['running']) or st['appliance']['hypervisor']=='direct'
         add('appliance_vm',vm_ok,'Hypervisor='+st['appliance']['hypervisor'])
-        clock_skew=None;udp_disabled=False
+        clock_skew=None;udp_disabled=False;mtus=[]
         if vm_ok and not self._direct_posix:
             try:
-                result=self.control.exec_powershell(r"""
+                script=r"""
 $epoch=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 $udp=(Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services\Client' -Name fClientDisableUDP -ErrorAction SilentlyContinue).fClientDisableUDP
 Write-Output ("DIAG_CLOCK:"+$epoch+":UDP:"+[int]$udp)
-""",timeout_sec=15)
+"""
+                if self.config.bastion.enabled:
+                    adapter=ps_quote(self.config.provider.adapter_name)
+                    script+=f"""
+$aliases=@({adapter},'Ethernet') | Where-Object {{$_}}
+Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+    Where-Object {{$_.InterfaceAlias -in $aliases}} |
+    ForEach-Object {{Write-Output ('DIAG_MTU:'+[int]$_.NlMtu)}}
+"""
+                result=self.control.exec_powershell(script,timeout_sec=15)
                 markers=[line for line in result.stdout.splitlines() if line.startswith('DIAG_CLOCK:')]
                 if result.exit_code==0 and markers:
                     parts=markers[0].split(':');clock_skew=abs(int(time.time())-int(parts[1]));udp_disabled=int(parts[3])==1
+                    mtus=[int(line[9:]) for line in result.stdout.splitlines() if re.fullmatch(r'DIAG_MTU:[0-9]+',line)]
             except Exception as error:add('appliance_control_channel',False,str(error))
         clock_ok=self._direct_posix or (clock_skew is not None and clock_skew<120)
         add('appliance_clock_sync',clock_ok,'Local Host clock' if self._direct_posix else 'Clock skew='+str(clock_skew)+'s',not self._direct_posix)
         udp_applicable=self.config.bastion.enabled and not self._direct_posix
         add('rdp_udp_blackhole_guard',udp_disabled or not udp_applicable,'RDP UDP disabled='+str(udp_disabled) if udp_applicable else 'No Windows RDP client in this route',udp_applicable)
         needs_heal=not clock_ok or (udp_applicable and not udp_disabled)
+        if udp_applicable and vm_ok:
+            mtu=self.config.appliance.mtu
+            mtu_ok=bool(mtus) and all(value==mtu for value in mtus)
+            observed=', '.join(map(str,mtus)) if mtus else 'unavailable'
+            add('appliance_ipv4_mtu',mtu_ok,f'Configured appliance.mtu={mtu}. Managed IPv4 adapter values: {observed}.')
+            if not mtu_ok:
+                checks[-1]['remediation']='Check provider.adapter_name and the route to Bastion. Run egw heal on the managed Windows Appliance to apply appliance.mtu.'
+                needs_heal=True
         add('vpn_tunnel_probe',st['provider']['tunnel_up'],'Target='+st['provider']['probe_host']+':'+str(st['provider']['probe_port'])+'; '+st['provider'].get('details',''))
         wrk_ok=False
         if self.config.bastion.enabled:
@@ -1127,7 +1148,7 @@ Write-Output ("DIAG_CLOCK:"+$epoch+":UDP:"+[int]$udp)
             if wrk_ok:
                 try:
                     if self.config.security.enforce_worker_attestation:
-                        self.attest_worker();add('worker_attestation',True,'Fresh signed worker/runtime/SID evidence verified')
+                        self.attest_worker();add('worker_attestation',True,'Fresh worker evidence matched configured identity and trust requirements')
                     ping=(self.rdp_vfs.ping(timeout_sec=45) if self.config.bastion.execution_profile=='structured_only'
                           else self.rdp_vfs.exec_bastion("Write-Output 'VFS_PONG'",timeout_sec=45))
                     wrk_ok=ping.exit_code==0 and 'VFS_PONG' in ping.stdout

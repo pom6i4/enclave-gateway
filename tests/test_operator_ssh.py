@@ -1,4 +1,5 @@
 """Exercise the Linux wire peer and the opt-in host/worker contract."""
+import base64
 import hashlib
 import itertools
 import json
@@ -12,10 +13,82 @@ import unittest
 from unittest.mock import Mock, patch
 
 from enclave_gateway.agents import operator_target
-from enclave_gateway.config import BastionSpec
+from enclave_gateway.config import BastionSpec, EnclaveConfig
 from enclave_gateway.operations.context import OperationError
 from enclave_gateway.security.attestation import verify
 from enclave_gateway.transports.structured import StructuredSshExecutor, StructuredTransport
+
+OPERATOR_SID = "S-1-5-21-1000"
+WORKER = Path(operator_target.__file__).with_name("bastion_structured.ps1")
+
+
+def operator_configuration(worker_sha256, policy_sha256):
+    return {
+        "appliance": {"hypervisor": "direct"},
+        "bastion": {"appliance_spool_dir": r"C:\spool", "execution_profile": "structured_only",
+                    "spool_protocol": "stream", "structured_backend": "operator",
+                    "worker_policy_path": r"C:\Users\operator\AppData\Local\EnclaveGateway\worker-policy.json",
+                    "worker_policy_sha256": policy_sha256},
+        "security": {"mode": "standard", "require_signed_agents": False, "enforce_worker_attestation": True,
+                     "worker_sha256": worker_sha256, "worker_account": OPERATOR_SID},
+        "targets": {"app01": {"host": "10.0.20.11", "port": 22, "user": "fixture"}},
+    }
+
+
+class OperatorOnboardingTests(unittest.TestCase):
+    def test_config_and_preflight_require_the_unsigned_operator_pins(self):
+        from enclave_gateway.diagnostics import preflight
+        raw = operator_configuration(hashlib.sha256(WORKER.read_bytes()).hexdigest(), "b" * 64)
+        cfg = EnclaveConfig.from_dict(raw)
+        report = preflight(cfg)
+        self.assertTrue(next(row["ok"] for row in report["checks"] if row["check"] == "agent_package"))
+        self.assertEqual(report["appliance_mtu"], 1200)
+        self.assertEqual(cfg.security.trusted_signers, [])
+        for section, key, value in (
+            ("security", "worker_account", ""), ("security", "worker_sha256", ""),
+            ("security", "enforce_worker_attestation", False), ("bastion", "worker_policy_sha256", ""),
+            ("bastion", "lease_seconds", 59), ("bastion", "lease_seconds", 86401),
+            ("security", "require_signed_agents", True),
+        ):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                EnclaveConfig.from_dict({**raw, section: {**raw[section], key: value}})
+
+    def test_operator_staging_delivers_peer_and_pins_adapter_in_local_commands(self):
+        from enclave_gateway.control.qga_client import ExecResult
+        from enclave_gateway.onboarding import agent_bundle, stage_agents
+        digest = hashlib.sha256(WORKER.read_bytes()).hexdigest()
+        raw = operator_configuration(digest, "b" * 64)
+        raw["bastion"]["lease_seconds"] = 86400
+        for signed in (False, True):
+            with self.subTest(signed=signed):
+                raw["security"].update(require_signed_agents=signed, trusted_signers=["A" * 40] if signed else [])
+                cfg = EnclaveConfig.from_dict(raw)
+                control = Mock()
+                control.exec_powershell.return_value = ExecResult(0, "", "", 0)
+                receipt = stage_agents(control, cfg, execution_policy="" if signed else "RemoteSigned")
+                self.assertEqual(set(receipt["files"]), {"bastion_structured.ps1", "operator_target.py"})
+                payloads = {call.args[1].rsplit("\\", 1)[-1]: call.args[0] for call in control.write_bytes.call_args_list}
+                self.assertEqual(payloads["operator_target.py"], Path(operator_target.__file__).read_bytes())
+                publish = control.exec_powershell.call_args_list[1].args[0]
+                self.assertIn("Get-FileHash", publish)
+                self.assertEqual("Get-AuthenticodeSignature" in publish, signed)
+                self.assertIn("operator_state_dir", receipt["bastion_copy_command"])
+                self.assertNotIn("\n", receipt["bastion_copy_command"])
+                self.assertIn(digest, receipt["bastion_copy_command"])
+                self.assertIn('command="/usr/bin/python3 ', receipt["target_authorized_keys_prefix"])
+                start = receipt["start_command"]
+                self.assertIn("-LeaseSeconds 86400", start)
+                self.assertIn("-OperatorOpenSsh", start)
+                self.assertLess(start.index(digest), start.index("& $egwScript"))
+                self.assertEqual("-RequireSignedAgents:$false" in start, not signed)
+                self.assertEqual("-TrustedSignerThumbprints" in start, signed)
+                self.assertEqual("Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned -Force" in start, not signed)
+                if signed:
+                    with self.assertRaises(ValueError):
+                        agent_bundle(cfg, execution_policy="RemoteSigned")
+        raw["security"]["worker_sha256"] = "f" * 64
+        with self.assertRaisesRegex(ValueError, "pinned worker SHA-256"):
+            agent_bundle(EnclaveConfig.from_dict(raw))
 
 
 @unittest.skipIf(os.name == "nt", "The operator SSH peer runs on Linux")
@@ -75,6 +148,21 @@ class OperatorPeerTests(unittest.TestCase):
 
 
 class OperatorTransportTests(unittest.TestCase):
+    def test_unsigned_attestation_rejects_each_mismatched_identity_pin(self):
+        nonce = "e" * 64
+        pins = dict(expected_sha256="b" * 64, expected_policy_sha256="c" * 64,
+                    expected_account=OPERATOR_SID, expected_execution_profile="structured_only",
+                    expected_execution_model="operator-openssh", require_signed=False)
+        evidence = dict(protocol_revision=1, version="0.3.0", nonce=nonce, instance_id="a" * 32,
+                        loaded_sha256="b" * 64, current_sha256="b" * 64, policy_sha256="c" * 64,
+                        sid=OPERATOR_SID, execution_profile="structured_only", execution_model="operator-openssh")
+        self.assertTrue(verify(evidence, nonce, **pins)["verified"])
+        for key in ("nonce", "loaded_sha256", "current_sha256", "policy_sha256", "sid", "execution_profile", "execution_model"):
+            with self.subTest(key=key), self.assertRaises(OperationError):
+                verify({**evidence, key: "wrong"}, nonce, **pins)
+        with self.assertRaises(OperationError):
+            verify(evidence, nonce, **{**pins, "expected_account": ""})
+
     def test_chunked_copy_requires_attested_capability(self):
         transport, control = Mock(), Mock()
         transport._verify_dispatch.return_value = {"verified": True, "stream_upload_v1": True}
@@ -140,6 +228,82 @@ class OperatorTransportTests(unittest.TestCase):
                 control.stream_append.assert_called_once()
 
 
+@unittest.skipUnless(os.name == "nt", "Requires native Windows ACLs")
+class WindowsOperatorPolicyTests(unittest.TestCase):
+    def powershell(self, command):
+        encoded = base64.b64encode(command.encode("utf-16-le")).decode("ascii")
+        return subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+                              capture_output=True, text=True, errors="replace", timeout=30)
+
+    def test_operator_owned_policy_rejects_everyone_writer_on_ntfs(self):
+        with tempfile.TemporaryDirectory(prefix="egw-acl-") as folder:
+            source = str(WORKER).replace("'", "''")
+            policy = str(Path(folder) / "worker-policy.json").replace("'", "''")
+            command = rf"""
+$ErrorActionPreference='Stop'
+$tokens=$null
+$errors=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile('{source}',[ref]$tokens,[ref]$errors)
+if($errors.Count){{throw 'Worker parse error'}}
+$fn=$ast.Find({{param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Assert-PolicyAcl'}},$false)
+. ([scriptblock]::Create($fn.Extent.Text))
+$path='{policy}'
+[IO.File]::WriteAllText($path,'{{}}')
+$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
+$acl=[Security.AccessControl.FileSecurity]::new()
+$acl.SetOwner($sid)
+$acl.SetAccessRuleProtection($true,$false)
+$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl','Allow'))
+$everyone=[Security.Principal.SecurityIdentifier]::new('S-1-1-0')
+$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($everyone,'Read','Allow'))
+Set-Acl -LiteralPath $path -AclObject $acl
+$lease=[IO.File]::Open($path,'Open','Read','Read')
+try {{ Assert-PolicyAcl $path $sid.Value $true }} finally {{ $lease.Dispose() }}
+$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($everyone,'WriteData','Allow'))
+Set-Acl -LiteralPath $path -AclObject $acl
+try {{ Assert-PolicyAcl $path $sid.Value $true }} catch {{
+    if($_.Exception.Message -eq 'Policy must not be writable by an unapproved principal'){{exit 0}}
+    throw
+}}
+throw 'Accepted an Everyone writer'
+"""
+            result = self.powershell(command)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_generated_copy_command_creates_state_and_replaces_only_verified_adapter(self):
+        from enclave_gateway.onboarding import agent_bundle, stage_agents
+        from enclave_gateway.control.qga_client import ExecResult
+        with tempfile.TemporaryDirectory(prefix="egw-copy-") as folder:
+            root = Path(folder)
+            sid = self.powershell("[Security.Principal.WindowsIdentity]::GetCurrent().User.Value")
+            self.assertEqual(sid.returncode, 0, sid.stderr)
+            policy = root / "worker-policy.json"
+            state = root / "state"
+            policy.write_text(json.dumps({"revision": 1, "owner_sid": sid.stdout.strip(), "operator_state_dir": str(state)}))
+            raw = operator_configuration(hashlib.sha256(WORKER.read_bytes()).hexdigest(),
+                                         hashlib.sha256(policy.read_bytes()).hexdigest())
+            raw["bastion"].update(worker_policy_path=str(policy), bastion_spool_dir=str(root / "spool"))
+            cfg = EnclaveConfig.from_dict(raw)
+            files, _, identity, _ = agent_bundle(cfg)
+            source = root / "spool" / "agents" / identity / WORKER.name
+            source.parent.mkdir(parents=True)
+            source.write_bytes(files[WORKER.name])
+            control = Mock()
+            control.exec_powershell.return_value = ExecResult(0, "", "", 0)
+            copy_command = stage_agents(control, cfg)["bastion_copy_command"]
+            destination = root / WORKER.name
+            destination.write_text("old adapter")
+            result = self.powershell(copy_command)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(destination.read_bytes(), files[WORKER.name])
+            self.assertTrue(state.is_dir())
+            source.write_text("changed adapter")
+            result = self.powershell(copy_command)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Staged adapter hash mismatch", result.stderr)
+            self.assertEqual(destination.read_bytes(), files[WORKER.name])
+
+
 @unittest.skipUnless(os.name != "nt" and os.environ.get("EGW_TEST_POWERSHELL"),
                      "Portable PowerShell/.NET Unix pipe fixture")
 class OperatorWorkerTests(unittest.TestCase):
@@ -155,7 +319,13 @@ class OperatorWorkerTests(unittest.TestCase):
     def test_chunked_cli_copy_exceeds_stream_capacity_and_checks_each_block(self):
         self._exercise_worker(disconnect=False, chunked=True)
 
-    def _exercise_worker(self, *, disconnect, corrupt_upload=False, chunked=False):
+    def test_unsigned_adapter_under_operator_sid(self):
+        self._exercise_worker(disconnect=False, unsigned=True)
+
+    def test_unsigned_adapter_rejects_foreign_policy_writer(self):
+        self._exercise_worker(disconnect=False, unsigned=True, foreign_writer=True)
+
+    def _exercise_worker(self, *, disconnect, corrupt_upload=False, chunked=False, unsigned=False, foreign_writer=False):
         import socket
         import time
         from enclave_gateway import cli
@@ -165,30 +335,41 @@ class OperatorWorkerTests(unittest.TestCase):
         import contextlib
         import io
 
-        source = Path(operator_target.__file__).with_name("bastion_structured.ps1")
         with tempfile.TemporaryDirectory(prefix="egw-op-", dir="/tmp") as directory:
             root = Path(directory).resolve()
             for name in ("state", "spool", "host"):
                 (root / name).mkdir()
             policy = root / "policy.json"
             policy.write_text(json.dumps({
-                "revision": 1, "owner_sid": "S-1-5-21-1000",
+                "revision": 1, "owner_sid": OPERATOR_SID,
                 "operator_state_dir": str(root / "state"),
                 "targets": {"app01": {"host": "127.0.0.1", "port": 22, "user": "fixture",
                                       "allow_exec": True, "allow_transfer": True, "allow_sudo": False}},
             }))
             worker = root / "bastion_structured.ps1"
-            script = source.read_text()
+            script = WORKER.read_text()
             script = script.replace("if($env:OS -ne 'Windows_NT')", "if($false)")
             script = script.replace("$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value", "$sid='S-1-5-21-1000'")
             start = script.index("function Assert-Signature")
             end = script.index("function Operator-Remaining", start)
-            script = script[:start] + (
-                "function Assert-Signature {return @{Status='Valid';SignerCertificate=@{Thumbprint='" + "A"*40 + "'}}}\n"
-            ) + script[end:]
-            start = script.index("    $acl=Get-Acl")
-            end = script.index("    $policy=[IO.File]", start)
-            script = script[:start] + script[end:]
+            signature_fixture = (
+                "function Assert-Signature([string]$Path,[bool]$Microsoft=$false){"
+                + ("if(-not $Microsoft){throw 'Unsigned adapter signature was checked'};" if unsigned else "")
+                + "if($Microsoft){[IO.File]::WriteAllText((Join-Path $SpoolDir 'microsoft-checked'),'yes')};"
+                + "return @{Status='Valid';SignerCertificate=@{Thumbprint='" + "A"*40 + "'}}}\n"
+            )
+            writer = "S-1-1-0" if foreign_writer else OPERATOR_SID
+            acl_fixture = r"""
+function Get-Acl {
+    $acl=[pscustomobject]@{}
+    $acl|Add-Member ScriptMethod GetOwner { [pscustomobject]@{Value='OWNER'} }
+    $acl|Add-Member ScriptMethod GetAccessRules {
+        [pscustomobject]@{AccessControlType='Allow';FileSystemRights=2;IdentityReference=[pscustomobject]@{Value='WRITER'}}
+    }
+    return $acl
+}
+""".replace("OWNER", OPERATOR_SID).replace("WRITER", writer)
+            script = script[:start] + signature_fixture + acl_fixture + script[end:]
             script = script.replace("Assert-PlainPath $ssh $true", "")
             start = script.index("function Open-OperatorPipes")
             end = script.index("function Open-OperatorSlot", start)
@@ -216,10 +397,16 @@ class OperatorWorkerTests(unittest.TestCase):
                 process = subprocess.Popen(
                     [os.environ["EGW_TEST_POWERSHELL"], "-NoProfile", "-File", str(worker),
                      "-SpoolDir", str(root/"spool"), "-PolicyPath", str(policy), "-PolicySha256", policy_pin,
-                     "-TrustedSignerThumbprints", "A"*40, "-OperatorOpenSsh", "-LeaseSeconds", "180"],
+                     *(["-RequireSignedAgents:$false"] if unsigned else ["-TrustedSignerThumbprints", "A"*40]),
+                     "-OperatorOpenSsh", "-LeaseSeconds", "180"],
                     env={**os.environ, "TMPDIR": directory}, stdout=log, stderr=log,
                 )
                 stack.callback(stop_process, process)
+                if foreign_writer:
+                    self.assertNotEqual(process.wait(timeout=10), 0)
+                    self.assertIn("Policy must not be writable by an unapproved principal", (root/"worker.log").read_text())
+                    self.assertFalse((root/"spool"/"worker_state.json").exists())
+                    return
                 peers=[]
                 for name in ("fixtureIn", "fixtureOut"):
                     address=Path(directory)/("CoreFxPipe_"+name)
@@ -249,14 +436,11 @@ class OperatorWorkerTests(unittest.TestCase):
                 else:
                     self.fail((root/"worker.log").read_text())
                 cfg = root/"config.json"
-                cfg.write_text(json.dumps({
-                    "appliance": {"hypervisor": "direct"},
-                    "bastion": {"appliance_spool_dir": r"C:\spool", "execution_profile": "structured_only",
-                                "spool_protocol": "stream", "structured_backend": "operator", "worker_policy_sha256": policy_pin},
-                    "security": {"mode": "standard", "require_signed_agents": True, "enforce_worker_attestation": True,
-                                 "worker_sha256": hashlib.sha256(worker.read_bytes()).hexdigest(), "trusted_signers": ["A"*40]},
-                    "targets": {"app01": {"host": "127.0.0.1", "port": 22, "user": "fixture"}},
-                }))
+                raw = operator_configuration(hashlib.sha256(worker.read_bytes()).hexdigest(), policy_pin)
+                raw["security"].update(require_signed_agents=not unsigned, trusted_signers=[] if unsigned else ["A"*40])
+                raw["security"]["agent_package_dir"] = str(root)
+                raw["targets"]["app01"]["host"] = "127.0.0.1"
+                cfg.write_text(json.dumps(raw))
 
                 corrupt_part = False
                 corrupt_download = False
@@ -290,9 +474,18 @@ class OperatorWorkerTests(unittest.TestCase):
                     self.assertEqual(code, expected, out.getvalue()+err.getvalue()+(root/"worker.log").read_text()+(root/"spool"/"worker_state.json").read_text()+str((root/"spool"/"worker_state.json").stat().st_mtime-time.time()))
                     return out.getvalue(), err.getvalue()
 
+                if unsigned:
+                    self.assertEqual(json.loads(invoke("config", "check")[0])["execution_model"], "operator-openssh")
+                    self.assertTrue(json.loads(invoke("doctor", "--preflight")[0])["healthy"])
+                    command = invoke("agents", "command", "--execution-policy", "RemoteSigned")[0]
+                    self.assertIn("-RequireSignedAgents:$false", command)
+                    self.assertTrue((root/"spool"/"microsoft-checked").is_file())
                 evidence=json.loads(invoke("agent-verify")[0])
                 self.assertTrue(evidence["verified"])
                 self.assertTrue(evidence["stream_upload_v1"])
+                self.assertEqual(evidence["verified_checks"]["signer"], not unsigned)
+                self.assertTrue(evidence["verified_checks"]["account"])
+                self.assertTrue(evidence["verified_checks"]["policy"])
                 self.assertTrue(evidence["stream_upload_deflate_v1"])
                 self.assertTrue(evidence["chunked_copy_v1"])
                 self.assertTrue(evidence["chunked_copy_slots_v1"])

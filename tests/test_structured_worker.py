@@ -149,7 +149,7 @@ class StructuredRuntimeTests(unittest.TestCase):
             source=source.replace("$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value","$sid='S-1-5-21-1000'")
             a=source.index('function Assert-Signature(');b=source.index('function Operator-Remaining',a)
             source=source[:a]+"function Assert-Signature {return @{Status='Valid';SignerCertificate=@{Thumbprint='"+'A'*40+"'}}}\n"+source[b:]
-            a=source.index('    $acl=Get-Acl');b=source.index('    $policy=[IO.File]',a);source=source[:a]+source[b:]
+            source=source.replace('    Assert-PolicyAcl $PolicyPath $sid ([bool]$OperatorOpenSsh)','')
             a=source.index('    $ssh=[IO.Path]');b=source.index('\n',a);source=source[:a]+"    $ssh='"+str(fake).replace("'","''")+"'"+source[b:]
             if target_delay_ms:
                 source=source.replace('    function Target($Request){',

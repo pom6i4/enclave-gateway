@@ -91,7 +91,7 @@
   <!-- Card 2.2: Network & PMTUD Fix -->
   <rect x="299" y="298" width="242" height="86" rx="3" fill="#141418" stroke="#27272A" stroke-width="1"/>
   <text x="313" y="317" class="font-sans card-title">Clock, MTU &amp; RDP Settings</text>
-  <text x="313" y="337" class="font-mono card-code">MTU 1350 default / RDP TCP</text>
+  <text x="313" y="337" class="font-mono card-code">MTU 1200 default / RDP TCP</text>
   <text x="313" y="355" class="font-mono card-code">guest-set-time / fClientDisableUDP</text>
   <text x="313" y="372" class="font-sans card-line">Applied by heal on managed sessions</text>
 

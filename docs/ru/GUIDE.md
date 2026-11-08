@@ -63,7 +63,7 @@ egw cp app01:/tmp/hello.txt hello-returned.txt
 ### OpenSSH с ручным запуском на бастионе
 
 Если политика разрешает запуск системного OpenSSH оператором, используйте
-[подписанную конфигурацию Standard](../../config/enclave.structured.example.yaml)
+[конфигурацию Standard](../../config/enclave.structured.example.yaml)
 для одного Linux-узла и явно выберите режим:
 
 ```yaml
@@ -71,11 +71,39 @@ bastion:
   execution_profile: structured_only
   structured_backend: operator
   spool_protocol: stream
+  lease_seconds: 28800
 ```
 
-1. На целевом Linux-узле установите [`operator_target.py`](../../src/enclave_gateway/agents/operator_target.py) в каталог под управлением root. Настройте Python 3.10+ и отдельный SSH-ключ с ограничением `restrict,command="…"` в `authorized_keys`. Принудительная команда должна запускать этот скрипт.
-2. На бастионе разместите подписанный `bastion_structured.ps1` и утверждённую политику в каталоге под управлением администратора. Укажите в политике `operator_state_dir` на локальном NTFS с доступом на запись для SID воркера и доверенных администраторов. Сверьте ключ сервера в `known_hosts`.
-3. В RDP-сеансе запустите адаптер командой, которую печатает `egw agents command`. Откройте отдельное окно CMD в том же сеансе и выполните команду OpenSSH, напечатанную адаптером.
+Выберите способ доверия к адаптеру:
+
+- С корпоративной подписью оставьте `security.require_signed_agents: true`.
+  Укажите хеш подписанного файла, отпечатки доверенных издателей и каталог
+  `security.agent_package_dir` с утверждённым файлом.
+- Если политика допускает адаптер без подписи, установите
+  `security.require_signed_agents: false` и `security.enforce_worker_attestation: true`.
+  Закрепите SHA-256 скрипта в `security.worker_sha256` и SID оператора
+  в `security.worker_account` (узнайте его через `whoami /user`).
+  Можно оставить `trusted_signers: []`. Подпись Microsoft у системного OpenSSH
+  проверяется в обоих вариантах.
+
+1. В политике укажите SID оператора в `owner_sid` и локальный каталог NTFS
+   в `operator_state_dir`. Разместите `worker-policy.json` в приватном
+   каталоге профиля или в каталоге под управлением администратора.
+   Право записи в файл политики может быть только у SID оператора, SYSTEM
+   и Administrators. Сверьте SHA-256 политики по доверенному каналу и укажите
+   его в `bastion.worker_policy_sha256`. Сверьте ключ сервера в `known_hosts`.
+2. Выполните `egw agents stage`. Установите доставленный `operator_target.py`
+   на Linux-узле в каталог под управлением root. Используйте Python 3.10+.
+   Для выделенного ключа подставьте путь к скрипту в
+   `target_authorized_keys_prefix` и добавьте открытый ключ в `authorized_keys`.
+3. В PowerShell на бастионе выполните `bastion_copy_command` из вывода
+   стейджинга. Она проверяет политику, создаёт каталог состояния и кладёт
+   сверенный по хешу адаптер рядом с политикой. Затем выполните `start_command`.
+   Если для адаптера без подписи нужен `RemoteSigned`, запросите его через
+   `egw agents command --execution-policy RemoteSigned`. Настройка действует
+   только в текущем PowerShell, приоритет групповой политики сохраняется.
+4. В отдельном окне CMD того же RDP-сеанса выполните команду OpenSSH,
+   которую напечатает адаптер.
 
 ```sh
 egw agent-verify
@@ -88,6 +116,12 @@ egw cp app01:/tmp/hello.txt ./hello-returned.txt --timeout 15
 аттестацию. Интерактивный SSH и TCP-прокси в этом режиме недоступны. При
 разрыве OpenSSH адаптер завершает работу. Сверьте исход незавершённых операций
 перед повторным запуском. [Порядок развёртывания](../ENDPOINT-POLICY.md#operator-openssh-backend)
+
+Сеанс адаптера по умолчанию длится восемь часов. Параметр `bastion.lease_seconds`
+принимает от 60 до 86 400 секунд. Для вложенных VPN на управляемом Windows
+Appliance задайте `appliance.mtu: 1200` или другое проверенное значение.
+`egw heal` применяет IPv4 MTU и отключает RDP через UDP. `egw doctor`
+показывает настроенное и фактические значения на управляемых интерфейсах.
 
 Для файлов до 512 МиБ используйте `egw cp --chunked --timeout 900`, если
 `egw agent-verify` показывает `chunked_copy_slots_v1: true`. Команда передаёт

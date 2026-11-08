@@ -1,5 +1,5 @@
 param(
-    [int]$Mtu = 1350,
+    [int]$Mtu = 1200,
     [string]$AdapterName = "Infotecs",
     [string]$BastionHost = "10.0.1.10",
     [int]$BastionPort = 3389,

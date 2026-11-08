@@ -9,6 +9,7 @@ appliance:
   name: enclave-appliance
   hypervisor: auto                # Existing managed Windows VM; direct for Windows Host
   arch: auto                      # Guest and accelerator architectures must match
+  mtu: 1200                       # Managed Windows IPv4 MTU; applied by egw heal
   disk_path: ~/.local/share/enclave-gateway/disk.qcow2
   efi_vars_path: ~/.local/share/enclave-gateway/efi_vars.fd
   # Optional attach paths; appliance.name remains the verified QMP VM name.

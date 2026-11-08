@@ -41,7 +41,7 @@ def starter_configuration(mode='standard',route='rdp_vfs'):
     from enclave_gateway.config import ApplianceSpec
     app=ApplianceSpec()
     result={'profile':'default','security':security,
-            'appliance':{name:getattr(app,name) for name in ('name','hypervisor','runtime_dir','disk_path','efi_vars_path','qga_socket_path','qmp_socket_path','pid_file_path')},
+            'appliance':{name:getattr(app,name) for name in ('name','hypervisor','runtime_dir','disk_path','efi_vars_path','qga_socket_path','qmp_socket_path','pid_file_path','mtu')},
             'provider':{'type':'custom','installer_path':'','dst_key_path':'','probe_host':'','probe_port':0},
             'bastion':{'enabled':True,'host':'10.0.1.10'},
             'forwards':{'app_https':'18443:app01:443'},
@@ -60,6 +60,7 @@ def starter_yaml(mode='standard',route='rdp_vfs'):
            'qga_socket_path':'Optional existing QGA socket; empty uses runtime_dir/name-qga.sock.',
            'qmp_socket_path':'Optional existing QMP socket; empty uses runtime_dir/name-qmp.sock.',
            'pid_file_path':'Optional existing PID file; empty uses runtime_dir/name-qemu.pid.',
+           'mtu':'IPv4 MTU applied by heal on the managed VPN and Ethernet adapters.',
            'provider':'Use an existing approved VPN connection; no automatic key import.',
            'probe_host':'Empty follows bastion.host; set an explicit address for a different network probe.',
            'probe_port':'Zero follows bastion.port.',
@@ -99,8 +100,11 @@ def configuration_summary(config):
     next_steps=[]
     if config.bastion.enabled:
         next_steps=['egw agents stage (or egw heal) to deliver the worker'] if security.mode!='custom' else ['Custom defaults retained: choose a named mode for agent deployment, or keep your existing manual deployment.']
+        if config.bastion.structured_backend=='operator':
+            next_steps.append('Run bastion_copy_command from the staging receipt in the Bastion RDP session')
         next_steps.append('Start the printed command in the Bastion RDP session')
     return {'configuration_file':str(config.source_path) if config.source_path else None,
+            'appliance_mtu':config.appliance.mtu,
             'warnings':authentication_warnings(config),
             'ssh_authentication':{name:('key-only' if key_only_authentication(config,node) else 'password-helper' if node.password_env else 'key-or-agent') for name,node in config.targets.items()},
             'provider_type':config.provider.type,'provider_lifecycle_configured':bool(config.provider.lifecycle_manifest),
@@ -121,22 +125,39 @@ def agent_bundle(config, *, execution_policy='',migrate_legacy_state=False,persi
     if not config.bastion.enabled:raise ValueError('Agent deployment requires bastion.enabled: true')
     security=config.security
     if config.bastion.execution_profile=='structured_only':
-        if execution_policy or migrate_legacy_state or persist_autostart:
-            raise ValueError('structured_only rejects startup registration, execution-policy changes and legacy journal adoption')
-        folder=Path(security.agent_package_dir).expanduser() if security.agent_package_dir else Path(__file__).parent/'agents'
-        data=(folder/'bastion_structured.ps1').read_bytes()
-        digest=hashlib.sha256(data).hexdigest()
-        if not security.require_signed_agents or digest!=security.worker_sha256.lower() or not security.trusted_signers:
-            raise ValueError('structured_only requires the approved signed script package, worker hash and trusted publishers')
-        hashes={'bastion_structured.ps1':digest};identity=hashlib.sha256(json.dumps(hashes,sort_keys=True).encode()).hexdigest()
+        operator=config.bastion.structured_backend=='operator'
+        if migrate_legacy_state or persist_autostart:
+            raise ValueError('structured_only rejects startup registration and legacy journal adoption')
+        if execution_policy and (execution_policy!='RemoteSigned' or not operator or security.require_signed_agents):
+            raise ValueError('Process RemoteSigned requires an unsigned Standard operator adapter')
+        bundled=Path(__file__).parent/'agents'
+        folder=Path(security.agent_package_dir).expanduser() if security.agent_package_dir else bundled
+        files={'bastion_structured.ps1':(folder/'bastion_structured.ps1').read_bytes()}
+        if hashlib.sha256(files['bastion_structured.ps1']).hexdigest()!=security.worker_sha256.lower():
+            raise ValueError('Structured adapter does not match the pinned worker SHA-256')
+        if operator:
+            files['operator_target.py']=(bundled/'operator_target.py').read_bytes()
+        hashes={name:hashlib.sha256(data).hexdigest() for name,data in files.items()}
+        identity=hashlib.sha256(json.dumps(hashes,sort_keys=True).encode()).hexdigest()
         script=config.bastion.bastion_spool_dir.rstrip('\\/')+'\\agents\\'+identity+'\\bastion_structured.ps1'
-        command='& '+ps_quote(script)+' -SpoolDir '+ps_quote(config.bastion.bastion_spool_dir)
+        if operator:
+            script=str(PureWindowsPath(config.bastion.worker_policy_path).parent/'bastion_structured.ps1')
+        command='& '+('$egwScript' if operator else ps_quote(script))+' -SpoolDir '+ps_quote(config.bastion.bastion_spool_dir)
         command+=' -PolicyPath '+ps_quote(config.bastion.worker_policy_path)+' -PolicySha256 '+ps_quote(config.bastion.worker_policy_sha256)
-        command+=' -TrustedSignerThumbprints @('+','.join(ps_quote(v) for v in security.trusted_signers)+')'
-        if config.bastion.structured_backend == 'operator':
-            local = str(PureWindowsPath(config.bastion.worker_policy_path).parent / 'bastion_structured.ps1')
-            command = command.replace(ps_quote(script), ps_quote(local), 1) + ' -OperatorOpenSsh'
-        return {'bastion_structured.ps1':data},hashes,identity,command
+        command+=f' -LeaseSeconds {config.bastion.lease_seconds}'
+        if security.require_signed_agents:
+            command+=' -TrustedSignerThumbprints @('+','.join(ps_quote(v) for v in security.trusted_signers)+')'
+        else:
+            command+=' -RequireSignedAgents:$false'
+        if operator:
+            prefix="$ErrorActionPreference='Stop';"
+            if execution_policy:
+                prefix+="if((Get-ExecutionPolicy) -eq 'AllSigned'){throw 'AllSigned requires an approved signed package'};Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned -Force;"
+            prefix+=_operator_path_guard()+';$egwScript='+ps_quote(script)+';Assert-EgwLocalPath $egwScript;'
+            prefix+="$egwLease=[IO.File]::Open($egwScript,'Open','Read','Read');try{"
+            prefix+="if((Get-FileHash -LiteralPath $egwScript -Algorithm SHA256).Hash.ToLowerInvariant() -cne "+ps_quote(hashes['bastion_structured.ps1'])+"){throw 'Local adapter hash mismatch; run bastion_copy_command'};"
+            command=prefix+command+' -OperatorOpenSsh}finally{$egwLease.Dispose()}'
+        return files,hashes,identity,command
     if execution_policy and (execution_policy!='RemoteSigned' or security.mode!='standard' or security.require_signed_agents):raise ValueError('Process RemoteSigned is an explicit Standard-only option; signed modes retain endpoint policy')
     if security.mode=='custom':raise ValueError('Agent deployment requires explicit security.mode: standard or enterprise; custom configurations are unchanged.')
     signed=security.require_signed_agents or security.mode=='enterprise'
@@ -200,7 +221,7 @@ function Assert-Bundle([string]$folder){
 '''
         if config.security.require_signed_agents:
             trusted=','.join(ps_quote(t.replace(' ','').upper()) for t in config.security.trusted_signers)
-            checks+="$s=Get-AuthenticodeSignature -LiteralPath $p;if($s.Status -ne 'Valid' -or $s.SignerCertificate.Thumbprint -notin @("+trusted+")){throw 'Untrusted agent publisher'}\n"
+            checks+="if($entry.Name.EndsWith('.ps1')){$s=Get-AuthenticodeSignature -LiteralPath $p;if($s.Status -ne 'Valid' -or $s.SignerCertificate.Thumbprint -notin @("+trusted+")){throw 'Untrusted agent publisher'}}\n"
         checks+='}}\n$lease=[IO.File]::Open('+ps_quote(root+'\\.bundle-lease')+',[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)\ntry {\nAssert-Bundle $stage\n'
         if b'# EGW_BUNDLE_LEASE_V1' in files.get('bastion_worker.ps1',b''):
             receipt=json.dumps({'protocol':1,'bundle_sha256':identity,'files':hashes},sort_keys=True)
@@ -210,9 +231,45 @@ function Assert-Bundle([string]$folder){
     finally:
         # Only the unique incoming directory belongs to this invocation.
         execute(guard+'Assert-LocalDirectory '+ps_quote(temporary)+';if(Test-Path -LiteralPath '+ps_quote(temporary)+'){Remove-Item -LiteralPath '+ps_quote(temporary)+' -Recurse -Force}')
-    return {'status':'staged','bundle_sha256':identity,'appliance_directory':target,
+    receipt={'status':'staged','bundle_sha256':identity,'appliance_directory':target,
             'files':hashes,'start_command':command,'worker_started':False,
             'next_step':'Run start_command inside the Bastion RDP session. Then run egw doctor --probe-targets.'}
+    if config.bastion.structured_backend=='operator':
+        receipt.update(
+            bastion_copy_command=_operator_copy_command(config.bastion,identity,hashes['bastion_structured.ps1']),
+            target_authorized_keys_prefix='command="/usr/bin/python3 /path/to/operator_target.py",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty',
+            next_step='Provision the approved worker policy and target helper. Run bastion_copy_command and then start_command inside the Bastion RDP session.',
+        )
+    return receipt
+
+
+def _operator_path_guard():
+    return (r"function Assert-EgwLocalPath([string]$path){if($path -notmatch '^[a-zA-Z]:[\\/]'){throw 'Use an absolute local operator path'};"
+            r"$p=if([IO.Directory]::Exists($path)){[IO.DirectoryInfo]::new($path)}else{[IO.FileInfo]::new($path)};"
+            r"while($p){if($p.Exists -and ($p.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Linked operator path rejected'};"
+            r"$p=if($p -is [IO.FileInfo]){$p.Directory}else{$p.Parent}}}")
+
+
+def _operator_copy_command(bastion,identity,digest):
+    source=bastion.bastion_spool_dir.rstrip('\\/')+'\\agents\\'+identity+'\\bastion_structured.ps1'
+    return (
+        "$ErrorActionPreference='Stop';"+_operator_path_guard()+";$egwPolicy="+ps_quote(bastion.worker_policy_path)+
+        ";Assert-EgwLocalPath $egwPolicy;$egwPolicyLease=[IO.File]::Open($egwPolicy,'Open','Read','Read');try{"
+        "if((Get-FileHash -LiteralPath $egwPolicy -Algorithm SHA256).Hash.ToLowerInvariant() -cne "+
+        ps_quote(bastion.worker_policy_sha256)+"){throw 'Approved worker policy hash mismatch'};"
+        "$egwSettings=[IO.File]::ReadAllText($egwPolicy)|ConvertFrom-Json;"
+        "if($egwSettings.revision -ne 1 -or $egwSettings.owner_sid -cne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value){throw 'Invalid policy or worker SID'};"
+        "$egwState=$egwSettings.operator_state_dir;Assert-EgwLocalPath $egwState;"
+        "[void][IO.Directory]::CreateDirectory($egwState);"
+        "$egwDestination=Join-Path ([IO.Path]::GetDirectoryName($egwPolicy)) 'bastion_structured.ps1';"
+        "Assert-EgwLocalPath $egwDestination;$egwTemp=$egwDestination+'.'+[Guid]::NewGuid().ToString('N')+'.tmp';try{"
+        "[IO.File]::Copy("+ps_quote(source)+",$egwTemp,$false);"
+        "if((Get-FileHash -LiteralPath $egwTemp -Algorithm SHA256).Hash.ToLowerInvariant() -cne "+
+        ps_quote(digest)+"){throw 'Staged adapter hash mismatch'};"
+        "if([IO.File]::Exists($egwDestination)){[IO.File]::Replace($egwTemp,$egwDestination,[NullString]::Value)}"
+        "else{[IO.File]::Move($egwTemp,$egwDestination)}"
+        "}finally{[IO.File]::Delete($egwTemp)}}finally{$egwPolicyLease.Dispose()}"
+    )
 
 
 def _local_bootstrap_prefix(source,identity,hashes,execution_policy):

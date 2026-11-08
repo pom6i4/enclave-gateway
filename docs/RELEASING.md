@@ -6,25 +6,29 @@ trust. Hosted workflows are not needed for these steps.
 
 ## Current Beta candidate
 
-The current Python package version is `0.3.0b3`. Its Git release tag is
-`v0.3.0-beta.3`. The previously published `v0.2.0` tag remains immutable at
+The current Python package version is `0.3.0b4`. Its Git release tag is
+`v0.3.0-beta.4`. The previously published `v0.2.0` tag remains immutable at
 `2d0167f2402a923f7eb95e4e752559cea250eaef`.
 
 The foreground `structured_only` profile is experimental. See
 [endpoint-policy qualification](ENDPOINT-POLICY.md#qualification-status) for the
-exact tested scope and remaining acceptance. Beta 3 is a source and Python prerelease.
+exact tested scope and remaining acceptance. Beta 4 is a source and Python prerelease.
 
 - Beta 2 recorded 24 of 24 ordinary 1 MiB uploads in 5.07–11.49 s on the isolated
   KES 14.1 RDP route. Target hashes matched and no new KES events were logged.
 - Beta 3 adds chunked copy up to 512 MiB. The isolated Windows Server 2022 x64
   RDP lab with KES 14.1.0.423 verified 3 MiB and 65 MiB in both directions.
   All 136 blocks met the 15 s limit, with a 2.692 s maximum and no new KES events.
-- The PowerShell-enabled suite recorded 329 tests. 313 passed and 16 were skipped.
+- Beta 4 adds the Standard operator path for a non-administrator SID. Its
+  unsigned adapter mode requires an independent policy pin, an adapter pin
+  and mandatory SID-bound attestation. The earlier signed KES measurements
+  apply to the earlier qualified builds.
 
 The earlier tags retain their original source revisions and artifacts.
 
 - `v0.3.0-beta.1` points to `abd2db8396b559585385c7f04f2b8306c221d771`.
 - `v0.3.0-beta.2` points to `a3b2fa76abd847b9523114b67e715cf8f4361290`.
+- `v0.3.0-beta.3` points to `5fe6c83c03bb117eb6151e6379a379c7a7cab35e`.
 
 Deployment under a particular endpoint policy requires its own acceptance.
 The interactive SSH bridge through QGA remains unavailable. Direct Host SSH
@@ -69,7 +73,7 @@ package, sign release artifacts or establish production Enterprise trust.
 
 | Component | Contract | Validation boundary |
 | --- | --- | --- |
-| Python CLI/package | `0.3.0b3`, Python 3.10 or newer; the release matrix exercises 3.10–3.14 | Pure Python has no mandatory third-party runtime dependencies. Record exact Python patches and platform for each run. |
+| Python CLI/package | `0.3.0b4`, Python 3.10 or newer; the release matrix exercises 3.10–3.14 | Pure Python has no mandatory third-party runtime dependencies. Record exact Python patches and platform for each run. |
 | Windows native helpers | `net10.0`, self-contained `win-x64` and `win-arm64` | Use the exact pinned SDK/runtime and both helper projects. Cross compilation and PE inspection do not prove Windows execution. |
 | Worker identity | Attestation version `0.3.0`, fresh nonce, approved hashes/signer/SID when required | This is an independent worker contract, not the Python package version. Deploy matching approved scripts/runtime together. |
 | Legacy worker journal and telemetry | Revision 2, Bastion-local journal with protected spool binding | Preserve transaction identities across restart, migration and backup reconciliation. |
@@ -165,7 +169,7 @@ artifact directory from the successful comparison:
 
 ```powershell
 python scripts/qualification/artifact_acceptance.py `
-  --wheel C:\Acceptance\enclave_gateway-0.3.0b3-py3-none-any.whl `
+  --wheel C:\Acceptance\enclave_gateway-0.3.0b4-py3-none-any.whl `
   --pip-wheel C:\Acceptance\pip-approved-py3-none-any.whl `
   --runtime C:\Acceptance\egw-runtime.exe --askpass C:\Acceptance\egw-askpass.exe `
   --allow-unsigned-lab --work-dir C:\Acceptance\new-client `
@@ -190,7 +194,7 @@ with `pidfd_open` support (Linux 5.3 or newer) for PID-safe cancellation checks:
 
 ```sh
 python3 scripts/qualification/artifact_acceptance.py \
-  --wheel /input/enclave_gateway-0.3.0b3-py3-none-any.whl \
+  --wheel /input/enclave_gateway-0.3.0b4-py3-none-any.whl \
   --pip-wheel /input/pip-approved-py3-none-any.whl \
   --work-dir /work/new-client --output /work/new-result.json
 ```

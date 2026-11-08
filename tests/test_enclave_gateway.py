@@ -127,7 +127,7 @@ class LoopbackControlChannel:
             if "DIAG_CLOCK:" in script:
                 return ExecResult(
                     exit_code=0,
-                    stdout=f"DIAG_CLOCK:{int(time.time())}:UDP:1",
+                    stdout=f"DIAG_CLOCK:{int(time.time())}:UDP:1\nDIAG_MTU:1200",
                     stderr="",
                     duration_ms=5,
                 )
@@ -411,6 +411,7 @@ targets:
             check_names = [c["check"] for c in diag["checks"]]
             self.assertIn("appliance_clock_sync", check_names)
             self.assertIn("rdp_udp_blackhole_guard", check_names)
+            self.assertTrue(next(c["ok"] for c in diag["checks"] if c["check"] == "appliance_ipv4_mtu"))
             self.assertIn("bastion_rdp_vfs_ipc", check_names)
 
             key_res = engine.bootstrap_ssh_key("app01")

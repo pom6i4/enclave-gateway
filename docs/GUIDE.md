@@ -767,7 +767,7 @@ see [Microsoft's duplicate SID guidance](https://support.microsoft.com/en-au/ser
 
 For an administrator-approved foreground worker without Bastion autostart or
 custom executables, see [the endpoint-policy guide](ENDPOINT-POLICY.md).
-The experimental `structured_only` profile in `0.3.0b3` rejects unsupported
+The experimental `structured_only` profile in `0.3.0b4` rejects unsupported
 operations and never falls back to the universal worker. Its
 [Windows qualification scope](ENDPOINT-POLICY.md#qualification-status) is
 separate from EDR approval and the portable interpreter tests.
@@ -775,7 +775,7 @@ separate from EDR approval and the portable interpreter tests.
 ### Operator-started OpenSSH on Bastion
 
 If endpoint policy permits the operator to start the system OpenSSH client, use
-the [signed Standard configuration](../config/enclave.structured.example.yaml)
+the [Standard configuration](../config/enclave.structured.example.yaml)
 for one Linux target and select this backend explicitly.
 
 ```yaml
@@ -783,19 +783,39 @@ bastion:
   execution_profile: structured_only
   structured_backend: operator
   spool_protocol: stream
+  lease_seconds: 28800
 ```
 
-1. Install [`operator_target.py`](../src/enclave_gateway/agents/operator_target.py)
-   on the Linux target in a root-managed directory. Use Python 3.10+ and a
-   dedicated SSH key restricted in `authorized_keys` with `restrict,command="…"`.
-   The forced command must run the script.
-2. Place the signed `bastion_structured.ps1` and approved policy in an
-   administrator-managed directory on Bastion. Set `operator_state_dir` to
-   local NTFS writable by the worker SID and trusted administrators. Verify
-   the pinned target host key in `known_hosts`.
-3. Run the command printed by `egw agents command` in the RDP session. Open a
-   separate CMD window in that same session and run the OpenSSH command printed
-   by the adapter.
+Choose how to trust the adapter:
+
+- With corporate signing, keep `security.require_signed_agents: true` and
+  pin the signed file's hash and approved publisher. Put the approved file in
+  `security.agent_package_dir`.
+- Where endpoint policy allows unsigned adapters, set
+  `security.require_signed_agents: false` and
+  `security.enforce_worker_attestation: true`. Pin the script hash in
+  `security.worker_sha256` and the operator's Windows SID in
+  `security.worker_account`. `trusted_signers` can be empty. The system
+  OpenSSH binary still requires a valid Microsoft signature.
+
+1. Set `owner_sid` to the operator's SID and `operator_state_dir` to a local
+   NTFS path in the approved policy. The file can live in a private operator
+   profile directory or an administrator-managed directory. Limit policy
+   writers to the operator SID, SYSTEM and Administrators. Verify the policy
+   SHA-256 out of band and configure `bastion.worker_policy_sha256`. Verify the
+   target host key in `known_hosts`.
+2. Run `egw agents stage`. Deploy the staged `operator_target.py` in a
+   root-managed directory on the Linux target, with Python 3.10+. Use
+   `target_authorized_keys_prefix` with the helper path and dedicated public
+   key in `authorized_keys`.
+3. Run the staging receipt's `bastion_copy_command` in Bastion PowerShell.
+   It verifies the policy, creates the state directory and copies the
+   hash-verified adapter next to the policy. Then run `start_command`. If the
+   unsigned adapter needs RemoteSigned, request it with
+   `egw agents command --execution-policy RemoteSigned`. This applies to the
+   current PowerShell process and respects Group Policy.
+4. Open a separate CMD window in the same RDP session and run the OpenSSH
+   command printed by the adapter.
 
 ```sh
 egw agent-verify
@@ -807,6 +827,11 @@ egw cp app01:/tmp/hello.txt ./hello-returned.txt --timeout 15
 Ordinary `exec` and `cp` have a 15 s overall limit, including fresh attestation.
 This profile has no interactive SSH or TCP proxy. The adapter exits if OpenSSH
 disconnects. Reconcile unfinished transactions before restarting it.
+
+The lease defaults to eight hours. `bastion.lease_seconds` accepts
+60–86,400 seconds. On a managed Windows Appliance, `egw heal` applies the
+IPv4 `appliance.mtu` (default 1200) and disables RDP over UDP. `egw doctor`
+reports the configured value and compares it with the managed adapter MTUs.
 
 For files up to 512 MiB, use chunked copy after `egw agent-verify` reports
 `chunked_copy_slots_v1: true`. It transfers 1 MiB blocks, verifies SHA-256 on each

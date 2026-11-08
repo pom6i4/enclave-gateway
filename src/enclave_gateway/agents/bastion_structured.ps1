@@ -4,7 +4,7 @@ param(
     [Parameter(Mandatory=$true)][ValidatePattern('^[a-f0-9]{64}$')][string]$PolicySha256,
     [bool]$RequireSignedAgents=$true,
     [string[]]$TrustedSignerThumbprints=@(),
-    [ValidateRange(1,3600)][int]$LeaseSeconds=900,
+    [ValidateRange(1,86400)][int]$LeaseSeconds=28800,
     [string]$StopFile='',
     [switch]$OperatorOpenSsh
 )
@@ -29,6 +29,18 @@ function Assert-PlainPath([string]$Path,[bool]$Local=$false){
     while($parent){if($parent.Exists -and ($parent.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Linked worker paths are forbidden'};$parent=if($parent -is [IO.FileInfo]){$parent.Directory}else{$parent.Parent}}
 }
 function Hash-File([string]$Path){return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()}
+function Assert-PolicyAcl([string]$Path,[string]$WorkerSid,[bool]$AllowWorkerOwnership){
+    $approvedPrincipals=@('S-1-5-18','S-1-5-32-544')
+    if($AllowWorkerOwnership){$approvedPrincipals+=@($WorkerSid)}
+    $acl=Get-Acl -LiteralPath $Path
+    $sidType=[Security.Principal.SecurityIdentifier]
+    if($acl.GetOwner($sidType).Value -cnotin $approvedPrincipals){throw 'Policy owner is outside the approved principals'}
+    $rules=$acl.GetAccessRules($true,$true,$sidType)
+    if(-not $rules.Count){throw 'Policy requires an explicit Windows ACL'}
+    foreach($rule in $rules){
+        if($rule.AccessControlType -eq 'Allow' -and ([int]$rule.FileSystemRights -band 852310) -ne 0 -and $rule.IdentityReference.Value -cnotin $approvedPrincipals){throw 'Policy must not be writable by an unapproved principal'}
+    }
+}
 function Hash-Text([string]$Text){return Hash-Bytes ([Text.Encoding]::UTF8.GetBytes($Text))}
 function Hash-Bytes([byte[]]$Bytes){
     $sha=[Security.Cryptography.SHA256]::Create()
@@ -513,21 +525,16 @@ try{
     if((Hash-File $PolicyPath) -cne $PolicySha256){throw 'Approved worker policy hash mismatch'}
     $loadedHash=Hash-File $PSCommandPath
     if($RequireSignedAgents){$signature=Assert-Signature $PSCommandPath;$signatureStatus='Valid';$signer=$signature.SignerCertificate.Thumbprint}
-    $acl=Get-Acl -LiteralPath $PolicyPath
-    $ownerSid=$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
-    if($ownerSid -notin @('S-1-5-18','S-1-5-32-544')){throw 'Policy must be owned by SYSTEM or Administrators'}
-    foreach($rule in $acl.Access){
-        $writer=$rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
-        if($rule.AccessControlType -eq 'Allow' -and ([int]$rule.FileSystemRights -band 852310) -ne 0 -and $writer -notin @('S-1-5-18','S-1-5-32-544')){throw 'Policy must not be writable by an unapproved principal'}
-    }
     $policy=[IO.File]::ReadAllText($PolicyPath)|ConvertFrom-Json
     if($policy.revision -ne 1 -or -not $policy.targets -or $policy.owner_sid -cne $sid){throw 'Invalid policy or worker SID'}
+    Assert-PolicyAcl $PolicyPath $sid ([bool]$OperatorOpenSsh)
+    if(-not $OperatorOpenSsh -and -not $RequireSignedAgents){throw 'Spawn backend requires a signed adapter'}
     $ssh=[IO.Path]::Combine([Environment]::GetFolderPath('System'),'OpenSSH\ssh.exe')
     Assert-PlainPath $ssh $true
     [void](Assert-Signature $ssh $true)
     $sessionLease=[IO.File]::Open(([IO.Path]::Combine($SpoolDir,'.worker-session')),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
     if($OperatorOpenSsh){
-        if(-not $RequireSignedAgents -or @($policy.targets.PSObject.Properties).Count -ne 1){throw 'Operator backend requires a signed adapter and one pinned SSH target'}
+        if(@($policy.targets.PSObject.Properties).Count -ne 1 -or ($RequireSignedAgents -and -not $TrustedSignerThumbprints.Count)){throw 'Operator backend requires one pinned SSH target and trusted publishers when adapter signing is enabled'}
         Assert-PlainPath $policy.operator_state_dir $true
         if(-not [IO.Directory]::Exists($policy.operator_state_dir)){throw 'Provision the local operator state directory'}
         $stateLeasePath=[IO.Path]::Combine($policy.operator_state_dir,'.worker-session')
