@@ -417,8 +417,12 @@ can use unrelated control filenames; set `qga_socket_path`, `qmp_socket_path` an
 `pid_file_path` explicitly instead of making symlinks or changing the expected VM
 identity. A mismatch reports expected and actual names and fails closed. Protect
 the endpoint parents and verify that all three paths belong to that VM.
-Overrides are for attachment: `up` does not create a new VM using external endpoint
-paths, and `down` leaves their cleanup to the owner launcher.
+Overrides default to attachment. The owner launcher creates and cleans up those
+external endpoints. To let `egw up` create a managed VM with custom filenames,
+set `appliance.attach_only: false` and place all three endpoints directly inside
+the private `appliance.runtime_dir`. Use distinct filenames. If an endpoint is
+already occupied and does not belong to the expected running VM, inspect it before
+retrying. Set `attach_only: true` to require attachment even with default filenames.
 
 `config init` produces commented YAML with the VM identity, runtime/disk/firmware
 paths and optional endpoint overrides. An empty `provider.probe_host` follows
@@ -767,7 +771,7 @@ see [Microsoft's duplicate SID guidance](https://support.microsoft.com/en-au/ser
 
 For an administrator-approved foreground worker without Bastion autostart or
 custom executables, see [the endpoint-policy guide](ENDPOINT-POLICY.md).
-The experimental `structured_only` profile in `0.3.0b4` rejects unsupported
+The experimental `structured_only` profile in `0.3.0b5` rejects unsupported
 operations and never falls back to the universal worker. Its
 [Windows qualification scope](ENDPOINT-POLICY.md#qualification-status) is
 separate from EDR approval and the portable interpreter tests.

@@ -1,6 +1,6 @@
 # Endpoint policy and the foreground OpenSSH profile
 
-This describes the experimental foreground profile in `0.3.0b4` (Beta 4).
+This describes the experimental foreground profile in `0.3.0b5` (Beta 5).
 It does not change the published `v0.2.0` tag or certify antivirus compatibility. Deployment on a
 managed endpoint requires its administrator's approval. An active security
 incident must be resolved through the organization's incident process first.
@@ -89,14 +89,17 @@ SID and restricts its Windows ACL. An existing policy must match the pin.
 Install the staged `operator_target.py` on the
 Linux target and use `target_authorized_keys_prefix` with the real helper path
 and dedicated public key. In PowerShell on Bastion, run `bastion_copy_command`
-to verify the policy and stage the exact script beside it. Then run
+to verify the policy and stage the exact adapter and Linux peer beside it. Then run
 `start_command` in that RDP session. For an approved unsigned deployment,
 `egw agents stage --execution-policy RemoteSigned`,
 `egw agents command --execution-policy RemoteSigned` and
 `egw heal --execution-policy RemoteSigned` request RemoteSigned for the current
 PowerShell process. Group Policy keeps precedence. In another CMD
-console in the same RDP session, run the command printed by the adapter. It
-starts system OpenSSH with the fixed target, key and known-hosts file from the
+console in the same RDP session, run the quoted path to `attach-ssh.cmd` printed
+by the adapter. Each start regenerates this file in the operator's private local
+state directory for that instance. If the path contains CMD expansion characters,
+the adapter prints the OpenSSH command directly. The command starts system
+OpenSSH with the fixed target, key and known-hosts file from the
 approved policy. The adapter exchanges framed data over two local named pipes
 that allow the worker SID and deny network access. It does not launch the SSH
 client, run PowerShell from requests, start on logon, or open a TCP proxy.
@@ -114,9 +117,10 @@ egw cp app01:/tmp/artifact.bin ./received.bin --timeout 15
 egw agents stop --timeout 15
 ```
 
-For the `operator` backend, `egw clean` checks that the adapter has stopped
-and preserves the Stream evidence. Retire the spool separately under the
-endpoint's retention policy after collecting any needed evidence.
+For the `operator` backend, `egw agents stage` and `egw clean` can reclaim
+zeroed Stream IPC files on the Appliance after verifying the stopped worker and
+its spool binding. They preserve files with data, indeterminate transactions and
+the durable journal. An active worker or a failed identity check prevents pruning.
 
 Target exec and ordinary copy default to a 15-second operation cap, including
 fresh attestation (at most 10 seconds), staging, remote work and response
@@ -479,6 +483,18 @@ used the real RDP redirected drive and a disposable Linux OpenSSH target.
 A separate portable PowerShell and Linux fixture transferred 512 MiB in
 36.022 s upload and 46.780 s download over local pipes. Its request file measured
 5,312,512 bytes (about 5.1 MiB) after the round trip and other fixture operations.
+
+Beta 5 repeated the 3 MiB and 65 MiB transfers in both directions under the
+same KES version with a non-administrator local Windows account and a pinned,
+unsigned adapter. The adapter was attached using the new local CMD file.
+All 136 blocks and auxiliary requests met the 15-second limit, with a maximum
+of 3.62 s. SHA-256 matched on each transfer and KES logged no new events.
+Fresh attestation was within 10 seconds. A command with an explicitly extended
+budget completed, and a separate deliberate timeout returned an indeterminate
+outcome while the same SSH session remained available for the next command.
+The controller used Direct control with actual RDP drive redirection on an
+isolated Windows Server 2022 x64 guest. Domain policy and the Appliance/QGA
+route require separate acceptance.
 
 A passing local-spool test is not RDP or KES acceptance. Keep failed runs and
 versioned evidence. Do not disable protection or add broad exclusions to obtain

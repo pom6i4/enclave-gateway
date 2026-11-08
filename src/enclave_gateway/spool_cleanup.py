@@ -102,11 +102,13 @@ if($errors){exit 1}
 '''.replace('STREAM_HELPER',LOCAL_STREAM_PRUNER).replace('VALID_STORAGE_BINDING',valid).replace('STORAGE_BINDING',binding).replace('SPOOL',ps_quote(spool))
 
 def _operator_cleanup_script(spool):
-    """Check the lease without deleting operator streams or loading a pruner."""
+    """Reclaim retired, scrubbed buffers on the Appliance under the worker lease."""
     return r'''$ErrorActionPreference='Stop'
 $spool=SPOOL
 $stopped=$false
 $lease=$null
+$removed=0;$preserved=0;$deferred=0;$errors=0
+$cleanup='worker_not_stopped'
 if($env:OS -eq 'Windows_NT'){
  $spool=[IO.Path]::GetFullPath($spool)
  if($spool.StartsWith('\\') -or [IO.DriveInfo]::new([IO.Path]::GetPathRoot($spool)).DriveType -eq 'Network'){
@@ -136,7 +138,35 @@ if([IO.File]::Exists($path)){
     $state.structured_backend -ceq 'operator' -and $state.spool_protocol -ceq 'stream' -and
     $state.instance_id -cmatch '^[a-f0-9]{32}$' -and $meta.revision -eq 1 -and $meta.owner_sha256 -cmatch '^[a-f0-9]{64}$'
   }
+  if($stopped){
+   $cleanup='unsupported_platform'
+   if($env:OS -eq 'Windows_NT'){
+    $cleanup='complete'
+    $attempts=0;$remaining=134217728;$prunerReady=$false
+    foreach($file in [IO.DirectoryInfo]::new($spool).EnumerateFiles()){
+     if($file.Name -cnotmatch '^ipc_(?:req_|upload_|res_)([a-f0-9]{32})(?:_[0-9]{1,5})?\.bin$'){continue}
+     if($file.Name.StartsWith('ipc_res_') -ne ($file.Name -cmatch '_[0-9]{1,5}\.bin$')){continue}
+     if($attempts -ge 128 -or $remaining -le 0){$cleanup='bounded';break}
+     $attempts++
+     try{
+      if(($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $file.Length -gt 67108864){$preserved++;continue}
+      if($file.Length -gt $remaining){$deferred++;continue}
+      $length=[uint32]$file.Length;$remaining-=$length
+      if(-not $prunerReady){STREAM_HELPER
+       $prunerReady=$true
+      }
+      if([EnclaveGateway.LocalStreamPruner]::DeleteZero($file.FullName,$length)){$removed++}else{$preserved++}
+     }catch{
+      $cause=$_.Exception;while($cause.InnerException){$cause=$cause.InnerException}
+      if($cause -is [IO.FileNotFoundException] -or ($cause -is [ComponentModel.Win32Exception] -and $cause.NativeErrorCode -in @(2,3,32,33))){
+       $deferred++
+      }else{$errors++;$cleanup='failed';break}
+     }
+    }
+   }
+  }
  }catch [IO.IOException]{}finally{if($lease){$lease.Dispose()}}
 }
-Write-Output ('APPLIANCE_CLEAN_OK:'+(@{removed=0;errors=0;stopped_worker_verified=$stopped;stream_cleanup='operator_evidence_preserved'}|ConvertTo-Json -Compress))
-'''.replace('SPOOL', ps_quote(spool))
+Write-Output ('APPLIANCE_CLEAN_OK:'+(@{removed=$removed;errors=$errors;stopped_worker_verified=$stopped;stream_cleanup=$cleanup;stream_removed=$removed;stream_preserved=$preserved;stream_deferred=$deferred}|ConvertTo-Json -Compress))
+if($errors){exit 1}
+'''.replace('STREAM_HELPER', LOCAL_STREAM_PRUNER).replace('SPOOL', ps_quote(spool))

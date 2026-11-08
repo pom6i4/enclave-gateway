@@ -77,8 +77,7 @@ def preflight(config):
     from enclave_gateway.onboarding import configuration_summary,agent_bundle
     checks=[]
     def add(name,ok,detail,fix):checks.append({'check':name,'ok':bool(ok),'code':'ok' if ok else name+'_unavailable','detail':detail,'remediation':fix})
-    external=any((config.appliance.qga_socket_path,config.appliance.qmp_socket_path,config.appliance.pid_file_path))
-    if config.appliance.hypervisor!='direct' and external:
+    if config.appliance.hypervisor!='direct' and config.appliance.external_control:
         for name,path in (('qga_endpoint',config.appliance.qga_socket),('qmp_endpoint',config.appliance.qmp_socket),('pid_file',config.appliance.pid_file)):
             add(name,path.exists(),'Configured attachment endpoint exists' if path.exists() else 'Configured attachment endpoint is missing',
                 'Use the verified owner launcher and set all matching control paths; preflight does not query VM identity.')

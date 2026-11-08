@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import platform
 import shutil
+import stat
 import subprocess
 import time
 import socket
@@ -319,25 +320,42 @@ class ApplianceHypervisor:
                         '--flags','not-need-init','--daemon'],check=True,capture_output=True,timeout=10)
 
     def start(self) -> int:
-        if any((self.spec.qga_socket_path,self.spec.qmp_socket_path,self.spec.pid_file_path)):
+        if self.spec.external_control:
             return self._start()
+        self._guard_managed_control()
         store=self.state_store()
         with store.locked():
             if store.pending.exists():
                 self._assert_offline();store.recover()
             return self._start()
 
+    def _guard_managed_control(self):
+        if not self.spec.has_control_overrides:
+            return
+        from enclave_gateway.hypervisor.state import private_dir
+        private_dir(Path(self.spec.runtime_dir))
+        for path in (self.spec.pid_file, self.spec.qmp_socket, self.spec.qga_socket, self.spec.qga_lock_file):
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                continue
+            if (stat.S_ISLNK(info.st_mode) or info.st_nlink != 1
+                    or getattr(info, 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+                raise ValueError('Managed control endpoints must be unlinked private files')
+
     def _start(self) -> int:
+        runtime = Path(self.spec.runtime_dir)
         running, pid = self.is_running()
         if running and pid is not None:
             return pid
-        if any((self.spec.qga_socket_path,self.spec.qmp_socket_path,self.spec.pid_file_path)):
-            raise ValueError('Explicit control paths attach to an existing VM; start it with its owner launcher or omit the overrides for managed creation')
+        if self.spec.external_control:
+            raise ValueError('Explicit control paths or attach-only mode require an existing VM; start it with its owner launcher')
 
         if self.spec.pid_file.exists():
             raise RuntimeError("Unresponsive VM PID file exists; verify process ownership before removing stale state")
+        if self.spec.has_control_overrides and any(path.exists() for path in (self.spec.qmp_socket, self.spec.qga_socket)):
+            raise RuntimeError('Managed control endpoint already exists; verify ownership before removing stale state')
         self._assert_offline()
-        runtime = Path(self.spec.runtime_dir)
         if runtime.is_symlink():
             raise ValueError("Runtime directory must not be a symlink")
         from enclave_gateway.hypervisor.state import private_dir
@@ -383,8 +401,9 @@ class ApplianceHypervisor:
         return new_pid
 
     def stop(self, timeout_sec: float = 120.0) -> None:
-        if any((self.spec.qga_socket_path,self.spec.qmp_socket_path,self.spec.pid_file_path)):
+        if self.spec.external_control:
             self._stop(timeout_sec);return
+        self._guard_managed_control()
         with self.state_store().locked():self._stop(timeout_sec)
 
     def _stop(self, timeout_sec: float) -> None:
@@ -409,7 +428,7 @@ class ApplianceHypervisor:
             raise TimeoutError("Appliance did not stop; runtime state is preserved")
 
         self._stop_tpm()
-        if not any((self.spec.qga_socket_path,self.spec.qmp_socket_path,self.spec.pid_file_path)):
+        if not self.spec.external_control:
             for stale in (self.spec.qmp_socket, self.spec.qga_socket, self.spec.pid_file):
                 stale.unlink(missing_ok=True)
 

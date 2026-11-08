@@ -41,7 +41,7 @@ def starter_configuration(mode='standard',route='rdp_vfs'):
     from enclave_gateway.config import ApplianceSpec
     app=ApplianceSpec()
     result={'profile':'default','security':security,
-            'appliance':{name:getattr(app,name) for name in ('name','hypervisor','runtime_dir','disk_path','efi_vars_path','qga_socket_path','qmp_socket_path','pid_file_path','mtu')},
+            'appliance':{name:getattr(app,name) for name in ('name','hypervisor','runtime_dir','disk_path','efi_vars_path','qga_socket_path','qmp_socket_path','pid_file_path','attach_only','mtu')},
             'provider':{'type':'custom','installer_path':'','dst_key_path':'','probe_host':'','probe_port':0},
             'bastion':{'enabled':True,'host':'10.0.1.10'},
             'forwards':{'app_https':'18443:app01:443'},
@@ -60,6 +60,7 @@ def starter_yaml(mode='standard',route='rdp_vfs'):
            'qga_socket_path':'Optional existing QGA socket; empty uses runtime_dir/name-qga.sock.',
            'qmp_socket_path':'Optional existing QMP socket; empty uses runtime_dir/name-qmp.sock.',
            'pid_file_path':'Optional existing PID file; empty uses runtime_dir/name-qemu.pid.',
+           'attach_only':'Null infers attachment from overrides; false allows managed paths directly in runtime_dir.',
            'mtu':'IPv4 MTU applied by heal on the managed VPN and Ethernet adapters.',
            'provider':'Use an existing approved VPN connection; no automatic key import.',
            'probe_host':'Empty follows bastion.host; set an explicit address for a different network probe.',
@@ -249,7 +250,7 @@ function Assert-Bundle([string]$folder){
             'next_step':'Run start_command inside the Bastion RDP session. Then run egw doctor --probe-targets.'}
     if config.bastion.structured_backend=='operator':
         receipt.update(
-            bastion_copy_command=_operator_copy_command(config.bastion,identity,hashes['bastion_structured.ps1'], install_policy=policy_source is not None),
+            bastion_copy_command=_operator_copy_command(config.bastion, identity, hashes, install_policy=policy_source is not None),
             target_authorized_keys_prefix='command="/usr/bin/python3 /path/to/operator_target.py",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty',
             next_step='Provision the approved worker policy and target helper. Run bastion_copy_command and then start_command inside the Bastion RDP session.',
         )
@@ -263,7 +264,7 @@ def _operator_path_guard():
             r"$p=if($p -is [IO.FileInfo]){$p.Directory}else{$p.Parent}}}")
 
 
-def _operator_copy_command(bastion,identity,digest,*,install_policy=False):
+def _operator_copy_command(bastion,identity,hashes,*,install_policy=False):
     source=bastion.bastion_spool_dir.rstrip('\\/')+'\\agents\\'+identity+'\\bastion_structured.ps1'
     install = ''
     if install_policy:
@@ -303,14 +304,18 @@ def _operator_copy_command(bastion,identity,digest,*,install_policy=False):
         "if($egwSettings.revision -ne 1 -or $egwSettings.owner_sid -cne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value){throw 'Invalid policy or worker SID'};"
         "$egwState=$egwSettings.operator_state_dir;Assert-EgwLocalPath $egwState;"
         "[void][IO.Directory]::CreateDirectory($egwState);"
-        "$egwDestination=Join-Path ([IO.Path]::GetDirectoryName($egwPolicy)) 'bastion_structured.ps1';"
+        "$egwRoot=[IO.Path]::GetDirectoryName($egwPolicy);"
+        "function Copy-EgwPinned([string]$name,[string]$digest,[string]$label){"
+        "$egwDestination=Join-Path $egwRoot $name;"
         "Assert-EgwLocalPath $egwDestination;$egwTemp=$egwDestination+'.'+[Guid]::NewGuid().ToString('N')+'.tmp';try{"
-        "[IO.File]::Copy("+ps_quote(source)+",$egwTemp,$false);"
-        "if((Get-FileHash -LiteralPath $egwTemp -Algorithm SHA256).Hash.ToLowerInvariant() -cne "+
-        ps_quote(digest)+"){throw 'Staged adapter hash mismatch'};"
+        "[IO.File]::Copy((Join-Path "+ps_quote(str(PureWindowsPath(source).parent))+" $name),$egwTemp,$false);"
+        "if((Get-FileHash -LiteralPath $egwTemp -Algorithm SHA256).Hash.ToLowerInvariant() -cne $digest){throw ('Staged '+$label+' hash mismatch')};"
         "if([IO.File]::Exists($egwDestination)){[IO.File]::Replace($egwTemp,$egwDestination,[NullString]::Value)}"
         "else{[IO.File]::Move($egwTemp,$egwDestination)}"
-        "}finally{[IO.File]::Delete($egwTemp)}}finally{$egwPolicyLease.Dispose()}"
+        "}finally{[IO.File]::Delete($egwTemp)}};"
+        "Copy-EgwPinned 'bastion_structured.ps1' "+ps_quote(hashes['bastion_structured.ps1'])+" 'adapter';"
+        "Copy-EgwPinned 'operator_target.py' "+ps_quote(hashes['operator_target.py'])+" 'target helper'"
+        "}finally{$egwPolicyLease.Dispose()}"
     )
 
 

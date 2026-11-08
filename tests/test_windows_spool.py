@@ -51,12 +51,40 @@ class RetiredStreamCleanupTests(unittest.TestCase):
             'worker_sha256': 'c' * 64}))
         return spool
 
-    def clean(self, spool, code=0):
+    def clean(self, spool, code=0, **profile):
         # Match the existing clean.appliance budget; do not hide slow cleanup.
-        result = DirectHostControlChannel(use_native_runtime=False).exec_powershell(cleanup_script(str(spool)), timeout_sec=15)
+        result = DirectHostControlChannel(use_native_runtime=False).exec_powershell(cleanup_script(str(spool), **profile), timeout_sec=15)
         self.assertEqual(result.exit_code, code, result.stderr)
         self.assertTrue(result.stdout.startswith('APPLIANCE_CLEAN_OK:'), result.stdout)
         return json.loads(result.stdout.split(':', 1)[1])
+
+    def test_operator_prunes_only_scrubbed_files_under_a_stopped_lease(self):
+        with TemporaryDirectory() as temp:
+            spool = self.prepare(Path(temp))
+            state = {'status': 'running', 'instance_id': self.current,
+                     'execution_profile': 'structured_only', 'structured_backend': 'operator',
+                     'spool_protocol': 'stream'}
+            (spool / 'worker_structured_storage.json').write_text(
+                json.dumps({'revision': 1, 'owner_sha256': 'c' * 64}))
+            heartbeat = spool / 'worker_state.json'
+            heartbeat.write_text(json.dumps(state))
+            request = spool / f'ipc_req_{self.retired}.bin'
+            request.write_bytes(bytes(4096))
+            upload = spool / f'ipc_upload_{self.retired}.bin'
+            upload.write_bytes(bytes(1048576 + 4096))
+            response = spool / f'ipc_res_{self.retired}_0.bin'
+            response.write_bytes(b'\x00pending reply')
+            profile = {'execution_profile': 'structured_only', 'structured_backend': 'operator'}
+            self.assertFalse(self.clean(spool, **profile)['stopped_worker_verified'])
+            state['status'] = 'stopped'
+            heartbeat.write_text(json.dumps(state))
+            with self.exclusive(upload):
+                result = self.clean(spool, **profile)
+                self.assertEqual(result['stream_removed'], 1)
+                self.assertEqual(result['stream_deferred'], 1)
+            self.assertEqual(self.clean(spool, **profile)['stream_removed'], 1)
+            self.assertFalse(request.exists() or upload.exists())
+            self.assertEqual(response.read_bytes(), b'\x00pending reply')
 
     @contextmanager
     def exclusive(self, path):

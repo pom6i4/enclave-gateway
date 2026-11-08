@@ -46,6 +46,7 @@ class ApplianceSpec:
     qga_socket_path: str = ""
     qmp_socket_path: str = ""
     pid_file_path: str = ""
+    attach_only: bool | None = None
 
     def __post_init__(self):
         self.runtime_dir=str(Path(self.runtime_dir).expanduser().absolute())
@@ -53,6 +54,8 @@ class ApplianceSpec:
             value=getattr(self,name)
             if not isinstance(value,str) or any(c in value for c in '\r\n\0'):raise ValueError('Invalid appliance control path: '+name)
             if value:setattr(self,name,str(Path(value).expanduser().absolute()))
+        if self.attach_only is not None and type(self.attach_only) is not bool:
+            raise ValueError('appliance.attach_only must be a boolean or null')
         if self.arch not in ('auto','arm64','x86_64') or self.hypervisor not in ('auto','hvf','kvm','whpx','tcg','direct'):
             raise ValueError('Select a supported appliance architecture and hypervisor')
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", self.name):
@@ -65,6 +68,27 @@ class ApplianceSpec:
             raise ValueError('Invalid display or network isolation setting')
         if self.cpus < 1 or self.memory_mb < 128 or not 576 <= self.mtu <= 9000:
             raise ValueError("Invalid appliance resources or MTU")
+        if self.has_control_overrides and not self.external_control:
+            endpoints = (self.qga_socket, self.qmp_socket, self.pid_file)
+            if any(path.parent != Path(self.runtime_dir) or not re.fullmatch(r'[A-Za-z0-9_-][A-Za-z0-9_.-]*', path.name)
+                   for path in endpoints):
+                raise ValueError('Managed control paths must be simple filenames inside appliance.runtime_dir')
+            control_paths = (*endpoints, self.qga_lock_file)
+            state_root = (Path(self.snapshot_dir).expanduser().absolute() if self.snapshot_dir
+                          else self.resolved_disk_path.with_suffix('.states'))
+            reserved = {self.tpm_socket, Path(self.runtime_dir) / 'qemu-start.log', state_root,
+                        state_root / 'operation.lock', state_root / 'pending-restore.json',
+                        self.resolved_disk_path, self.resolved_efi_vars_path}
+            if len(set(control_paths)) != len(control_paths) or reserved.intersection(control_paths):
+                raise ValueError('Managed appliance control paths must be distinct from other appliance files')
+
+    @property
+    def has_control_overrides(self) -> bool:
+        return bool(self.qga_socket_path or self.qmp_socket_path or self.pid_file_path)
+
+    @property
+    def external_control(self) -> bool:
+        return self.has_control_overrides if self.attach_only is None else self.attach_only
 
     @property
     def resolved_disk_path(self) -> Path:

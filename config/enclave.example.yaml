@@ -12,7 +12,8 @@ appliance:
   mtu: 1200                       # Managed Windows IPv4 MTU; applied by egw heal
   disk_path: ~/.local/share/enclave-gateway/disk.qcow2
   efi_vars_path: ~/.local/share/enclave-gateway/efi_vars.fd
-  # Optional attach paths; appliance.name remains the verified QMP VM name.
+  # Optional control paths; appliance.name remains the verified QMP VM name.
+  attach_only: null               # Auto: explicit paths attach; false manages paths inside runtime_dir
   qga_socket_path: ''
   qmp_socket_path: ''
   pid_file_path: ''

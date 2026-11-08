@@ -440,8 +440,11 @@ function Open-OperatorPipes{
     # deadline for both events and keep the worker unavailable until the greeting.
     $requestTimer=[Diagnostics.Stopwatch]::StartNew()
     $attachDeadline=90000
-    Write-Host 'Run this exact command from a separate CMD console in the same RDP session:'
-    Write-Host $line
+    $attachPath=[IO.Path]::Combine($policy.operator_state_dir,'attach-ssh.cmd')
+    Assert-PlainPath $attachPath $true
+    Write-Atomic $attachPath ("@echo off`r`n"+$line+"`r`n") -Transient
+    Write-Host 'Run the following in a separate CMD console in the same RDP session:'
+    if($attachPath -match '[%!]'){Write-Host $line}else{Write-Host ('"'+$attachPath+'"')}
     if(-not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($inTask,$outTask),(Operator-Remaining $attachDeadline))){throw 'Operator OpenSSH was not attached'}
     if([Text.Encoding]::ASCII.GetString((Operator-Read 8 $attachDeadline)) -cne "EGWSSH$protocol`n"){throw 'The approved Linux SSH endpoint did not start the expected operator protocol'}
 }
@@ -568,6 +571,12 @@ try{
         if(@($policy.targets.PSObject.Properties).Count -ne 1 -or ($RequireSignedAgents -and -not $TrustedSignerThumbprints.Count)){throw 'Operator backend requires one pinned SSH target and trusted publishers when adapter signing is enabled'}
         Assert-PlainPath $policy.operator_state_dir $true
         if(-not [IO.Directory]::Exists($policy.operator_state_dir)){throw 'Provision the local operator state directory'}
+        if($env:OS -eq 'Windows_NT'){
+            if([IO.DriveInfo]::new([IO.Path]::GetPathRoot($policy.operator_state_dir)).DriveType -eq 'Network'){
+                throw 'Operator state requires a local Windows drive'
+            }
+            Assert-PolicyAcl $policy.operator_state_dir $sid $true
+        }
         $stateLeasePath=[IO.Path]::Combine($policy.operator_state_dir,'.worker-session')
         Assert-PlainPath $stateLeasePath $true
         $operatorStateLease=[IO.File]::Open($stateLeasePath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)

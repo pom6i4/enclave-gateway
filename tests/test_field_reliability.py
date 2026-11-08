@@ -44,9 +44,30 @@ class FieldContracts(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'Explicit control paths'):vm._start()
             vm.qmp.execute.assert_called_once()
 
+    def test_managed_control_paths_require_private_unoccupied_endpoints(self):
+        from enclave_gateway.hypervisor.driver import ApplianceHypervisor
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            with self.assertRaisesRegex(ValueError, 'inside appliance.runtime_dir'):
+                ApplianceSpec(runtime_dir=folder, attach_only=False, qga_socket_path=str(root.parent / 'outside.sock'))
+            with self.assertRaisesRegex(ValueError, 'must be distinct'):
+                ApplianceSpec(runtime_dir=folder, attach_only=False, qga_socket_path=str(root / 'same'),
+                              pid_file_path=str(root / 'same'))
+            spec = ApplianceSpec(runtime_dir=folder, attach_only=False, qga_socket_path=str(root / 'qga.sock'))
+            vm = ApplianceHypervisor(spec)
+            spec.qga_socket.write_bytes(b'preserve')
+            with self.assertRaisesRegex(RuntimeError, 'endpoint already exists'):
+                vm._start()
+            self.assertEqual(spec.qga_socket.read_bytes(), b'preserve')
+            spec.qga_socket.unlink()
+            if os.name != 'nt':
+                spec.qga_socket.symlink_to(root / 'absent')
+                with self.assertRaisesRegex(ValueError, 'unlinked private files'):
+                    vm.start()
+
     def test_starter_yaml_exposes_attachment_paths_and_probe_follows_bastion(self):
         text=starter_yaml();self.assertTrue(text.startswith('#'));data=parse_yaml_or_json(text)
-        for name in ('name','runtime_dir','disk_path','efi_vars_path','qga_socket_path','qmp_socket_path','pid_file_path'):self.assertIn(name,data['appliance'])
+        for name in ('name','runtime_dir','disk_path','efi_vars_path','qga_socket_path','qmp_socket_path','pid_file_path','attach_only'):self.assertIn(name,data['appliance'])
         data['bastion'].update(host='10.0.1.20',port=3390)
         config=EnclaveConfig.from_dict(data);self.assertEqual((config.provider.probe_host,config.provider.probe_port),('10.0.1.20',3390))
         data['provider'].update(probe_host='10.0.1.30',probe_port=443)

@@ -471,7 +471,22 @@ ConvertTo-Json $out -Compress -Depth 8
     @tracked('stage_agents')
     def stage_agents(self, *, actor='cli', **options):
         from enclave_gateway.onboarding import stage_agents
-        return stage_agents(self.control,self.config,**options)
+        receipt = stage_agents(self.control,self.config,**options)
+        if self.config.bastion.structured_backend == 'operator':
+            from enclave_gateway.spool_cleanup import cleanup_script
+            try:
+                cleanup = self.control.exec_powershell(
+                    cleanup_script(self.config.bastion.appliance_spool_dir,
+                                   execution_profile='structured_only', structured_backend='operator'),
+                    timeout_sec=budget(15, 'agents.stage.prune'),
+                )
+                prefix = 'APPLIANCE_CLEAN_OK:'
+                if not cleanup.stdout.startswith(prefix):
+                    raise ValueError('Operator cleanup produced no receipt')
+                receipt['stream_prune'] = json.loads(cleanup.stdout[len(prefix):])
+            except (OSError, RuntimeError, ValueError):
+                receipt['stream_prune'] = {'stream_cleanup': 'unavailable'}
+        return receipt
 
     @tracked('prune_agents')
     def prune_agents(self, *, actor='cli', **options):

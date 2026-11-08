@@ -348,7 +348,8 @@ throw 'Accepted an Everyone writer'
             files, _, identity, _ = agent_bundle(cfg)
             source = root / "spool" / "agents" / identity / WORKER.name
             source.parent.mkdir(parents=True)
-            source.write_bytes(files[WORKER.name])
+            for name, contents in files.items():
+                (source.parent / name).write_bytes(contents)
             control = Mock()
             control.exec_powershell.return_value = ExecResult(0, "", "", 0)
             copy_command = stage_agents(control, cfg)["bastion_copy_command"]
@@ -357,6 +358,7 @@ throw 'Accepted an Everyone writer'
             result = self.powershell(copy_command)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(destination.read_bytes(), files[WORKER.name])
+            self.assertEqual((root / "operator_target.py").read_bytes(), files["operator_target.py"])
             self.assertTrue(state.is_dir())
             source.write_text("changed adapter")
             result = self.powershell(copy_command)
@@ -385,6 +387,7 @@ throw 'Accepted an Everyone writer'
             staged = root / "spool" / "agents" / receipt["bundle_sha256"]
             staged.mkdir(parents=True)
             (staged / WORKER.name).write_bytes(WORKER.read_bytes())
+            (staged / "operator_target.py").write_bytes(Path(operator_target.__file__).read_bytes())
             (staged / policy.name).write_bytes(source.read_bytes())
             command = receipt["bastion_copy_command"]
             result = self.powershell(command)

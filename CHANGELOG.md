@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0 Beta 5
+
+Package version `0.3.0b5` and Git tag `v0.3.0-beta.5`.
+
+- Allow an explicitly approved `bastion.operator_exec_max_sec` above the
+  15-second default. A confirmed command timeout preserves the SSH session
+  for subsequent requests and records the timed-out outcome as indeterminate.
+- Stage the hash-verified Linux peer alongside the Windows adapter and print
+  a local `attach-ssh.cmd` command for manual attachment in the same RDP session.
+- Reclaim only zeroed operator IPC files on the Appliance after verifying the
+  stopped worker and spool identity. Preserve interrupted transactions.
+- Allow explicit QEMU control paths in a private managed runtime with
+  `appliance.attach_only: false`. Existing external paths retain attachment
+  semantics by default.
+
 ## 0.3.0 Beta 4
 
 Package version `0.3.0b4` and Git tag `v0.3.0-beta.4`.
