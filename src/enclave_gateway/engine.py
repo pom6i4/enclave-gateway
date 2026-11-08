@@ -312,15 +312,41 @@ if (Test-Path -LiteralPath $statePath) {{
         probe_ps = adapter.probe_script(provider) + f"""
 $adapterName = {ps_quote(provider.adapter_name)}
 $adapter = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {{ $_.Name -eq $adapterName -or $_.InterfaceDescription -like "*$adapterName*" }})
-$tcp = Test-NetConnection -ComputerName {ps_quote(provider.probe_host)} -Port {provider.probe_port} -WarningAction SilentlyContinue
+$reachable = $false
+$sourceIp = ''
+$sourceInterface = ''
+# Check the TCP connection directly. Test-NetConnection can spend the entire
+# QGA budget on diagnostics even after the destination port has answered.
+$tcp = if ([Net.Sockets.Socket]::OSSupportsIPv6) {{
+    $client = [Net.Sockets.TcpClient]::new([Net.Sockets.AddressFamily]::InterNetworkV6)
+    $client.Client.DualMode = $true
+    $client
+}} else {{ [Net.Sockets.TcpClient]::new() }}
+try {{
+    $connect = $tcp.BeginConnect({ps_quote(provider.probe_host)}, {provider.probe_port}, $null, $null)
+    if ($connect.AsyncWaitHandle.WaitOne(3000)) {{
+        $tcp.EndConnect($connect)
+        $reachable = $tcp.Connected
+        $address = $tcp.Client.LocalEndPoint.Address
+        if ($address.IsIPv4MappedToIPv6) {{ $address = $address.MapToIPv4() }}
+        $sourceIp = $address.ToString()
+        $lookup = @{{IPAddress = ($sourceIp -split '%', 2)[0]}}
+        if ($address.AddressFamily -eq 'InterNetworkV6' -and $address.ScopeId) {{
+            $lookup.InterfaceIndex = $address.ScopeId
+        }}
+        $aliases = @(Get-NetIPAddress @lookup -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty InterfaceAlias -Unique)
+        if ($aliases.Count -eq 1) {{ $sourceInterface = [string]$aliases[0] }}
+    }}
+}} catch [Net.Sockets.SocketException] {{}} finally {{ $tcp.Dispose() }}
 $stateJson = ""
 {worker_probe}
-$vpnRoute = @($adapter | Where-Object {{ $_.Status -eq 'Up' -and $_.Name -eq $tcp.InterfaceAlias }}).Count -gt 0
+$vpnRoute = $sourceInterface -and @($adapter | Where-Object {{ $_.Status -eq 'Up' -and $_.Name -eq $sourceInterface }}).Count -gt 0
 $out = @{{
-    tunnel_up = [bool]($tcp.TcpTestSucceeded -and $vpnRoute)
-    probe_reachable = [bool]$tcp.TcpTestSucceeded
-    source_ip = if($tcp.SourceAddress -is [Net.IPAddress]){{$tcp.SourceAddress.ToString()}}else{{[string]$tcp.SourceAddress.IPAddress}}
-    source_interface = [string]$tcp.InterfaceAlias
+    tunnel_up = [bool]($reachable -and $vpnRoute)
+    probe_reachable = [bool]$reachable
+    source_ip = $sourceIp
+    source_interface = $sourceInterface
     vpn_info = $info
     provider_evidence = $providerEvidence
     worker = $stateJson

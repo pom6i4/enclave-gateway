@@ -74,13 +74,28 @@ class StructuredContractTests(unittest.TestCase):
             mark_dispatched()
             return ExecResult(0,json.dumps({'state':json.dumps(state),'stamp_ms':time.time_ns()//1000000}),'',0)
         control=Mock()
-        control.exec_powershell.side_effect=read_state
+        def delayed_read(script, timeout_sec):
+            if control.exec_powershell.call_count == 1:
+                mark_dispatched()
+                raise TimeoutError('Guest snapshot timed out')
+            return read_state(script, timeout_sec)
+        control.exec_powershell.side_effect=delayed_read
         operation=OperationContext('test_readiness','@bastion','local',time.monotonic()+1)
         with activate(operation):
             self.assertTrue(require_running_worker(control,configuration().bastion)['running'])
+            self.assertEqual(control.exec_powershell.call_count, 2)
             self.assertFalse(operation.dispatched)
             mark_dispatched()
             self.assertTrue(operation.dispatched)
+
+        control.reset_mock()
+        control.exec_powershell.side_effect=TimeoutError('Guest snapshot timed out')
+        operation=OperationContext('test_readiness','@bastion','local',time.monotonic()+1)
+        with activate(operation):
+            with self.assertRaises(TimeoutError):
+                require_running_worker(control,configuration().bastion)
+            self.assertEqual(control.exec_powershell.call_count, 2)
+            self.assertFalse(operation.dispatched)
 
     def test_direct_probe_waits_for_complete_reply(self):
         from enclave_gateway.control.qga_client import QgaCommandError

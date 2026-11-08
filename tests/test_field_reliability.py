@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import tempfile
 import time
@@ -214,16 +215,46 @@ class FieldContracts(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get('EGW_TEST_POWERSHELL'),'Real PowerShell is opt-in')
 class FieldWorkerTests(unittest.TestCase):
-    def test_status_extracts_cim_and_native_source_addresses(self):
+    def test_status_checks_the_interface_used_by_the_tcp_connection(self):
         with tempfile.TemporaryDirectory() as folder:
-            root=Path(folder).resolve();spool=root/'spool';spool.mkdir()
-            config=EnclaveConfig.from_dict({'appliance':{'hypervisor':'direct'},'provider':{'type':'custom'},'bastion':{'enabled':False,'appliance_spool_dir':str(spool)}})
-            native=LocalPowerShellControl(os.environ['EGW_TEST_POWERSHELL'],translate_paths=False)
-            for expression in ("([pscustomobject]@{IPAddress='127.0.0.1'})","([Net.IPAddress]::Parse('127.0.0.1'))"):
-                prefix="function Get-NetAdapter {[pscustomobject]@{Name='Infotecs';Status='Up';InterfaceDescription='Infotecs'}};function Test-NetConnection {[pscustomobject]@{TcpTestSucceeded=$true;InterfaceAlias='Infotecs';SourceAddress="+expression+"}};"
-                control=Mock();control.exec_powershell.side_effect=lambda text,**kwargs:native.exec_powershell(prefix+text,**kwargs)
-                engine=engine_at(root,control,config)
-                self.assertEqual(engine.status()['provider']['source_ip'],'127.0.0.1')
+            root = Path(folder).resolve()
+            native = LocalPowerShellControl(os.environ['EGW_TEST_POWERSHELL'], translate_paths=False)
+
+            def probe(host, port, alias):
+                config = EnclaveConfig.from_dict({
+                    'appliance': {'hypervisor': 'direct'},
+                    'provider': {'type': 'openvpn', 'adapter_name': 'Fixture VPN',
+                                 'probe_host': host, 'probe_port': port},
+                    'bastion': {'enabled': False},
+                })
+                prefix = f"""
+function Get-Service {{}}
+function Get-NetAdapter {{ [pscustomobject]@{{Name='Fixture VPN';Status='Up';InterfaceDescription='Fixture VPN'}} }}
+function Get-NetIPAddress {{
+    param($IPAddress)
+    if ($IPAddress -ceq '{host}') {{ [pscustomobject]@{{InterfaceAlias='{alias}'}} }}
+}}
+"""
+                control = Mock()
+                control.exec_powershell.side_effect = lambda script, **kwargs: native.exec_powershell(prefix + script, **kwargs)
+                return engine_at(root, control, config).status()['provider']
+
+            with socket.socket() as listener:
+                listener.bind(('127.0.0.1', 0))
+                port = listener.getsockname()[1]
+                listener.listen()
+                connected = probe('127.0.0.1', port, 'Fixture VPN')
+                self.assertTrue(connected['tunnel_up'])
+                self.assertEqual(connected['source_ip'], '127.0.0.1')
+                self.assertEqual(connected['source_interface'], 'Fixture VPN')
+                other_interface = probe('127.0.0.1', port, 'Fixture Ethernet')
+                self.assertTrue(other_interface['probe_reachable'])
+                self.assertFalse(other_interface['tunnel_up'])
+
+            refused = probe('127.0.0.1', port, 'Fixture VPN')
+            self.assertFalse(refused['probe_reachable'])
+            self.assertFalse(refused['tunnel_up'])
+            self.assertEqual(refused['source_ip'], '')
 
     @unittest.skipUnless(os.name=='nt','Windows RemoteSigned and NTFS alternate-stream fixture')
     def test_local_script_copy_preserves_internet_zone_and_execution_policy(self):

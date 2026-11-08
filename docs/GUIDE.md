@@ -336,7 +336,7 @@ rotation in your operational plan.
 | No config / unknown setting / duplicate key | `egw config init`, edit and run `egw config check`; a typo is not ignored |
 | Preflight succeeds, connection fails | Preflight checked only Host files/tools; validate QGA, VPN, RDP and remote policy |
 | QGA socket missing | Match the existing VM's virtio channel, runtime directory and managed name; confirm QGA service |
-| `SESSION_PENDING_WORKER` / no fresh heartbeat | Run `egw agents stage`, verify redirection and execute its printed command inside Bastion RDP |
+| `SESSION_PENDING_WORKER` / no fresh heartbeat | Verify UTC clock synchronization on the Host, Appliance and Bastion. Check drive redirection and run the command printed by `egw agents stage` inside the approved Bastion RDP session. |
 | Script is blocked / ConstrainedLanguage | Obtain administrator approval under the actual endpoint policy; do not bypass it |
 | Endpoint product detects or removes a worker | Stop requests and follow the [incident procedure](ENDPOINT-INCIDENT.md); preserve unresolved transaction records |
 | Native helper absent | Standard key-based/in-process work needs no helper; explicitly requested isolation or password helper needs the approved package |

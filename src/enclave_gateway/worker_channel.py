@@ -75,7 +75,12 @@ if([IO.File]::Exists($p)){
 } # EGW_STRUCTURED_READINESS
 """
             with read_only_preflight():
-                result=control.exec_powershell(script,timeout_sec=budget(5,'vfs.preflight'))
+                try:
+                    result = control.exec_powershell(script, timeout_sec=budget(5, 'vfs.preflight'))
+                except TimeoutError:
+                    # The snapshot cannot dispatch a worker operation. A slow
+                    # guest can get one fresh read within the caller's deadline.
+                    result = control.exec_powershell(script, timeout_sec=budget(5, 'vfs.preflight'))
             if result.exit_code or not result.stdout:return {}
             snapshot=json.loads(result.stdout)
             raw=snapshot['state'].encode('utf-8')
