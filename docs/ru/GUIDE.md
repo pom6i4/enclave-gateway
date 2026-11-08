@@ -113,7 +113,7 @@ bastion:
    содержит символы подстановки CMD, адаптер напечатает саму команду OpenSSH.
 
 ```sh
-egw agent-verify --wait-ready 25
+egw agent-verify --wait-ready 35
 egw exec app01 'uname -s' --timeout 15
 egw cp ./hello.txt app01:/tmp/hello.txt --timeout 15
 egw cp app01:/tmp/hello.txt ./hello-returned.txt --timeout 15

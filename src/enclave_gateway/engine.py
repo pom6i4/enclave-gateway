@@ -482,14 +482,14 @@ ConvertTo-Json $out -Compress -Depth 8
         if update_credentials and domain_user and password:
             self._refresh_rdp_credentials(domain_user,password)
 
-        host_epoch = int(time.time())
+        host_epoch_ms = time.time_ns() // 1_000_000
         routes_csv = ",".join(self.config.provider.routes)
         dns_csv = ",".join(self.config.provider.dns_servers)
 
         combined_ps = f"""
 & {{
 {init_script}
-}} -Mtu {self.config.appliance.mtu} -AdapterName {ps_quote(self.config.provider.adapter_name)} -BastionHost {ps_quote(self.config.bastion.host)} -BastionPort {self.config.bastion.port} -SkipBastion:${str(not self.config.bastion.enabled).lower()} -HostEpochUtc {host_epoch} -RoutesCsv {ps_quote(routes_csv)} -DnsServersCsv {ps_quote(dns_csv)}
+}} -Mtu {self.config.appliance.mtu} -AdapterName {ps_quote(self.config.provider.adapter_name)} -BastionHost {ps_quote(self.config.bastion.host)} -BastionPort {self.config.bastion.port} -SkipBastion:${str(not self.config.bastion.enabled).lower()} -HostEpochUtcMs {host_epoch_ms} -RoutesCsv {ps_quote(routes_csv)} -DnsServersCsv {ps_quote(dns_csv)}
 """
         if self.config.bastion.enabled:
             supervisor_mode = '-ObserveOnly' if operator else '-ForceReconnect'

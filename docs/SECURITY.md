@@ -43,7 +43,7 @@ journal and reconcile indeterminate operations instead of blindly replaying them
 
 ## Endpoint policy
 
-The experimental `structured_only` foreground profile in `0.3.0b5` uses an independently
+The experimental `structured_only` foreground profile in `0.3.0b6` uses an independently
 approved Bastion policy and the Microsoft-signed system OpenSSH client.
 Installation is explicit and there is no startup registration. Request data cannot
 select a Bastion interpreter or arbitrary SSH options. The default `spawn`

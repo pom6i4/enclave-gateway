@@ -9,6 +9,7 @@ import random
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -66,6 +67,12 @@ class OperatorOnboardingTests(unittest.TestCase):
 
             state_path.write_text(json.dumps(state))
             self.assertEqual(observe(), "SESSION_ACTIVE")
+            stamp = time.time() + 4
+            os.utime(state_path, (stamp, stamp))
+            self.assertEqual(observe(), "SESSION_ACTIVE")
+            stamp = time.time() + 30
+            os.utime(state_path, (stamp, stamp))
+            self.assertTrue(observe().startswith("SESSION_PENDING_OPERATOR"))
             os.utime(state_path, (1, 1))
             self.assertTrue(observe().startswith("SESSION_PENDING_OPERATOR"))
             state_path.write_text(json.dumps({**state, "status": "stopped"}))

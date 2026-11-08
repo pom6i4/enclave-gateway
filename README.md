@@ -35,7 +35,7 @@ The diagram shows the RDP route. When policy permits SSH, use the
 Enterprise adds signed native isolation and verified identities. Neither mode
 replaces the organization's endpoint policy, VPN entitlement or host-key approval.
 
-The current version is [**0.3.0 Beta 5**](https://github.com/pom6i4/enclave-gateway/releases/tag/v0.3.0-beta.5) (`0.3.0b5`). The foreground
+The current version is [**0.3.0 Beta 6**](https://github.com/pom6i4/enclave-gateway/releases/tag/v0.3.0-beta.6) (`0.3.0b6`). The foreground
 `structured_only` profile is **experimental** and requires explicit endpoint
 approval. KES compatibility is not certified. See [release boundaries](docs/RELEASING.md#current-beta-candidate).
 

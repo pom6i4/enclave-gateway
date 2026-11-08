@@ -38,7 +38,7 @@ if($SpoolProtocol -eq 'Stream'){
             try{
                 $snapshot=[IO.File]::ReadAllText((Join-Path $SpoolDir ('worker_pulse_'+$info.instance+'_'+$slot+'.json')))|ConvertFrom-Json
                 $stamp=[DateTime]::Parse($snapshot.last_heartbeat_utc).ToUniversalTime();$age=([DateTime]::UtcNow-$stamp).TotalSeconds
-                if($snapshot.instance_id -cne $info.instance -or $snapshot.worker_sha256 -cne $info.worker_sha256 -or $snapshot.spool_protocol -ne 'stream' -or $snapshot.status -notin @('running','stopping','stopped') -or $age -lt 0 -or $age -ge $HeartbeatMaxAgeSec){continue}
+                if($snapshot.instance_id -cne $info.instance -or $snapshot.worker_sha256 -cne $info.worker_sha256 -or $snapshot.spool_protocol -ne 'stream' -or $snapshot.status -notin @('running','stopping','stopped') -or $age -lt -5 -or $age -ge $HeartbeatMaxAgeSec){continue}
                 if($stamp -gt $latestStamp -or ($stamp -eq $latestStamp -and $snapshot.status -ne 'running')){$latest=$snapshot;$latestStamp=$stamp}
             }catch{}
         }
@@ -49,7 +49,7 @@ if($SpoolProtocol -eq 'Stream'){
             $file=Get-Item -LiteralPath $stateFile -Force -ErrorAction Stop
             $age=([DateTime]::UtcNow-$file.LastWriteTimeUtc).TotalSeconds
             if(($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $file.Length -gt 65536 -or
-               $age -lt 0 -or $age -ge $HeartbeatMaxAgeSec){return $false}
+               $age -lt -5 -or $age -ge $HeartbeatMaxAgeSec){return $false}
             $state=[IO.File]::ReadAllText($stateFile)|ConvertFrom-Json
             $hbFresh=$state.status -ceq 'running' -and $state.spool_protocol -ceq 'stream' -and
                 $state.execution_profile -ceq 'structured_only' -and $state.structured_backend -ceq 'operator' -and

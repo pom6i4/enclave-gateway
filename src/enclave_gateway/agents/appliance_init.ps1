@@ -10,7 +10,8 @@ param(
     [string]$DnsServersCsv = "",
     [string]$MsiPath = "",
     [string]$DstPath = "",
-    [string]$DstPassword = ""
+    [string]$DstPassword = "",
+    [int64]$HostEpochUtcMs = 0
 )
 
 $ErrorActionPreference = "Continue"
@@ -21,9 +22,12 @@ if (Test-Path $w32Config) {
     Set-ItemProperty -Path $w32Config -Name "MaxPosPhaseCorrection" -Value 0xFFFFFFFF -Type DWord -ErrorAction SilentlyContinue
     Set-ItemProperty -Path $w32Config -Name "MaxNegPhaseCorrection" -Value 0xFFFFFFFF -Type DWord -ErrorAction SilentlyContinue
 }
-if ($HostEpochUtc -gt 0) {
+if ($HostEpochUtcMs -le 0 -and $HostEpochUtc -gt 0) {
+    $HostEpochUtcMs = $HostEpochUtc * 1000L
+}
+if ($HostEpochUtcMs -gt 0) {
     try {
-        $targetTime = [DateTimeOffset]::FromUnixTimeSeconds($HostEpochUtc).LocalDateTime
+        $targetTime = [DateTimeOffset]::FromUnixTimeMilliseconds($HostEpochUtcMs).LocalDateTime
         Set-Date -Date $targetTime | Out-Null
     } catch {}
 }

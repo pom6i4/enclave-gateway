@@ -1,6 +1,6 @@
 # Endpoint policy and the foreground OpenSSH profile
 
-This describes the experimental foreground profile in `0.3.0b5` (Beta 5).
+This describes the experimental foreground profile in `0.3.0b6` (Beta 6).
 It does not change the published `v0.2.0` tag or certify antivirus compatibility. Deployment on a
 managed endpoint requires its administrator's approval. An active security
 incident must be resolved through the organization's incident process first.
@@ -114,7 +114,7 @@ shared 90-second startup window, bounded by the remaining worker lease.
 When the worker is ready, use the regular CLI:
 
 ```sh
-egw agent-verify --wait-ready 25
+egw agent-verify --wait-ready 35
 egw exec app01 'uname -s' --timeout 15
 egw cp ./artifact.bin app01:/tmp/artifact.bin --timeout 15
 egw cp app01:/tmp/artifact.bin ./received.bin --timeout 15
@@ -554,6 +554,18 @@ each direction matched SHA-256; the slowest block or auxiliary request took
 2.88 s. KES 14.1.0.423 logged no new events during this run, with AMSI, Behavior
 Detection and File Threat Protection active and no changes to exclusions.
 This verifies manual recovery on the lab route and policy.
+
+### Beta 6 field acceptance
+
+The operator reported an end-to-end pass on the pre-release baseline
+`69f0acf`, from QGA through VPN and domain RDP to system OpenSSH. The run used
+a non-administrator domain account under active KES 14.1 and reported zero
+detections. It covered short command timeout and session reuse, cold
+attestation, operator-safe `heal` and the shorter local staging command.
+Beta 6 ships the same `bastion_structured.ps1` and `operator_target.py` bytes.
+The release adds Appliance clock and supervisor tolerance changes, which
+were verified separately in the PowerShell-enabled suite. Field results apply
+to the policy and route exercised in that run.
 
 A passing local-spool test is not RDP or KES acceptance. Keep failed runs and
 versioned evidence. Do not disable protection or add broad exclusions to obtain

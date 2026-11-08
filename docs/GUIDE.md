@@ -771,7 +771,7 @@ see [Microsoft's duplicate SID guidance](https://support.microsoft.com/en-au/ser
 
 For an administrator-approved foreground worker without Bastion autostart or
 custom executables, see [the endpoint-policy guide](ENDPOINT-POLICY.md).
-The experimental `structured_only` profile in `0.3.0b5` rejects unsupported
+The experimental `structured_only` profile in `0.3.0b6` rejects unsupported
 operations and never falls back to the universal worker. Its
 [Windows qualification scope](ENDPOINT-POLICY.md#qualification-status) is
 separate from EDR approval and the portable interpreter tests.
@@ -824,12 +824,14 @@ Choose how to trust the adapter:
    command printed by the adapter.
 
 ```sh
-egw agent-verify
+egw agent-verify --wait-ready 35
 egw exec app01 'uname -s' --timeout 15
 egw cp ./hello.txt app01:/tmp/hello.txt --timeout 15
 egw cp app01:/tmp/hello.txt ./hello-returned.txt --timeout 15
 ```
 
+Allow 35 seconds for the first readiness check after attaching OpenSSH.
+Attestation then has its own budget of up to 10 seconds.
 Ordinary `exec` and `cp` have a 15 s overall limit, including fresh attestation.
 This profile has no interactive SSH or TCP proxy. The adapter exits if OpenSSH
 disconnects. Reconcile unfinished transactions before restarting it.

@@ -137,12 +137,14 @@ class PowerShellOperationalTests(unittest.TestCase):
 function Test-Path {return $false}
 function Set-ItemProperty {throw 'Unexpected registry change'}
 function New-Item {throw 'Unexpected registry creation'}
+function Set-Date($Date) { [Console]::WriteLine("CLOCK_MS:$($Date.Millisecond)") }
 function powercfg.exe {throw 'Unexpected power policy change'}
 function netsh.exe {if(($args -join ' ') -notlike 'interface ipv4 set subinterface *'){throw 'Unexpected portproxy change'}}
-& 'PATH' -SkipBastion
+& 'PATH' -SkipBastion -HostEpochUtcMs 1794000000123
 '''.replace('PATH',path)
         result=control.exec_powershell(script)
         self.assertEqual(result.exit_code,0,result.stderr);self.assertIn('APPLIANCE_INIT_OK',result.stdout);self.assertFalse(result.stderr)
+        self.assertIn('CLOCK_MS:123',result.stdout)
 
     def test_real_ssh_envelope_preserves_nonzero_exit_and_unambiguous_output(self):
         if os.name=='nt':self.skipTest('POSIX executable fixture for the Windows-hop launcher')

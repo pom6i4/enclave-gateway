@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 Beta 6
+
+Package version `0.3.0b6` and Git tag `v0.3.0-beta.6`.
+
+- Preserve milliseconds when synchronizing the Appliance clock during `heal`.
+  Accept Stream heartbeat timestamps up to five seconds ahead of the Appliance.
+- Recommend a 35-second readiness window after the first OpenSSH attachment.
 
 - Use the remaining dispatch budget for operator SSH requests and reserve
   local pipe time for a protocol v2 command timeout reply.
