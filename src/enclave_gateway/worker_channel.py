@@ -8,6 +8,45 @@ from enclave_gateway.security.quoting import ps_quote
 from enclave_gateway.control.qga_client import QgaCommandError
 
 
+def wait_for_stopped_worker(control, spec, timeout_sec, expected_sha256):
+    """Confirm stopped telemetry and release of the same spool's worker lease."""
+    script = "$ErrorActionPreference='Stop';$spool=" + ps_quote(spec.appliance_spool_dir) + ";$expected=" + ps_quote(expected_sha256) + r'''
+$done=$false;$lease=$null
+try{
+ $path=Join-Path $spool 'worker_state.json';$session=Join-Path $spool '.worker-session'
+ foreach($item in $path,$session){
+  if([IO.File]::GetAttributes($item) -band [IO.FileAttributes]::ReparsePoint){throw 'Linked shutdown metadata'}
+ }
+ $file=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+ try{
+  if($file.Length -gt 65536){throw 'Invalid shutdown metadata'}
+  $reader=[IO.StreamReader]::new($file)
+  try{$state=$reader.ReadToEnd()|ConvertFrom-Json}finally{$reader.Dispose()}
+ }finally{$file.Dispose()}
+ if($state.status -ceq 'stopped' -and $state.execution_profile -ceq 'structured_only' -and
+    $state.structured_backend -ceq 'operator' -and $state.spool_protocol -ceq 'stream' -and
+    $state.worker_sha256 -ceq $expected -and $state.instance_id -cmatch '^[a-f0-9]{32}$'){
+  $lease=[IO.File]::Open($session,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+  $done=$true
+ }
+}catch{$done=$false}finally{if($lease){$lease.Dispose()}}
+Write-Output $done # EGW_WORKER_SHUTDOWN
+'''
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        try:
+            with read_only_preflight():
+                result = control.exec_powershell(script, timeout_sec=budget(min(5, deadline-time.monotonic()), 'worker.stop'))
+            if result.exit_code == 0 and result.stdout.strip() == 'True':
+                return
+        except (TimeoutError, OperationError) as error:
+            if isinstance(error, OperationError) and error.code != 'deadline_exceeded':
+                raise
+        time.sleep(max(0, min(1.0, deadline-time.monotonic())))
+    raise OperationError('worker_stop_pending', 'worker.stop', node='@bastion', indeterminate=True,
+                         message='Worker accepted stop, but stopped telemetry and lease release were not confirmed within the timeout. Allow redirected handles to close, then inspect status and stage cleanup before restarting.')
+
+
 def stream_worker_state(control, spec):
     """Newest fresh same-instance snapshot, including stopped snapshots.
 
@@ -61,7 +100,7 @@ def _structured_worker_state(control,path,spec):
             # Hold the same file open when reading the state and its timestamp.
             script="$ErrorActionPreference='Stop';$p="+ps_quote(path)+"""
 if([IO.File]::Exists($p)){
-    $file=[IO.File]::Open($p,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
+    $file=[IO.File]::Open($p,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
     try{
         if($file.Length -le 65536){
             $reader=[IO.StreamReader]::new($file)

@@ -57,7 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
     agents.add_argument('--persist-autostart',action='store_true',help='Opt-in HKCU Run persistence; requires endpoint policy approval and may be blocked by EDR.')
     agents.add_argument('--unregister-autostart',action='store_true',help='Remove the current worker user HKCU startup value before acknowledged stop.')
     agents.add_argument('--migrate-legacy-state',action='store_true',help='Approve one-time journal migration after stopping the old worker.')
-    agents.add_argument('--timeout',type=float,default=45,help='Stop request budget in seconds.')
+    agents.add_argument('--timeout',type=float,default=45,help='Stop budget in seconds, including operator shutdown and redirected-handle release.')
     agents.add_argument('--apply',action='store_true',help='Apply explicit reviewed --remove IDs; requires stopped lease-aware workers.')
     agents.add_argument('--remove',action='append',default=[],help='Exact bundle SHA-256 to remove; repeat as needed.')
     agents.add_argument('--keep',action='append',default=[],help='Additional bundle SHA-256 to retain.')
@@ -481,7 +481,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_provider.add_argument('--tx-id',default=None)
     p_verify = sub.add_parser('agent-verify',help='Verify fresh evidence from the running Bastion worker.')
     p_verify.add_argument('--wait-ready',type=float,default=None,metavar='SECONDS',
-                          help='Wait for startup before beginning the independent attestation (up to 120 seconds).')
+                          help='Wait for startup before beginning the independent attestation (up to 120 seconds; allow 60 seconds for cold RDPDR startup).')
     sub.add_parser("capabilities", help="Report local capabilities without contacting a live enclave.")
     p_tx = sub.add_parser("transactions", help="Retrieve durable results and request cancellation without replaying work.")
     p_tx.add_argument("action", choices=["get", "list", "cancel", "reconcile", "maintain"])

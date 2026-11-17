@@ -307,7 +307,7 @@ class AgentDeploymentTests(unittest.TestCase):
 
             with patch('enclave_gateway.worker_channel.require_running_worker', side_effect=[pending, {}]) as probe, \
                  patch.object(engine, 'attest_worker', side_effect=attest) as attestation:
-                self.assertEqual(engine.attest_when_ready(1), {'verified': True})
+                self.assertEqual(engine.attest_when_ready(2), {'verified': True})
             self.assertEqual(probe.call_count, 2)
             attestation.assert_called_once_with(timeout_sec=10.0)
 

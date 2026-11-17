@@ -7,7 +7,7 @@ security:
   enforce_worker_attestation: true
   agent_package_dir: './approved-agents'
   # Source adapter pin. Recompute after corporate signing or approved packaging.
-  worker_sha256: '51b8147c66bcb80d25f78dfbee2f952b132703af8d2b96535d8074203148d280'
+  worker_sha256: '9e74e6d3574be53610bdce46c4d8182036630fbf4455183219c97572bd25f046'
   worker_account: '' # Required for an unsigned operator adapter. Use the Windows SID.
   trusted_signers: []
 bastion:

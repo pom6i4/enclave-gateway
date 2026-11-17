@@ -34,9 +34,15 @@ def _request(source, size, *, extended=False):
     if not re.fullmatch(rb"[0-9a-f]{8}", size) or not 2 <= int(size, 16) <= MAX_HEADER:
         raise ValueError("Invalid operator request header length")
     request = json.loads(_read_exact(source, int(size, 16)))
+    operation = request.get('op') if isinstance(request, dict) else None
     fields = {"id", "command", "input_bytes", "output_limit", "timeout_ms"}
-    if extended:
+    if extended or operation == 'ssh_copy':
         fields.add("op")
+    maximum = 15_000
+    if operation == 'ssh_copy':
+        maximum = 45_000
+    elif extended and operation == 'ssh_exec':
+        maximum = 300_000
     if (
         not isinstance(request, dict)
         or set(request) != fields
@@ -51,7 +57,7 @@ def _request(source, size, *, extended=False):
         or type(request["output_limit"]) is not int
         or not 1 <= request["output_limit"] <= MAX_OUTPUT
         or type(request["timeout_ms"]) is not int
-        or not 1 <= request["timeout_ms"] <= (300_000 if extended and request["op"] == "ssh_exec" else 15_000)
+        or not 1 <= request["timeout_ms"] <= maximum
     ):
         raise ValueError("Invalid operator request")
     return request

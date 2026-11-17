@@ -49,7 +49,7 @@ class HeartbeatTests(unittest.TestCase):
         def dispatch(envelope, evidence, deadline, started, readiness, **options):
             expiry = readiness['_heartbeat_expires_unix']
             expiries.append(expiry)
-            self.assertEqual(expiry, wall[0] + spec.heartbeat_max_age_sec)
+            self.assertLessEqual(expiry, wall[0] + spec.heartbeat_max_age_sec)
             self.assertEqual(readiness['age_sec'], -2.0)
             action = envelope['copy_action']
             attachment = options['attachment']
@@ -68,7 +68,7 @@ class HeartbeatTests(unittest.TestCase):
                 digest = executor.copy_chunked('push', TargetNodeSpec('app01', '10.0.0.10'),
                                                source, '/tmp/artifact.bin', timeout_sec=120, as_root=False)
             self.assertEqual(digest, hashlib.sha256(source.read_bytes()).hexdigest())
-        self.assertEqual(len(stamps), 5)
+        self.assertEqual(len(stamps), 2)
         self.assertGreater(stamps[-1], expiries[0])
 
     def test_snapshot_clock_skew_boundaries_and_invalid_ages(self):
@@ -271,6 +271,29 @@ function Invoke-FixtureReplace($Temporary,$Destination){
 try{Write-Atomic $path 'running' -Transient;throw 'Linked target was accepted'}
 catch{if($_.Exception.Message -ne 'Linked worker paths are forbidden'){throw}}
 if([IO.File]::ReadAllText($sentinel) -cne 'preserve'){throw 'Link target was changed'}
+if(@(Get-ChildItem $PSScriptRoot -Filter '*.tmp').Count){throw 'Temporary publication leaked'}
+'''
+            self.run_script(script, directory)
+
+    def test_transient_state_can_be_rewritten_when_a_reader_blocks_delete(self):
+        source = WORKER.read_text()
+        guard = source[source.index('function Assert-PlainPath'):source.index('function Hash-File')]
+        atomic = source[source.index('function Write-Atomic'):source.index('function Assert-Signature')]
+        atomic = atomic.replace('[IO.File]::Replace($temporary,$Path,[NullString]::Value)',
+                                'Invoke-FixtureReplace')
+        atomic = atomic.replace('[IO.File]::Delete($Path)', 'Invoke-FixtureDelete')
+        with tempfile.TemporaryDirectory() as directory:
+            script = guard + atomic + r'''
+function Invoke-FixtureReplace {throw [IO.IOException]::new('RDP replacement blocked')}
+function Invoke-FixtureDelete {$script:deletes++;throw [UnauthorizedAccessException]::new('Reader denies delete')}
+function Start-Sleep([int]$Milliseconds){$script:pauses+=@($Milliseconds)}
+$script:deletes=0;$script:pauses=@()
+$path=Join-Path $PSScriptRoot 'worker_state.json'
+[IO.File]::WriteAllText($path,'running with an old longer state')
+$reader=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
+try{Write-Atomic $path 'stopped' -Transient}finally{$reader.Dispose()}
+if([IO.File]::ReadAllText($path) -cne 'stopped'){throw 'Stopped state was not published'}
+if($deletes -ne 10 -or ($pauses -join ',') -cne '100,200,250,250,250,250,250,250,250'){throw 'Retry backoff is not bounded'}
 if(@(Get-ChildItem $PSScriptRoot -Filter '*.tmp').Count){throw 'Temporary publication leaked'}
 '''
             self.run_script(script, directory)

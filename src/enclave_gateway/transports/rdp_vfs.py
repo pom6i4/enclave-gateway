@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+import contextvars
+from contextlib import contextmanager
 import hashlib
 import json
 import secrets
@@ -315,6 +317,17 @@ class RdpVfsTransport:
         self._verified_until=0.0
         self._ready_condition=threading.Condition()
         self._ready_wave=None
+        self._copy_session=contextvars.ContextVar('egw_chunked_copy', default=None)
+
+    @contextmanager
+    def chunked_copy_session(self, evidence):
+        session={'evidence':evidence, 'verified_until':time.monotonic()+30,
+                 'readiness':None, 'ready_until':0, 'invalid':False}
+        token=self._copy_session.set(session)
+        try:
+            yield
+        finally:
+            self._copy_session.reset(token)
 
     def require_worker(self):
         if not self.spec.enabled:
@@ -328,6 +341,20 @@ class RdpVfsTransport:
                                  message='TCP mux and Host SSH ProxyCommand are unavailable in structured_only. Use exec/cp/sync for approved TargetNodes; no legacy fallback is permitted.')
 
     def _check_readiness(self, guard):
+        session=self._copy_session.get()
+        if session is not None:
+            state=session['readiness']
+            expiry=state.get('_heartbeat_expires_unix') if isinstance(state,dict) else None
+            if (time.monotonic()<session['ready_until'] and type(expiry) in (int,float)
+                    and 0<expiry-time.time()<=self.spec.heartbeat_max_age_sec):
+                return state
+        result=self._read_fresh_readiness(guard)
+        if session is not None:
+            session['readiness']=result
+            session['ready_until']=time.monotonic()+15
+        return result
+
+    def _read_fresh_readiness(self, guard):
         # Share only a check that was already in flight when this call arrived.
         # The absolute heartbeat expiry is rechecked by each waiter. There is no
         # completed-result cache, and attestation/authorization are independent.
@@ -358,7 +385,7 @@ class RdpVfsTransport:
             with self._ready_condition:
                 wave.update(done=True,expires=expiry,state=result);self._ready_condition.notify_all()
 
-    def _verify_dispatch(self,op):
+    def _verify_dispatch(self,op,*,force=False):
         guard=getattr(self,'attestation_guard',None)
         if not guard or op=='attest': return None
         context=current()
@@ -370,10 +397,21 @@ class RdpVfsTransport:
             if self._attestation_lock.acquire(timeout=min(0.1,remaining)): break
         try:
             if context and getattr(context,'worker_invalidated',False): raise OperationError('agent_instance_changed','attestation',indeterminate=True)
-            if context and getattr(context,'worker_evidence',None): return context.worker_evidence
-            if context is None and self._verified_worker and time.monotonic()<self._verified_until: return self._verified_worker
+            session=self._copy_session.get()
+            if session is not None:
+                if session['invalid']:raise OperationError('agent_instance_changed','attestation',indeterminate=True)
+                if not force and time.monotonic()<session['verified_until']:return session['evidence']
+            elif not force:
+                if context and getattr(context,'worker_evidence',None): return context.worker_evidence
+                if context is None and self._verified_worker and time.monotonic()<self._verified_until: return self._verified_worker
             evidence=guard()
             if not isinstance(evidence,dict) or not evidence.get('verified'): raise OperationError('agent_attestation_failed','attestation')
+            if session is not None:
+                previous=session['evidence']
+                if (previous['instance_id'],previous['loaded_sha256'])!=(evidence['instance_id'],evidence['loaded_sha256']):
+                    session['invalid']=True
+                    raise OperationError('agent_instance_changed','attestation',indeterminate=True)
+                session.update(evidence=evidence,verified_until=time.monotonic()+30)
             self._verified_worker=evidence; self._verified_until=time.monotonic()+2
             if context: context.worker_evidence=evidence
             return evidence
@@ -386,6 +424,8 @@ class RdpVfsTransport:
             if not isinstance(response,dict): response={}
             if response.get('worker_instance')!=evidence['instance_id'] or response.get('worker_sha256')!=evidence['loaded_sha256']:
                 self._verified_worker=None;self._verified_until=0
+                session=self._copy_session.get()
+                if session is not None:session['invalid']=True
                 if current(): current().worker_invalidated=True
                 raise OperationError('agent_instance_changed','vfs.response',tx_id=current().tx_id if current() else tx_id,indeterminate=True)
         if self.spec.structured_backend == "operator" and not current():
@@ -478,6 +518,11 @@ class RdpVfsTransport:
         ):
             raise OperationError("agent_attestation_failed", "vfs.publish",
                                  message="The attested worker does not support chunked Stream copy slots.")
+        if envelope.get('op')=='ssh_copy' and envelope['timeout_ms']>15000:
+            maximum=(evidence or {}).get('operator_copy_max_sec',15)
+            if type(maximum) is not int or not envelope['timeout_ms']<=maximum*1000<=45000:
+                raise OperationError('operator_copy_capability_missing','attestation',
+                                     message='Deploy the matching operator adapter and Linux helper before using the extended copy budget.')
         if attachment is not None and (
             not operator or self.spec.spool_protocol != "stream"
             or not evidence or evidence.get("stream_upload_v1") is not True
@@ -646,7 +691,7 @@ exit 124
         root = self.spec.appliance_spool_dir.rstrip("\\/")
         req = root + "\\ipc_req_" + info["instance"] + ".bin"
         limit = MAX_STREAM if envelope.get("op") in ("stop", "attest") else MAX_STREAM-CONTROL_RESERVE
-        if self.spec.structured_backend == "operator" and envelope["op"] == "ssh_exec":
+        if self.spec.structured_backend == "operator" and envelope["op"] in ('ssh_exec','ssh_copy'):
             remaining = deadline - time.monotonic()
             if remaining < .001:
                 raise OperationError("deadline_exceeded", "vfs.publish")
@@ -661,6 +706,9 @@ exit 124
             with self.control.stream_slot_lock(slot, remaining):
                 with timed("vfs.upload_slot"):
                     self.control.stream_fill_slot(slot, attachment)
+                remaining=deadline-time.monotonic()
+                if remaining<.001:raise OperationError('deadline_exceeded','vfs.publish')
+                envelope['timeout_ms']=min(envelope['timeout_ms'],int(remaining*1000))
                 frame = encode_frame({**envelope, "upload_slot_bytes": len(attachment)})
                 result = self._exchange_stream(req, frame, limit, envelope, info, deadline, started)
                 if not result.exit_code and result.stdout.strip() == "PART:" + envelope["sha256"]:

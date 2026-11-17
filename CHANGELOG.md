@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Allow deletion sharing in structured readiness snapshots. Retry transient
+  publication with bounded backoff and rewrite transient state in place when a
+  reader blocks replacement. Durable transaction records keep atomic publication.
+- Wait for stopped operator telemetry and worker-lease release after stop
+  acknowledgement. Report pending shutdown when the total stop budget expires.
+- Negotiate 45-second chunked-copy steps with the matching adapter and Linux
+  helper. Between steps, cache readiness for up to 15 seconds and attestation for
+  30 seconds, retaining identity checks and the total deadline. Refresh Pulse
+  while waiting on a long copy operation.
+- Preserve successful QGA clock synchronization through Appliance initialization.
+  Recommend a 60-second readiness window for cold RDPDR startup and poll once per
+  second while waiting.
 - Recognize Windows OWNER RIGHTS and inherit-only CREATOR OWNER policy ACLs
   when the owner is approved. Reject third-party directory and file writers
   during both policy installation and subsequent adapter copies.
@@ -17,7 +29,7 @@
 - Select native system OpenSSH from both 32-bit and 64-bit CMD consoles.
 - Explain password-based sudo through `--secret-env` and `sudo -S` over stdin.
 - Source adapter SHA-256 for `security.worker_sha256` is
-  `51b8147c66bcb80d25f78dfbee2f952b132703af8d2b96535d8074203148d280`.
+  `9e74e6d3574be53610bdce46c4d8182036630fbf4455183219c97572bd25f046`.
   Recompute the deployment pin after signing the approved adapter.
 
 ## 0.3.0 Beta 6

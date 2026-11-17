@@ -24,6 +24,7 @@ $operatorCancelled=[Collections.Generic.HashSet[string]]::new([StringComparer]::
 $extendedOperator=$OperatorOpenSsh -and $OperatorExecMaxSec -gt 15
 if($OperatorExecMaxSec -gt 15 -and (-not $OperatorOpenSsh -or $OperatorExecMaxSec -gt $LeaseSeconds)){throw 'Extended operator execution must fit the worker lease'}
 $operatorExecInProgress=$false
+$operatorCopyInProgress=$false
 $backend=if($OperatorOpenSsh){'operator'}else{'spawn'}
 $model=if($OperatorOpenSsh){'operator-openssh'}else{'foreground-openssh'}
 if($env:OS -ne 'Windows_NT'){throw 'The structured worker requires Windows system OpenSSH'}
@@ -157,18 +158,28 @@ function Write-Atomic([string]$Path,[string]$Text,[switch]$Transient){
             if(-not $Transient -or ($cause -isnot [IO.IOException] -and $cause -isnot [UnauthorizedAccessException])){throw}
             # RDPDR can reject ReplaceFileW. Only disposable telemetry may have
             # a publication gap; durable transaction records keep atomic replace.
-            for($attempt=0;$attempt -lt 5;$attempt++){
+            $published=$false
+            for($attempt=0;$attempt -lt 10;$attempt++){
                 Assert-PlainPath $Path
                 Assert-PlainPath $temporary
                 try{
                     [IO.File]::Delete($Path)
                     [IO.File]::Move($temporary,$Path)
+                    $published=$true
                     break
                 }catch{
                     $cause=$_.Exception;while($cause.InnerException){$cause=$cause.InnerException}
-                    if($attempt -eq 4 -or ($cause -isnot [IO.IOException] -and $cause -isnot [UnauthorizedAccessException])){throw}
-                    Start-Sleep -Milliseconds 25
+                    if($cause -isnot [IO.IOException] -and $cause -isnot [UnauthorizedAccessException]){throw}
+                    if($attempt -lt 9){Start-Sleep -Milliseconds ([int][Math]::Min(250,100*[Math]::Pow(2,$attempt)))}
                 }
+            }
+            if(-not $published){
+                # A reader without delete sharing can block rename and unlink.
+                # Readers treat incomplete transient JSON as unavailable.
+                Assert-PlainPath $Path
+                $file=[IO.File]::Open($Path,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::Write,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+                try{$file.SetLength(0);$file.Write($bytes,0,$bytes.Length);$file.Flush()}finally{$file.Dispose()}
+                [IO.File]::Delete($temporary)
             }
         }
         $pending=$false
@@ -196,7 +207,7 @@ function Wait-OperatorIO($Task,[long]$Deadline,[string]$Id,[int]$LocalDrainMs=0)
         # filesystem maintenance must not consume it.
         if($Deadline-$requestTimer.ElapsedMilliseconds -gt $LocalDrainMs){
             if($Id){Receive-OperatorFrames}
-            if($operatorExecInProgress -and $Deadline-$requestTimer.ElapsedMilliseconds -gt $LocalDrainMs -and
+            if(($operatorExecInProgress -or $operatorCopyInProgress) -and $Deadline-$requestTimer.ElapsedMilliseconds -gt $LocalDrainMs -and
                $started.ElapsedMilliseconds-$script:lastPulse -ge 5000){Pulse}
         }
     }while($true)
@@ -369,7 +380,7 @@ function Invoke-OperatorSsh([string]$Remote,[string]$InputFile,[string]$InputTex
         $peerBudget-=2*$reserve
     }
     $fields=@{id=$Id;command=$Remote;input_bytes=$inputBytes;output_limit=$outputLimit;timeout_ms=$peerBudget}
-    if($extendedOperator){$fields.op=$Operation}
+    if($extendedOperator -or $Operation -eq 'ssh_copy'){$fields.op=$Operation}
     $header=[Text.Encoding]::UTF8.GetBytes(($fields|ConvertTo-Json -Compress))
     if($header.Length -gt 2097152 -or $inputBytes -gt 67108864){throw 'Operator SSH input limit exceeded'}
     # Once pipe writing begins, a broken pipe or timeout has an unknown outcome.
@@ -787,7 +798,9 @@ try{
                 if($request.expires_unix_ms -isnot [int] -and $request.expires_unix_ms -isnot [long]){throw 'Invalid request expiry'}
                 $remaining=[double]$request.expires_unix_ms-[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
                 $operatorExecInProgress=$extendedOperator -and $request.op -ceq 'ssh_exec'
+                $operatorCopyInProgress=$OperatorOpenSsh -and $request.op -ceq 'ssh_copy'
                 $limit=if($operatorExecInProgress){[Math]::Min($request.timeout_ms,$OperatorExecMaxSec*1000)}
+                       elseif($OperatorOpenSsh -and $request.op -ceq 'ssh_copy'){[Math]::Min($request.timeout_ms,45000)}
                        elseif($OperatorOpenSsh){[Math]::Min($request.timeout_ms,15000)}else{$request.timeout_ms}
                 if($OperatorOpenSsh){
                     # UTC expiry can reject stale frames, but a slow Bastion
@@ -832,7 +845,7 @@ try{
                         $evidence=@{protocol_revision=1;version='0.3.0';nonce=$request.attestation_nonce;instance_id=$instance;loaded_sha256=$loadedHash;
                             current_sha256=(Hash-File $PSCommandPath);loaded_signature_status=$signatureStatus;loaded_signer=$signer;
                             signature_status=$freshStatus;signer=$freshSigner;sid=$sid;execution_model=$model;
-                            execution_profile='structured_only';policy_sha256=$PolicySha256;stream_upload_v1=[bool]$OperatorOpenSsh;stream_upload_deflate_v1=[bool]$OperatorOpenSsh;chunked_copy_v1=[bool]$OperatorOpenSsh;chunked_copy_slots_v1=[bool]$OperatorOpenSsh}
+                            execution_profile='structured_only';policy_sha256=$PolicySha256;stream_upload_v1=[bool]$OperatorOpenSsh;stream_upload_deflate_v1=[bool]$OperatorOpenSsh;chunked_copy_v1=[bool]$OperatorOpenSsh;chunked_copy_slots_v1=[bool]$OperatorOpenSsh;operator_copy_max_sec=$(if($OperatorOpenSsh){45}else{15})}
                         if($extendedOperator){$evidence.operator_exec_max_sec=$OperatorExecMaxSec}
                         $out=$evidence|ConvertTo-Json -Compress
                     }
@@ -909,7 +922,7 @@ try{
                 $state=if($dispatched){'indeterminate'}else{'failed'}
                 if($claimed){$recordData.state=$state;$recordData.failure_stage=$phase;$recordData.error_type=$_.Exception.GetType().FullName;Write-Atomic $record ($recordData|ConvertTo-Json -Compress)}
                 Response $id 125 '' ('Structured operation failed at '+$phase+' ('+$_.Exception.GetType().Name+'); inspect approved policy and reconcile durable outcomes before retrying') $state
-            }finally{$operatorExecInProgress=$false;if($path){[IO.File]::Delete($path)};if($OperatorOpenSsh){[void]$operatorCancelled.Remove($id)}}
+            }finally{$operatorExecInProgress=$false;$operatorCopyInProgress=$false;if($path){[IO.File]::Delete($path)};if($OperatorOpenSsh){[void]$operatorCancelled.Remove($id)}}
             if($operatorBroken){return}
         }
         if($OperatorOpenSsh){

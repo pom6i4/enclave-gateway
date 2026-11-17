@@ -248,11 +248,20 @@ class EnclaveEngine:
     @tracked('stop_worker')
     def stop_worker(self, *, actor='cli', timeout_sec=45, unregister_autostart=False):
         if not self.config.bastion.enabled:raise ValueError('Bastion is disabled')
+        started=time.monotonic()
         result=self._scrub_result(self.rdp_vfs.exec_bastion('',op='stop',timeout_sec=timeout_sec,extra_fields={'unregister_autostart':True} if unregister_autostart else None))
         self._worker_ready_at=0
         expected='WORKER_STOP_ACCEPTED;AUTOSTART_UNREGISTERED' if unregister_autostart else 'WORKER_STOP_ACCEPTED'
         if result.exit_code==0 and result.stdout!=expected:
             raise OperationError('worker_stop_unsupported','worker.stop',message='Worker did not acknowledge the requested stop/autostart removal. Upgrade the worker; check its HKCU Run entry before considering decommission complete.')
+        if result.exit_code==0 and self.config.bastion.structured_backend=='operator':
+            from enclave_gateway.worker_channel import wait_for_stopped_worker
+            self.rdp_vfs._verified_worker=None
+            self.rdp_vfs._verified_until=0
+            wait_for_stopped_worker(self.control, self.config.bastion,
+                                    max(0, timeout_sec-(time.monotonic()-started)),
+                                    self.config.security.worker_sha256)
+            result.duration_ms=int((time.monotonic()-started)*1000)
         return result
 
     def status(self) -> dict[str, Any]:
@@ -467,8 +476,7 @@ ConvertTo-Json $out -Compress -Depth 8
                     options['policy_source'] = policy_source
                 deployment = self.stage_agents(**options)
         sync_fn = getattr(self.control, "sync_guest_clock", None)
-        if callable(sync_fn):
-            sync_fn()
+        clock_synced = callable(sync_fn) and sync_fn() is True
 
         agents_dir = Path(__file__).resolve().parent / "agents"
         init_script = (agents_dir / "appliance_init.ps1").read_text(encoding="utf-8")
@@ -482,7 +490,7 @@ ConvertTo-Json $out -Compress -Depth 8
         if update_credentials and domain_user and password:
             self._refresh_rdp_credentials(domain_user,password)
 
-        host_epoch_ms = time.time_ns() // 1_000_000
+        host_epoch_ms = 0 if clock_synced else time.time_ns() // 1_000_000
         routes_csv = ",".join(self.config.provider.routes)
         dns_csv = ",".join(self.config.provider.dns_servers)
 
@@ -1615,7 +1623,7 @@ Write-Output 'BASTION_CLEAN_OK'
                         raise
                 except TimeoutError:
                     pass
-                time.sleep(max(0, min(0.5, deadline - time.monotonic())))
+                time.sleep(max(0, min(1.0, deadline - time.monotonic())))
         raise OperationError('session_pending_worker', 'vfs.preflight', node='@bastion',
                              message='SESSION_PENDING_WORKER: readiness wait expired. Check RDP redirection and start the approved worker in the Bastion session.')
 

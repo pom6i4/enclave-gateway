@@ -153,17 +153,22 @@ class StructuredSshExecutor(SshHopExecutor):
             raise ValueError("Chunked copy direction must be push or pull")
         if not remote_path.startswith("/") or remote_path.endswith("/") or any(c in remote_path for c in "\r\n\0"):
             raise ValueError("Chunked copy requires an absolute remote file path")
-        evidence = self.transport._verify_dispatch("ssh_copy")
-        if not evidence or evidence.get("chunked_copy_slots_v1") is not True:
-            raise OperationError("chunked_copy_unavailable", "attestation",
-                                 message="Start an approved signed operator worker that supports chunked copy.")
-        copy = self._push_chunked if direction == "push" else self._pull_chunked
-        return copy(local_path, node, remote_path, timeout_sec, as_root)
+        with limit_deadline(timeout_sec):
+            evidence = self.transport._verify_dispatch("ssh_copy",force=True)
+            if not evidence or evidence.get("chunked_copy_slots_v1") is not True:
+                raise OperationError("chunked_copy_unavailable", "attestation",
+                                     message="Start an approved signed operator worker that supports chunked copy.")
+            step_timeout=evidence.get('operator_copy_max_sec',15)
+            if type(step_timeout) is not int or not 15<=step_timeout<=45:
+                raise OperationError('agent_attestation_failed','attestation',message='Invalid operator copy timeout capability.')
+            copy = self._push_chunked if direction == "push" else self._pull_chunked
+            with self.transport.chunked_copy_session(evidence):
+                return copy(local_path, node, remote_path, timeout_sec, as_root, step_timeout)
 
-    def _copy_step(self, node, remote_path, timeout_sec, as_root, action, token, **fields):
-        with limit_deadline(min(timeout_sec, 15.0)):
+    def _copy_step(self, node, remote_path, timeout_sec, as_root, action, token, *, step_timeout=15, **fields):
+        with limit_deadline(min(timeout_sec, step_timeout)):
             result = self.transport.request(
-                "ssh_copy", min(timeout_sec, 15.0), target=node.name, remote_path=remote_path,
+                "ssh_copy", min(timeout_sec, step_timeout), target=node.name, remote_path=remote_path,
                 as_root=as_root, transfer_id=token, copy_action=action, **self._identity(node), **fields,
             )
             checkpoint("ssh." + action)
@@ -175,7 +180,7 @@ class StructuredSshExecutor(SshHopExecutor):
             )
         return result.stdout.strip()
 
-    def _push_chunked(self, source, node, remote_path, timeout_sec, as_root):
+    def _push_chunked(self, source, node, remote_path, timeout_sec, as_root, step_timeout):
         if not source.is_file():
             raise FileNotFoundError(f"Local file not found: {source}")
         token = secrets.token_hex(16)
@@ -194,7 +199,7 @@ class StructuredSshExecutor(SshHopExecutor):
                 digest.update(part)
                 part_hash = hashlib.sha256(part).hexdigest()
                 reply = self._copy_step(node, remote_path, timeout_sec, as_root, "push_part", token,
-                                        copy_offset=offset, copy_length=count, sha256=part_hash, attachment=part or None)
+                                        step_timeout=step_timeout, copy_offset=offset, copy_length=count, sha256=part_hash, attachment=part or None)
                 if reply != f"PART:{part_hash}":
                     raise OperationError("structured_transfer_failed", "ssh.push_part", indeterminate=True,
                                          message=f"Upload block receipt is invalid ({token}). Reconcile before retrying.")
@@ -204,14 +209,14 @@ class StructuredSshExecutor(SshHopExecutor):
                 raise ValueError("Upload source changed during chunked copy")
         expected = digest.hexdigest()
         reply = self._copy_step(node, remote_path, timeout_sec, as_root, "push_commit", token,
-                                copy_offset=size, sha256=expected)
+                                step_timeout=step_timeout, copy_offset=size, sha256=expected)
         if reply != f"VERIFIED:{expected}":
             raise OperationError("structured_transfer_failed", "ssh.push_commit", indeterminate=True,
                                  message=f"Upload commit receipt is invalid ({token}). Reconcile before retrying.")
         return expected
 
-    def _pull_chunked(self, destination, node, remote_path, timeout_sec, as_root):
-        info = self._copy_step(node, remote_path, timeout_sec, as_root, "pull_info", secrets.token_hex(16))
+    def _pull_chunked(self, destination, node, remote_path, timeout_sec, as_root, step_timeout):
+        info = self._copy_step(node, remote_path, timeout_sec, as_root, "pull_info", secrets.token_hex(16), step_timeout=step_timeout)
         metadata = re.fullmatch(r"FILE:([0-9]{1,9}):([a-f0-9]{64})", info)
         if metadata is None:
             raise ValueError("Invalid chunked download metadata")
@@ -229,7 +234,7 @@ class StructuredSshExecutor(SshHopExecutor):
                     count = min(DOWNLOAD_PART_BYTES, size - offset)
                     part = bytearray()
                     reply = self._copy_step(node, remote_path, timeout_sec, as_root, "pull_part", token,
-                                            copy_offset=offset, copy_length=count, download=part)
+                                            step_timeout=step_timeout, copy_offset=offset, copy_length=count, download=part)
                     checkpoint("ssh.pull_part")
                     if len(part) != count or not reply.startswith("SHA256:"):
                         raise ValueError("Download block checksum or length mismatch")

@@ -114,11 +114,11 @@ shared 90-second startup window, bounded by the remaining worker lease.
 When the worker is ready, use the regular CLI:
 
 ```sh
-egw agent-verify --wait-ready 35
+egw agent-verify --wait-ready 60
 egw exec app01 'uname -s' --timeout 15
 egw cp ./artifact.bin app01:/tmp/artifact.bin --timeout 15
 egw cp app01:/tmp/artifact.bin ./received.bin --timeout 15
-egw agents stop --timeout 15
+egw agents stop --timeout 60
 ```
 
 For the `operator` backend, `egw agents stage` and `egw clean` can reclaim
@@ -275,9 +275,14 @@ can leave the slot occupied. Reconcile the transaction and start a new worker
 before uploading again. The Host consumes the hashed metadata and download bytes through a single read
 handle on the pre-opened response slot (`ipc_res_<instance>_<slot>.bin`). It
 verifies the bytes before erasing the response.
-The 15-second per-request limit and 10-second attestation limit still apply. For
-`--chunked`, `--timeout` budgets the whole copy. The foreground lease must
-also cover the copy. The extended command budget applies only to `exec`.
+Updated adapters attest `operator_copy_max_sec: 45`; deploy the matching
+`operator_target.py` to enable 45-second chunked-copy steps. Older adapters retain
+15-second steps. Fresh attestation has a 10-second limit. Before each copy step,
+readiness can be reused for up to 15 seconds within heartbeat expiry, and
+attestation older than 30 seconds is renewed. Replies remain bound to the verified
+instance and hash. `--timeout` budgets the whole copy, including these checks.
+The foreground lease must also cover the copy. The separate extended command
+budget applies to `exec`.
 
 The receiver publishes the destination atomically after verifying the whole
 file's SHA-256. A failed upload can leave a private directory named

@@ -826,13 +826,13 @@ Choose how to trust the adapter:
    The launcher selects `Sysnative` when CMD is a 32-bit process on 64-bit Windows.
 
 ```sh
-egw agent-verify --wait-ready 35
+egw agent-verify --wait-ready 60
 egw exec app01 'uname -s' --timeout 15
 egw cp ./hello.txt app01:/tmp/hello.txt --timeout 15
 egw cp app01:/tmp/hello.txt ./hello-returned.txt --timeout 15
 ```
 
-Allow 35 seconds for the first readiness check after attaching OpenSSH.
+Allow 60 seconds for the first readiness check after attaching OpenSSH.
 Attestation then has its own budget of up to 10 seconds.
 Ordinary `exec` and `cp` have a 15 s overall limit, including fresh attestation.
 This profile has no interactive SSH or TCP proxy. The adapter exits if OpenSSH
@@ -842,6 +842,9 @@ The lease defaults to eight hours. `bastion.lease_seconds` accepts
 60–86,400 seconds. On a managed Windows Appliance, `egw heal` applies the
 IPv4 `appliance.mtu` (default 1200) and disables RDP over UDP. `egw doctor`
 reports the configured value and compares it with the managed adapter MTUs.
+When QGA clock synchronization succeeds, `heal` leaves that time in place during
+PowerShell initialization. The timestamp-based `Set-Date` fallback is used only
+when QGA synchronization is unavailable or fails.
 For the foreground operator, `heal` observes the session and leaves the
 existing bundle in place. Use `egw heal --policy-source ./worker-policy.json`
 to explicitly stage the approved policy and worker.
@@ -878,14 +881,29 @@ for the password, so use it for commands that do not consume additional stdin.
 
 For files up to 512 MiB, use chunked copy after `egw agent-verify` reports
 `chunked_copy_slots_v1: true`. It transfers 1 MiB blocks, verifies SHA-256 on each
-block and publishes the destination after verifying the whole file. Each
-request is limited to 15 s. `--timeout` sets the total copy budget. Allow enough
+block and publishes the destination after verifying the whole file. Deploy the
+matching adapter and `operator_target.py` on Linux for the attested
+`operator_copy_max_sec: 45` capability. Each step then has a 45 s budget including
+preflight, attestation and delivery. Older adapters retain their 15 s step budget.
+`--timeout` sets the total copy budget. Allow enough
 time on the foreground lease to finish and stop the worker.
 
 ```sh
 egw cp --chunked --timeout 900 ./artifact.bin app01:/tmp/artifact.bin
 egw cp --chunked --timeout 900 app01:/tmp/artifact.bin ./received.bin
-egw agents stop --timeout 15
+egw agents stop --timeout 60
 ```
+
+Before each chunked-copy step, readiness may be reused for up to 15 seconds,
+bounded by the heartbeat's absolute expiry. Attestation older than 30 seconds is
+renewed before dispatch. Each reply must match the verified instance and adapter hash.
+A changed instance ends the transfer for reconciliation. These caches end with
+the copy and do not extend the overall timeout.
+
+For the operator backend, `agents stop` waits for `stopped` telemetry and release
+of the worker session lease after acknowledgement. Redirected handles can take
+more than 20 seconds to close. If its timeout expires first, the command reports
+`worker_stop_pending`. Preserve the journal and allow shutdown to finish before
+staging or restarting.
 
 [Deployment and recovery](ENDPOINT-POLICY.md#larger-files-with-the-operator-backend)

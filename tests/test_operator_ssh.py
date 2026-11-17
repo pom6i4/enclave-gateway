@@ -259,11 +259,11 @@ class OperatorPeerTests(unittest.TestCase):
             self.assertNotEqual(self.process.wait(timeout=3), 0)
             self.assertFalse(marker.exists())
 
-    def test_extended_protocol_raises_only_the_exec_budget(self):
+    def test_extended_protocol_bounds_exec_and_chunked_copy_budgets(self):
         from io import BytesIO
 
         for operation, maximum in (("ssh_exec", 300000), ("ssh_push", 15000),
-                                   ("ssh_pull", 15000), ("ssh_copy", 15000)):
+                                   ("ssh_pull", 15000), ("ssh_copy", 45000)):
             with self.subTest(operation=operation):
                 fields = {"id": "fixture_id", "op": operation, "command": "true",
                           "input_bytes": 0, "output_limit": 1, "timeout_ms": maximum}
@@ -654,6 +654,9 @@ class OperatorWorkerTests(unittest.TestCase):
     def test_extended_exec_and_timeout_keep_the_same_worker(self):
         self._exercise_worker(disconnect=False, extended=True)
 
+    def test_chunked_copy_survives_a_step_longer_than_fifteen_seconds(self):
+        self._exercise_worker(disconnect=False, slow_copy=True)
+
     def test_completed_pipe_reply_survives_a_slow_redirected_poll(self):
         script = WORKER.read_text()
         start = script.index("function Operator-Remaining")
@@ -664,6 +667,7 @@ class OperatorWorkerTests(unittest.TestCase):
                 "$ErrorActionPreference='Stop'\n" + script[start:end] + """
 $operatorCancelled=[Collections.Generic.HashSet[string]]::new()
 $operatorExecInProgress=$false
+$operatorCopyInProgress=$false
 $LeaseSeconds=60
 function Receive-OperatorFrames {
     $script:redirectedPolls++
@@ -680,12 +684,19 @@ $requestTimer.Restart()
 $task=[Threading.Tasks.Task]::Delay(200)
 Wait-OperatorIO $task 400 'fixture' 400
 if($redirectedPolls -ne 0 -or -not $task.IsCompletedSuccessfully){throw 'Reply drain touched the redirected drive'}
+$operatorCopyInProgress=$true
+$script:lastPulse=-5000;$script:pulses=0
+function Pulse {$script:pulses++;$script:lastPulse=$started.ElapsedMilliseconds}
+function Receive-OperatorFrames {}
+$requestTimer.Restart()
+Wait-OperatorIO ([Threading.Tasks.Task]::Delay(250)) 800 'fixture'
+if($pulses -ne 1){throw 'Long copy did not refresh heartbeat while waiting on the peer'}
 """, encoding="utf-8")
             result = subprocess.run([os.environ["EGW_TEST_POWERSHELL"], "-NoProfile", "-File", str(fixture)],
                                     capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def _exercise_worker(self, *, disconnect, corrupt_upload=False, chunked=False, unsigned=False, foreign_writer=False, extended=False):
+    def _exercise_worker(self, *, disconnect, corrupt_upload=False, chunked=False, unsigned=False, foreign_writer=False, extended=False, slow_copy=False):
         import socket
         import time
         from enclave_gateway import cli
@@ -786,8 +797,23 @@ function Get-Acl {
                     else:
                         self.fail((root/"worker.log").read_text())
                     peers.append(peer)
+                peer_path=Path(operator_target.__file__)
+                if slow_copy:
+                    peer_path=root/'slow_peer.py'
+                    peer_path.write_text(
+                        'import sys,time\n'
+                        f'sys.path.insert(0,{str(Path(operator_target.__file__).parent)!r})\n'
+                        'import operator_target\n'
+                        'original=operator_target._execute\ndelayed=False\n'
+                        'def execute(command,payload,*args,**kwargs):\n'
+                        ' global delayed\n'
+                        ' if not delayed and payload and ".parts" in command:\n'
+                        '  delayed=True\n  time.sleep(16)\n'
+                        ' return original(command,payload,*args,**kwargs)\n'
+                        'operator_target._execute=execute\n'
+                        'operator_target.serve(sys.stdin.buffer,sys.stdout.buffer)\n')
                 server = subprocess.Popen(
-                    [sys.executable, str(Path(operator_target.__file__))], stdin=peers[0], stdout=peers[1],
+                    [sys.executable, str(peer_path)], stdin=peers[0], stdout=peers[1],
                     stderr=log, env={**os.environ, "SSH_ORIGINAL_COMMAND": "egw-operator-v2" if extended else "egw-operator-v1"},
                 )
                 stack.callback(stop_process, server)
@@ -815,6 +841,13 @@ function Get-Acl {
                 published_budgets = []
 
                 class StreamOnlyUploadControl(DirectHostControlChannel):
+                    def exec_powershell(self, script, timeout_sec=120):
+                        if 'EGW_WORKER_SHUTDOWN' in script:
+                            from test_operational_ux import LocalPowerShellControl
+                            script=script.replace(r'C:\spool',str(root/'spool'))
+                            return LocalPowerShellControl(os.environ['EGW_TEST_POWERSHELL']).exec_powershell(script,timeout_sec)
+                        return super().exec_powershell(script,timeout_sec)
+
                     def write_file(self, *args, **kwargs):
                         raise AssertionError("The upload must use the attested Stream path")
 
@@ -885,6 +918,7 @@ function Get-Acl {
                 self.assertTrue(evidence["stream_upload_deflate_v1"])
                 self.assertTrue(evidence["chunked_copy_v1"])
                 self.assertTrue(evidence["chunked_copy_slots_v1"])
+                self.assertEqual(evidence['operator_copy_max_sec'],45)
                 if extended:
                     self.assertEqual(evidence["operator_exec_max_sec"], 60)
                     self.assertIn("after-fifteen", invoke("exec", "app01", "sleep 16; printf after-fifteen", "--timeout", "25")[0])
@@ -916,6 +950,12 @@ function Get-Acl {
                     upload.write_bytes(b"test" * (256 * 1024))
                     invoke("cp", str(upload), remote_spec, "--timeout", "15")
                     self.assertEqual(remote.read_bytes(), upload.read_bytes())
+                if slow_copy:
+                    started_copy=time.monotonic()
+                    invoke('cp',str(upload),remote_spec,'--chunked','--timeout','60')
+                    self.assertGreaterEqual(time.monotonic()-started_copy,16)
+                    self.assertEqual(remote.read_bytes(),upload.read_bytes())
+                    self.assertEqual(json.loads(invoke('agent-verify')[0])['instance_id'],evidence['instance_id'])
                 if chunked:
                     payload = random.Random(23).randbytes(1024 * 1024)
                     with upload.open("wb") as stream:
