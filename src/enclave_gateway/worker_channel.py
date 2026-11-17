@@ -10,7 +10,7 @@ from enclave_gateway.control.qga_client import QgaCommandError
 
 def wait_for_stopped_worker(control, spec, timeout_sec, expected_sha256):
     """Confirm stopped telemetry and release of the same spool's worker lease."""
-    script = "$ErrorActionPreference='Stop';$spool=" + ps_quote(spec.appliance_spool_dir) + ";$expected=" + ps_quote(expected_sha256) + r'''
+    script = "$ErrorActionPreference='Stop';$spool=" + ps_quote(spec.appliance_spool_dir) + ";$expected=" + ps_quote(expected_sha256.lower()) + r'''
 $done=$false;$lease=$null
 try{
  $path=Join-Path $spool 'worker_state.json';$session=Join-Path $spool '.worker-session'

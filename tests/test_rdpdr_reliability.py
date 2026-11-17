@@ -195,7 +195,7 @@ class PowerShellShutdownTests(unittest.TestCase):
                 wait_for_stopped_worker(control, spec, 1, 'b' * 64)
             self.assertEqual(error.exception.code, 'worker_stop_pending')
             control.held = False
-            wait_for_stopped_worker(control, spec, 3, 'b' * 64)
+            wait_for_stopped_worker(control, spec, 3, 'B' * 64)
 
     def test_readiness_reader_allows_replacement_while_it_is_open(self):
         from test_operational_ux import LocalPowerShellControl
