@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Recognize Windows OWNER RIGHTS and inherit-only CREATOR OWNER policy ACLs
+  when the owner is approved. Reject third-party directory and file writers
+  during both policy installation and subsequent adapter copies.
 - Accept up to five seconds of Bastion clock lead throughout heartbeat checks,
   including repeated reads during chunked copy. Cap cached freshness at one
   heartbeat window from the read.

@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import random
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -37,6 +38,55 @@ def operator_configuration(worker_sha256, policy_sha256):
 
 
 class OperatorOnboardingTests(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get('EGW_TEST_POWERSHELL'), 'Requires PowerShell')
+    def test_policy_acl_guard_resolves_owner_relative_rules_without_admitting_foreign_writers(self):
+        from enclave_gateway.onboarding import _operator_copy_script
+
+        script = _operator_copy_script(BastionSpec(), {'bastion_structured.ps1': 'b' * 64,
+                                                      'operator_target.py': 'c' * 64})
+        start = script.index('function Assert-EgwPrivatePolicyAcl')
+        guard = script[start:script.index(';$egwPolicy=', start)]
+        guard = guard.replace('[Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
+                              "'S-1-5-21-1000'")
+        fixture = r'''
+function Get-Acl {
+ $acl=[pscustomobject]@{}
+ $acl|Add-Member ScriptMethod GetOwner {param($type) [pscustomobject]@{Value=$script:owner}}
+ $acl|Add-Member ScriptMethod GetAccessRules {param($explicit,$inherited,$type) $script:rules}
+ return $acl
+}
+$cases=@(
+ @{sid='S-1-3-4';directory=$true;inheritOnly=$false;accepted=$true},
+ @{sid='S-1-3-4';directory=$false;inheritOnly=$false;accepted=$true},
+ @{sid='S-1-3-0';directory=$true;inheritOnly=$true;accepted=$true},
+ @{sid='S-1-3-0';directory=$true;inheritOnly=$false;accepted=$false},
+ @{sid='S-1-3-0';directory=$false;inheritOnly=$true;accepted=$false},
+ @{sid='S-1-3-4';directory=$true;inheritOnly=$false;foreignOwner=$true;accepted=$false}
+)
+foreach($sid in @('S-1-1-0','S-1-5-32-545','S-1-5-11')){
+ foreach($inheritOnly in @($false,$true)){
+  $cases+=@{sid=$sid;directory=$true;inheritOnly=$inheritOnly;accepted=$false}
+ }
+}
+foreach($case in $cases){
+ $script:owner=if($case.foreignOwner){'S-1-5-21-9999'}else{'S-1-5-21-1000'}
+ $script:rules=@([pscustomobject]@{
+  IdentityReference=[pscustomobject]@{Value=$case.sid};AccessControlType='Allow';FileSystemRights=2032127
+  PropagationFlags=$(if($case.inheritOnly){[Security.AccessControl.PropagationFlags]::InheritOnly}else{[Security.AccessControl.PropagationFlags]::None})
+ })
+ $accepted=$true
+ try{Assert-EgwPrivatePolicyAcl 'fixture' $case.directory}
+ catch{if($_.Exception.Message -notlike 'Use a private policy *'){throw};$accepted=$false}
+ if($accepted -ne $case.accepted){throw ('Unexpected ACL decision: '+($case|ConvertTo-Json -Compress))}
+}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'acl.ps1'
+            path.write_text("$ErrorActionPreference='Stop'\n" + guard + fixture)
+            result = subprocess.run([os.environ['EGW_TEST_POWERSHELL'], '-NoProfile', '-File', str(path)],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     @unittest.skipUnless(os.environ.get("EGW_TEST_POWERSHELL"), "Requires PowerShell")
     def test_stream_supervisor_observes_structured_state_without_reconnecting(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -352,6 +402,68 @@ class WindowsOperatorPolicyTests(unittest.TestCase):
         return subprocess.run([str(powershell), "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
                               env=environment, capture_output=True, text=True, errors="replace", timeout=30)
 
+    def inspect_acl(self, path, label):
+        literal = str(path).replace("'", "''")
+        result = self.powershell(f"""
+$acl=Get-Acl -LiteralPath '{literal}'
+$rules=@($acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])|ForEach-Object {{
+ @{{sid=$_.IdentityReference.Value;rights=[int]$_.FileSystemRights;type=[string]$_.AccessControlType;
+    inheritance=[string]$_.InheritanceFlags;propagation=[string]$_.PropagationFlags;inherited=$_.IsInherited}}
+}})
+@{{owner=$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value;rules=$rules}}|ConvertTo-Json -Compress -Depth 5
+""")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        snapshot = json.loads(result.stdout)
+        print(f"ACL {label}: {json.dumps(snapshot, sort_keys=True)}", flush=True)
+        return snapshot
+
+    def staged_policy(self, root, parent=None):
+        from enclave_gateway.control.qga_client import ExecResult
+        from enclave_gateway.onboarding import stage_agents
+
+        sid = self.powershell("[Security.Principal.WindowsIdentity]::GetCurrent().User.Value")
+        self.assertEqual(sid.returncode, 0, sid.stderr)
+        source = root / 'approved.json'
+        source.write_text(json.dumps({'revision': 1, 'owner_sid': sid.stdout.strip(),
+                                      'operator_state_dir': str(root / 'state')}))
+        policy = (parent or root / 'operator') / 'worker-policy.json'
+        raw = operator_configuration(hashlib.sha256(WORKER.read_bytes()).hexdigest(),
+                                     hashlib.sha256(source.read_bytes()).hexdigest())
+        raw['bastion'].update(worker_policy_path=str(policy), bastion_spool_dir=str(root / 'spool'))
+        control = Mock()
+        control.exec_powershell.return_value = ExecResult(0, '', '', 0)
+        receipt = stage_agents(control, EnclaveConfig.from_dict(raw), policy_source=source,
+                               execution_policy='RemoteSigned')
+        staged = root / 'spool' / 'agents' / receipt['bundle_sha256']
+        staged.mkdir(parents=True)
+        (staged / WORKER.name).write_bytes(WORKER.read_bytes())
+        (staged / 'operator_target.py').write_bytes(Path(operator_target.__file__).read_bytes())
+        (staged / policy.name).write_bytes(source.read_bytes())
+        installer = staged / 'operator-install.ps1'
+        installer.write_bytes(next(call.args[0] for call in control.write_bytes.call_args_list
+                                   if call.args[1].endswith('\\operator-install.ps1')))
+        return source, policy, receipt['bastion_copy_command'], installer
+
+    def set_private_acl(self, path, *, principal=None, inherit_only=False, owner_rights=False):
+        literal = str(path).replace("'", "''")
+        descriptor = ("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)" if owner_rights else None)
+        result = self.powershell(f"""
+$path='{literal}';$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
+$acl=if([IO.Directory]::Exists($path)){{[Security.AccessControl.DirectorySecurity]::new()}}else{{[Security.AccessControl.FileSecurity]::new()}}
+$acl.SetOwner($sid);$acl.SetAccessRuleProtection($true,$false)
+foreach($id in @($sid.Value,'S-1-5-18','S-1-5-32-544')){{
+ $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+  [Security.Principal.SecurityIdentifier]::new($id),'FullControl','Allow'))
+}}
+""" + (f"$acl.SetSecurityDescriptorSddlForm('{descriptor}',[Security.AccessControl.AccessControlSections]::Access)\n" if descriptor else '') + (
+            f"""
+$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+ [Security.Principal.SecurityIdentifier]::new('{principal}'),'Modify',
+ $(if([IO.Directory]::Exists($path)){{[Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'}}else{{[Security.AccessControl.InheritanceFlags]::None}}),
+ [Security.AccessControl.PropagationFlags]'{"InheritOnly" if inherit_only else "None"}','Allow'))
+""" if principal else '') + "Set-Acl -LiteralPath $path -AclObject $acl\n")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_operator_owned_policy_rejects_everyone_writer_on_ntfs(self):
         with tempfile.TemporaryDirectory(prefix="egw-acl-") as folder:
             source = str(WORKER).replace("'", "''")
@@ -423,32 +535,12 @@ throw 'Accepted an Everyone writer'
             self.assertEqual(destination.read_bytes(), files[WORKER.name])
 
     def test_generated_copy_command_installs_policy_once_with_private_acl(self):
-        from enclave_gateway.control.qga_client import ExecResult
-        from enclave_gateway.onboarding import stage_agents
         with tempfile.TemporaryDirectory(prefix="egw-policy-") as folder:
             root = Path(folder)
-            sid = self.powershell("[Security.Principal.WindowsIdentity]::GetCurrent().User.Value")
-            self.assertEqual(sid.returncode, 0, sid.stderr)
-            source = root / "approved.json"
-            source.write_text(json.dumps({"revision": 1, "owner_sid": sid.stdout.strip(),
-                                          "operator_state_dir": str(root / "state")}))
-            policy = root / "operator" / "worker-policy.json"
-            raw = operator_configuration(hashlib.sha256(WORKER.read_bytes()).hexdigest(),
-                                         hashlib.sha256(source.read_bytes()).hexdigest())
-            raw["bastion"].update(worker_policy_path=str(policy), bastion_spool_dir=str(root / "spool"))
-            cfg = EnclaveConfig.from_dict(raw)
-            control = Mock()
-            control.exec_powershell.return_value = ExecResult(0, "", "", 0)
-            receipt = stage_agents(control, cfg, policy_source=source, execution_policy="RemoteSigned")
-            staged = root / "spool" / "agents" / receipt["bundle_sha256"]
-            staged.mkdir(parents=True)
-            (staged / WORKER.name).write_bytes(WORKER.read_bytes())
-            (staged / "operator_target.py").write_bytes(Path(operator_target.__file__).read_bytes())
-            (staged / policy.name).write_bytes(source.read_bytes())
-            installer = staged / "operator-install.ps1"
-            installer.write_bytes(next(call.args[0] for call in control.write_bytes.call_args_list
-                                       if call.args[1].endswith("\\operator-install.ps1")))
-            command = receipt["bastion_copy_command"]
+            source, policy, command, installer = self.staged_policy(root)
+            self.inspect_acl(root, 'TemporaryDirectory')
+            policy.parent.mkdir()
+            self.inspect_acl(policy.parent, 'TemporaryDirectory child')
             result = self.powershell(command)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(policy.read_bytes(), source.read_bytes())
@@ -468,6 +560,74 @@ throw 'Accepted an Everyone writer'
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("Approved worker policy hash mismatch", result.stderr)
             self.assertEqual(policy.read_text(), "local policy to preserve")
+
+    def test_generated_copy_command_accepts_owner_rights_and_creator_owner_templates(self):
+        for principal in (None, 'S-1-3-0'):
+            with self.subTest(principal=principal), tempfile.TemporaryDirectory(prefix='egw-owner-') as folder:
+                root = Path(folder)
+                source, policy, command, _ = self.staged_policy(root)
+                policy.parent.mkdir()
+                self.set_private_acl(policy.parent, owner_rights=True, principal=principal, inherit_only=True)
+                self.inspect_acl(policy.parent, 'owner-relative private directory')
+                result = self.powershell(command)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(policy.read_bytes(), source.read_bytes())
+
+    def test_generated_copy_command_accepts_localappdata_inherited_directory(self):
+        local = Path(os.environ['LOCALAPPDATA']) / ('egw-policy-' + os.urandom(8).hex())
+        try:
+            with tempfile.TemporaryDirectory(prefix='egw-local-policy-') as folder:
+                root = Path(folder)
+                source, policy, command, _ = self.staged_policy(root, local)
+                literal = str(local).replace("'", "''")
+                result = self.powershell(f"[void][IO.Directory]::CreateDirectory('{literal}')")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.inspect_acl(local.parent, 'LocalApplicationData')
+                self.inspect_acl(local, 'LocalApplicationData child')
+                result = self.powershell(command)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(policy.read_bytes(), source.read_bytes())
+        finally:
+            if local.exists():
+                shutil.rmtree(local)
+
+    def test_generated_copy_command_rejects_unapproved_parent_writers(self):
+        with tempfile.TemporaryDirectory(prefix='egw-parent-acl-') as folder:
+            root = Path(folder)
+            source, policy, command, _ = self.staged_policy(root)
+            policy.parent.mkdir()
+            for principal in ('S-1-1-0', 'S-1-5-32-545', 'S-1-5-11'):
+                for inherit_only in (False, True):
+                    with self.subTest(principal=principal, inherit_only=inherit_only):
+                        self.set_private_acl(policy.parent, principal=principal, inherit_only=inherit_only)
+                        result = self.powershell(command)
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn('Use a private policy directory', result.stderr)
+                        self.assertFalse(policy.exists())
+                        self.assertFalse((policy.parent / WORKER.name).exists())
+            self.set_private_acl(policy.parent)
+            self.assertEqual(self.powershell(command).returncode, 0)
+            for principal in ('S-1-1-0', 'S-1-5-32-545', 'S-1-5-11'):
+                with self.subTest(existing_policy=True, principal=principal):
+                    self.set_private_acl(policy.parent, principal=principal)
+                    result = self.powershell(command)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('Use a private policy directory', result.stderr)
+                    self.assertEqual(policy.read_bytes(), source.read_bytes())
+
+    def test_generated_copy_command_rejects_unapproved_policy_file_writers(self):
+        with tempfile.TemporaryDirectory(prefix='egw-file-acl-') as folder:
+            root = Path(folder)
+            source, policy, command, _ = self.staged_policy(root)
+            result = self.powershell(command)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for principal in ('S-1-1-0', 'S-1-5-32-545', 'S-1-5-11'):
+                with self.subTest(principal=principal):
+                    self.set_private_acl(policy, principal=principal)
+                    result = self.powershell(command)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('Use a private policy file', result.stderr)
+                    self.assertEqual(policy.read_bytes(), source.read_bytes())
 
 
 @unittest.skipUnless(os.name != "nt" and os.environ.get("EGW_TEST_POWERSHELL"),

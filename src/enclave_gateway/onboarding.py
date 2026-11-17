@@ -298,19 +298,31 @@ def _operator_installer_command(source, digest):
 
 
 def _operator_copy_script(bastion,hashes,*,install_policy=False):
+    acl_guard = r'''
+function Assert-EgwPrivatePolicyAcl([string]$path,[bool]$directory){
+ $acl=Get-Acl -LiteralPath $path;
+ $allowed=@([Security.Principal.WindowsIdentity]::GetCurrent().User.Value,'S-1-5-18','S-1-5-32-544');
+ $kind=if($directory){'directory'}else{'file'};
+ if($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -cnotin $allowed){throw ('Use a private policy '+$kind)};
+ $rules=$acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]);
+ if(-not $rules.Count){throw ('Use a private policy '+$kind)};
+ foreach($rule in $rules){
+  if($rule.AccessControlType -ne 'Allow' -or ([int]$rule.FileSystemRights -band 852310) -eq 0){continue};
+  $principal=$rule.IdentityReference.Value;
+  <# OWNER RIGHTS resolves to the owner checked above. CREATOR OWNER is safe
+     only as an inheritance template; concrete child owners are checked again. #>
+  $creatorTemplate=$directory -and $principal -ceq 'S-1-3-0' -and
+   ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0;
+  if($principal -cnotin $allowed -and $principal -cne 'S-1-3-4' -and -not $creatorTemplate){throw ('Use a private policy '+$kind)};
+ };
+}
+'''.replace('\n', ' ')
     install = ''
     if install_policy:
         install = (
             "if(-not [IO.File]::Exists($egwPolicy)){"
-            "$egwParent=[IO.Path]::GetDirectoryName($egwPolicy);"
-            "Assert-EgwLocalPath $egwParent;[void][IO.Directory]::CreateDirectory($egwParent);"
             "$egwSid=[Security.Principal.WindowsIdentity]::GetCurrent().User;"
             "$egwAllowed=@($egwSid.Value,'S-1-5-18','S-1-5-32-544');"
-            "$egwParentAcl=Get-Acl -LiteralPath $egwParent;"
-            "if($egwParentAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value -cnotin $egwAllowed){throw 'Use a private policy directory'};"
-            "foreach($rule in $egwParentAcl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){"
-            "if($rule.AccessControlType -eq 'Allow' -and ([int]$rule.FileSystemRights -band 852310) -ne 0 -and "
-            "$rule.IdentityReference.Value -cnotin $egwAllowed){throw 'Use a private policy directory'}};"
             "$egwTemp=$egwPolicy+'.'+[Guid]::NewGuid().ToString('N')+'.tmp';try{"
             "[IO.File]::Copy((Join-Path $egwSource 'worker-policy.json'),$egwTemp,$false);"
             "if((Get-FileHash -LiteralPath $egwTemp -Algorithm SHA256).Hash.ToLowerInvariant() -cne "+
@@ -328,8 +340,11 @@ def _operator_copy_script(bastion,hashes,*,install_policy=False):
             "}finally{[IO.File]::Delete($egwTemp)}};"
         )
     return (
-        "$ErrorActionPreference='Stop';"+_operator_path_guard()+";$egwPolicy="+ps_quote(bastion.worker_policy_path)+
-        ";Assert-EgwLocalPath $egwPolicy;"+install+"$egwPolicyLease=[IO.File]::Open($egwPolicy,'Open','Read','Read');try{"
+        "$ErrorActionPreference='Stop';"+_operator_path_guard()+acl_guard+";$egwPolicy="+ps_quote(bastion.worker_policy_path)+
+        ";Assert-EgwLocalPath $egwPolicy;$egwParent=[IO.Path]::GetDirectoryName($egwPolicy);"
+        "Assert-EgwLocalPath $egwParent;[void][IO.Directory]::CreateDirectory($egwParent);"
+        "Assert-EgwPrivatePolicyAcl $egwParent $true;"+install+"$egwPolicyLease=[IO.File]::Open($egwPolicy,'Open','Read','Read');try{"
+        "Assert-EgwPrivatePolicyAcl $egwPolicy $false;"
         "if((Get-FileHash -LiteralPath $egwPolicy -Algorithm SHA256).Hash.ToLowerInvariant() -cne "+
         ps_quote(bastion.worker_policy_sha256)+"){throw 'Approved worker policy hash mismatch'};"
         "$egwSettings=[IO.File]::ReadAllText($egwPolicy)|ConvertFrom-Json;"
