@@ -58,6 +58,11 @@ def save_support(config,output,expected_sha256):
 
 def remediation(detail):
     value=str(detail).lower()
+    if 'structured_only requires approved ssh keys and noninteractive sudo' in value:
+        return ('Use approved SSH keys. For password-based sudo, omit --sudo and pass the approved vault secret '
+                'with --secret-env EGW_SUDO_PASSWORD=VAULT_KEY, then feed it with '
+                '\'printf "%s\\n" "$EGW_SUDO_PASSWORD" | sudo -S -p "" -- command\'. '
+                'Keep the password out of command arguments and tracing. See docs/GUIDE.md#password-based-sudo-in-structured_only.')
     if 'selected ssh route' in value or 'disabled rdp bastion' in value:
         return 'Review the explicit target via chain in egw config check. An SSH route starts on Appliance and requires no RDP worker. Route changes require administrator approval; no transport fallback is attempted. See docs/ROUTING.md.'
     if any(s in value for s in ('host key verification failed','remote host identification has changed','no ed25519 host key','no rsa host key')):

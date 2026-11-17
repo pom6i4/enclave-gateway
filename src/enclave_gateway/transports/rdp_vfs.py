@@ -345,7 +345,7 @@ class RdpVfsTransport:
                     if remaining<=0:raise TimeoutError('Timed out waiting for worker readiness')
                     self._ready_condition.wait(min(.05,remaining))
             expiry=wave['expires']
-            if type(expiry) in (int,float) and 0<expiry-time.time()<self.spec.heartbeat_max_age_sec:
+            if type(expiry) in (int,float) and 0<expiry-time.time()<=self.spec.heartbeat_max_age_sec:
                 return wave['state']
             # A guard without a validated expiry runs again for each caller.
             return guard()
@@ -634,7 +634,7 @@ exit 124
         )
         expiry=readiness.get('_heartbeat_expires_unix') if isinstance(readiness,dict) else None
         cached=readiness.get('_stream_descriptor') if isinstance(readiness,dict) else None
-        if isinstance(cached,dict) and type(expiry) in (int,float) and 0<expiry-time.time()<self.spec.heartbeat_max_age_sec:
+        if isinstance(cached,dict) and type(expiry) in (int,float) and 0<expiry-time.time()<=self.spec.heartbeat_max_age_sec:
             self._check_stream_control()
             info=descriptor(json.dumps(cached,allow_nan=False).encode())
         else:

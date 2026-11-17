@@ -255,6 +255,10 @@ class OperatorTransportTests(unittest.TestCase):
             self.assertFalse(engine.status()["bastion"]["worker_healthy"])
             control.state["status"] = "running"
             self.assertTrue(engine.status()["bastion"]["worker_healthy"])
+            control.age = -2
+            self.assertTrue(engine.status()["bastion"]["worker_healthy"])
+            control.age = -6
+            self.assertFalse(engine.status()["bastion"]["worker_healthy"])
             control.age = 60
             self.assertFalse(engine.status()["bastion"]["worker_healthy"])
 
@@ -536,6 +540,7 @@ if($redirectedPolls -ne 0 -or -not $task.IsCompletedSuccessfully){throw 'Reply d
             root = Path(directory).resolve()
             for name in ("state", "spool", "host"):
                 (root / name).mkdir()
+            (root / 'state' / 'attach-ssh.cmd').write_text('old instance launcher')
             policy = root / "policy.json"
             policy.write_text(json.dumps({
                 "revision": 1, "owner_sid": OPERATOR_SID,
@@ -552,7 +557,8 @@ if($redirectedPolls -ne 0 -or -not $task.IsCompletedSuccessfully){throw 'Reply d
             signature_fixture = (
                 "function Assert-Signature([string]$Path,[bool]$Microsoft=$false){"
                 + ("if(-not $Microsoft){throw 'Unsigned adapter signature was checked'};" if unsigned else "")
-                + "if($Microsoft){[IO.File]::WriteAllText((Join-Path $SpoolDir 'microsoft-checked'),'yes')};"
+                + "if($Microsoft){if([IO.File]::Exists((Join-Path $policy.operator_state_dir 'attach-ssh.cmd'))){throw 'Stale attach survived until signature verification'};"
+                + "[IO.File]::WriteAllText((Join-Path $SpoolDir 'microsoft-checked'),'yes')};"
                 + "return @{Status='Valid';SignerCertificate=@{Thumbprint='" + "A"*40 + "'}}}\n"
             )
             writer = "S-1-1-0" if foreign_writer else OPERATOR_SID

@@ -820,8 +820,10 @@ Choose how to trust the adapter:
    checks the installer's SHA-256 before running its local NTFS copy. The
    policy selection applies to the current PowerShell process and respects
    Group Policy.
-4. Open a separate CMD window in the same RDP session and run the OpenSSH
-   command printed by the adapter.
+4. Wait for `OPERATOR_ATTACH_READY` and the new `attach-ssh.cmd` path. System
+   OpenSSH signature verification can take about 25 seconds on offline hosts.
+   Open a separate CMD window in the same RDP session and run the printed file.
+   The launcher selects `Sysnative` when CMD is a 32-bit process on 64-bit Windows.
 
 ```sh
 egw agent-verify --wait-ready 35
@@ -843,6 +845,36 @@ reports the configured value and compares it with the managed adapter MTUs.
 For the foreground operator, `heal` observes the session and leaves the
 existing bundle in place. Use `egw heal --policy-source ./worker-policy.json`
 to explicitly stage the approved policy and worker.
+
+Heartbeat checks accept up to five seconds of Bastion clock lead. Older
+heartbeats still expire at `heartbeat_max_age_sec`, and the cached expiry never
+exceeds one freshness window from the read. `heal` synchronizes Appliance time
+with Host. Keep the domain Bastion synchronized with its approved time source.
+
+When `agents stage` verifies a stopped operator worker under its exclusive
+session lease, it moves old IPC files and telemetry into a unique
+`.retired-state-*` directory inside the Appliance spool. The staging receipt
+reports that directory in `stream_prune.retired_state_directory`. Payloads and
+the transaction journal remain available for reconciliation.
+
+### Password-based sudo in structured_only
+
+`--sudo` uses approved noninteractive `sudo -n`. Password helpers are unavailable
+in this profile. If target policy requires a sudo password, store it in SecretVault
+and pass its key through `--secret-env`. Omit `--sudo` and feed the password to
+`sudo -S` over standard input inside the remote command:
+
+```sh
+egw exec app01 --secret-env EGW_SUDO_PASSWORD=APP01_SUDO_PASSWORD \
+  'printf "%s\n" "$EGW_SUDO_PASSWORD" | sudo -S -p "" -- id'
+```
+
+`APP01_SUDO_PASSWORD` names a vault entry. The password travels with the protected
+command payload. Keep it out of command arguments, shell tracing and output.
+The target's sudo policy must permit the operation. This example reserves stdin
+for the password, so use it for commands that do not consume additional stdin.
+
+### Chunked copy
 
 For files up to 512 MiB, use chunked copy after `egw agent-verify` reports
 `chunked_copy_slots_v1: true`. It transfers 1 MiB blocks, verifies SHA-256 on each

@@ -44,7 +44,7 @@ def _stream_state_from_reader(reader,spec):
                     or value.get('spool_protocol')!='stream'
                     or value.get('status') not in ('running','stopping','stopped')):continue
             stamp=datetime.datetime.fromisoformat(value['last_heartbeat_utc'].replace('Z','+00:00')).timestamp()
-            if 0<=time.time()-stamp<spec.heartbeat_max_age_sec:candidates.append((stamp,value))
+            if -5.0<=time.time()-stamp<spec.heartbeat_max_age_sec:candidates.append((stamp,value))
         except (ValueError,TypeError,KeyError,AttributeError,UnicodeError,RecursionError):continue
         except QgaCommandError as error:
             if error.command!='guest-file-open':raise
@@ -87,9 +87,10 @@ if([IO.File]::Exists($p)){
             stamp=snapshot['stamp_ms']/1000
         if not raw or len(raw)>65536:return {}
         value=json.loads(raw.decode('utf-8-sig'))
-        state={'running':value.get('status')=='running','age_sec':time.time()-stamp,
+        now=time.time()
+        state={'running':value.get('status')=='running','age_sec':now-stamp,
                 'spool_protocol':value.get('spool_protocol','files'),
-                '_heartbeat_expires_unix':stamp+spec.heartbeat_max_age_sec,
+                '_heartbeat_expires_unix':min(stamp,now)+spec.heartbeat_max_age_sec,
                 'execution_profile':value.get('execution_profile'),
                 'structured_backend':value.get('structured_backend', 'spawn'),
                 'probe_direct_reply':value.get('probe_direct_reply') is True,
@@ -116,7 +117,7 @@ def require_running_worker(control,spec):
             stamp=datetime.datetime.fromisoformat(snapshot['last_heartbeat_utc'].replace('Z','+00:00')).timestamp()
             age=time.time()-stamp
         state={'running':snapshot.get('status')=='running','age_sec':age,'spool_protocol':'stream',
-               '_heartbeat_expires_unix':stamp+spec.heartbeat_max_age_sec if stamp is not None else None}
+               '_heartbeat_expires_unix':min(stamp,time.time())+spec.heartbeat_max_age_sec if stamp is not None else None}
         if snapshot:
             from enclave_gateway.transports.stream_frames import BLOCK,REVISION
             state['_stream_descriptor']={'revision':REVISION,'block_bytes':BLOCK,'instance':snapshot['instance_id'],'worker_sha256':snapshot['worker_sha256']}
@@ -136,7 +137,7 @@ def require_running_worker(control,spec):
                 stamp=datetime.datetime.fromisoformat(stamp.replace('Z','+00:00')).timestamp()
                 age=time.time()-stamp
                 state={'running':state.get('status','running')=='running','age_sec':age,'spool_protocol':state.get('spool_protocol','files'),
-                       '_heartbeat_expires_unix':stamp+spec.heartbeat_max_age_sec}
+                       '_heartbeat_expires_unix':min(stamp,time.time())+spec.heartbeat_max_age_sec}
             except (ValueError,TypeError,AttributeError):state=None
         if not raw:state={'running':False,'age_sec':-1}
     if state is None:
@@ -144,7 +145,7 @@ def require_running_worker(control,spec):
         result=control.exec_powershell(script,timeout_sec=budget(5,'vfs.preflight'))
         try:state=json.loads(result.stdout) if not result.exit_code else None
         except (ValueError,TypeError):state=None
-    if not isinstance(state,dict) or state.get('running') is not True or type(state.get('age_sec')) not in (int,float) or not 0<=state['age_sec']<spec.heartbeat_max_age_sec:
+    if not isinstance(state,dict) or state.get('running') is not True or type(state.get('age_sec')) not in (int,float) or not -5.0<=state['age_sec']<spec.heartbeat_max_age_sec:
         context=current()
         raise OperationError('session_pending_worker','vfs.preflight',tx_id=context.tx_id if context else '',node=context.node if context else '@bastion',
                              message='SESSION_PENDING_WORKER: no recent running heartbeat. Check RDP redirection and clocks; run the agents stage start_command inside Bastion. No request was published.')

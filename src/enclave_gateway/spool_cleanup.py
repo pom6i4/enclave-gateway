@@ -3,11 +3,11 @@ from enclave_gateway.security.quoting import ps_quote
 from enclave_gateway.control.stream_pruner import LOCAL_STREAM_PRUNER
 
 
-def cleanup_script(spool, *, execution_profile='legacy', structured_backend='spawn'):
+def cleanup_script(spool, *, execution_profile='legacy', structured_backend='spawn', prepare_for_start=False):
     if structured_backend == 'operator':
         if execution_profile != 'structured_only':
             raise ValueError('Operator cleanup requires structured_only')
-        return _operator_cleanup_script(spool)
+        return _operator_cleanup_script(spool, prepare_for_start=prepare_for_start)
     if structured_backend != 'spawn':
         raise ValueError('Unknown structured backend')
     if execution_profile not in ('legacy','structured_only'):raise ValueError('Unknown cleanup profile')
@@ -101,7 +101,7 @@ Write-Output ('APPLIANCE_CLEAN_OK:'+(@{removed=$removed;deferred_processing=$def
 if($errors){exit 1}
 '''.replace('STREAM_HELPER',LOCAL_STREAM_PRUNER).replace('VALID_STORAGE_BINDING',valid).replace('STORAGE_BINDING',binding).replace('SPOOL',ps_quote(spool))
 
-def _operator_cleanup_script(spool):
+def _operator_cleanup_script(spool, *, prepare_for_start=False):
     """Reclaim retired, scrubbed buffers on the Appliance under the worker lease."""
     return r'''$ErrorActionPreference='Stop'
 $spool=SPOOL
@@ -109,6 +109,7 @@ $stopped=$false
 $lease=$null
 $removed=0;$preserved=0;$deferred=0;$errors=0
 $cleanup='worker_not_stopped'
+$retiredDirectory='';$retiredFiles=0
 if($env:OS -eq 'Windows_NT'){
  $spool=[IO.Path]::GetFullPath($spool)
  if($spool.StartsWith('\\') -or [IO.DriveInfo]::new([IO.Path]::GetPathRoot($spool)).DriveType -eq 'Network'){
@@ -138,7 +139,32 @@ if([IO.File]::Exists($path)){
     $state.structured_backend -ceq 'operator' -and $state.spool_protocol -ceq 'stream' -and
     $state.instance_id -cmatch '^[a-f0-9]{32}$' -and $meta.revision -eq 1 -and $meta.owner_sha256 -cmatch '^[a-f0-9]{64}$'
   }
-  if($stopped){
+  if($stopped -and PREPARE_FOR_START){
+   # Retain payloads and diagnostics while clearing the top-level publication
+   # paths. The exclusive worker lease excludes a concurrent adapter startup.
+   $cleanup='complete'
+   $candidates=@([IO.DirectoryInfo]::new($spool).EnumerateFiles()|Where-Object {
+    $_.Name -cmatch '^ipc_(?:req_|upload_|res_)[a-f0-9]{32}(?:_[0-9]{1,5})?\.bin$' -or
+    $_.Name -cmatch '^worker_pulse_[a-f0-9]{32}_[ab]\.json$'
+   })
+   if($candidates.Count -gt 128){$cleanup='bounded';$deferred=$candidates.Count}
+   else{
+    $candidates+=@([IO.FileInfo]::new([IO.Path]::Combine($spool,'ipc_descriptor.json')),
+                  [IO.FileInfo]::new($statePath))
+    foreach($file in $candidates){
+     if(-not $file.Exists){continue}
+     if($file.Attributes -band [IO.FileAttributes]::ReparsePoint){$preserved++;$cleanup='linked_state';break}
+     try{
+      if(-not $retiredDirectory){
+       $retiredDirectory=[IO.Path]::Combine($spool,('.retired-state-'+[Guid]::NewGuid().ToString('N')))
+       [void][IO.Directory]::CreateDirectory($retiredDirectory)
+      }
+      [IO.File]::Move($file.FullName,[IO.Path]::Combine($retiredDirectory,$file.Name))
+      $retiredFiles++
+     }catch [IO.IOException]{$deferred++;$cleanup='busy_state';break}
+    }
+   }
+  }elseif($stopped){
    $cleanup='unsupported_platform'
    if($env:OS -eq 'Windows_NT'){
     $cleanup='complete'
@@ -167,6 +193,6 @@ if([IO.File]::Exists($path)){
   }
  }catch [IO.IOException]{}finally{if($lease){$lease.Dispose()}}
 }
-Write-Output ('APPLIANCE_CLEAN_OK:'+(@{removed=$removed;errors=$errors;stopped_worker_verified=$stopped;stream_cleanup=$cleanup;stream_removed=$removed;stream_preserved=$preserved;stream_deferred=$deferred}|ConvertTo-Json -Compress))
+Write-Output ('APPLIANCE_CLEAN_OK:'+(@{removed=$removed;errors=$errors;stopped_worker_verified=$stopped;stream_cleanup=$cleanup;stream_removed=$removed;stream_preserved=$preserved;stream_deferred=$deferred;retired_state_directory=$retiredDirectory;retired_state_files=$retiredFiles}|ConvertTo-Json -Compress))
 if($errors){exit 1}
-'''.replace('STREAM_HELPER', LOCAL_STREAM_PRUNER).replace('SPOOL', ps_quote(spool))
+'''.replace('STREAM_HELPER', LOCAL_STREAM_PRUNER).replace('PREPARE_FOR_START', '$true' if prepare_for_start else '$false').replace('SPOOL', ps_quote(spool))

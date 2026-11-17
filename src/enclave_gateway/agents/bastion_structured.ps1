@@ -149,7 +149,28 @@ function Write-Atomic([string]$Path,[string]$Text,[switch]$Transient){
             $file.Write($bytes,0,$bytes.Length)
             if(-not $Transient){$file.Flush($true)}
         }finally{$file.Dispose()}
-        if([IO.File]::Exists($Path)){[IO.File]::Replace($temporary,$Path,[NullString]::Value)}else{[IO.File]::Move($temporary,$Path)}
+        try{
+            Assert-PlainPath $Path
+            if([IO.File]::Exists($Path)){[IO.File]::Replace($temporary,$Path,[NullString]::Value)}else{[IO.File]::Move($temporary,$Path)}
+        }catch{
+            $cause=$_.Exception;while($cause.InnerException){$cause=$cause.InnerException}
+            if(-not $Transient -or ($cause -isnot [IO.IOException] -and $cause -isnot [UnauthorizedAccessException])){throw}
+            # RDPDR can reject ReplaceFileW. Only disposable telemetry may have
+            # a publication gap; durable transaction records keep atomic replace.
+            for($attempt=0;$attempt -lt 5;$attempt++){
+                Assert-PlainPath $Path
+                Assert-PlainPath $temporary
+                try{
+                    [IO.File]::Delete($Path)
+                    [IO.File]::Move($temporary,$Path)
+                    break
+                }catch{
+                    $cause=$_.Exception;while($cause.InnerException){$cause=$cause.InnerException}
+                    if($attempt -eq 4 -or ($cause -isnot [IO.IOException] -and $cause -isnot [UnauthorizedAccessException])){throw}
+                    Start-Sleep -Milliseconds 25
+                }
+            }
+        }
         $pending=$false
     }finally{if($pending -and [IO.File]::Exists($temporary)){[IO.File]::Delete($temporary)}}
 }
@@ -442,7 +463,9 @@ function Open-OperatorPipes{
     # Compression is confined to this dedicated, forwarding-disabled SSH session.
     $known=$target.known_hosts_path.Replace('\','/')
     $protocol=if($extendedOperator){2}else{1}
-    $line='"'+$ssh+'" -F NUL -T -C -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o PermitLocalCommand=no -o ProxyCommand=none -o ProxyJump=none -o IdentityAgent=none -o ForwardAgent=no -o ClearAllForwardings=yes -o ConnectTimeout=15 -o "UserKnownHostsFile='+$known+'" -o GlobalKnownHostsFile=NUL -i "'+$target.key_path+'" -p '+$target.port+' '+$target.user+'@'+$target.host+' egw-operator-v'+$protocol+' < \\.\pipe\EgwIn'+$instance+' > \\.\pipe\EgwOut'+$instance
+    $line='"%EGW_OPENSSH%" -F NUL -T -C -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o PermitLocalCommand=no -o ProxyCommand=none -o ProxyJump=none -o IdentityAgent=none -o ForwardAgent=no -o ClearAllForwardings=yes -o ConnectTimeout=15 -o "UserKnownHostsFile='+$known+'" -o GlobalKnownHostsFile=NUL -i "'+$target.key_path+'" -p '+$target.port+' '+$target.user+'@'+$target.host+' egw-operator-v'+$protocol+' < \\.\pipe\EgwIn'+$instance+' > \\.\pipe\EgwOut'+$instance
+    $launcher="@echo off`r`nsetlocal`r`n"+'set "EGW_OPENSSH='+$ssh+'"'+"`r`n"+
+        'if defined PROCESSOR_ARCHITEW6432 set "EGW_OPENSSH=%SystemRoot%\Sysnative\OpenSSH\ssh.exe"'+"`r`n"+$line+"`r`n"
     $inTask=$operatorInput.WaitForConnectionAsync();$outTask=$operatorOutput.WaitForConnectionAsync()
     # CMD opens its redirects before OpenSSH authenticates. Use one startup
     # deadline for both events and keep the worker unavailable until the greeting.
@@ -450,9 +473,10 @@ function Open-OperatorPipes{
     $attachDeadline=90000
     $attachPath=[IO.Path]::Combine($policy.operator_state_dir,'attach-ssh.cmd')
     Assert-PlainPath $attachPath $true
-    Write-Atomic $attachPath ("@echo off`r`n"+$line+"`r`n") -Transient
+    Write-Atomic $attachPath $launcher -Transient
+    Write-Host ('OPERATOR_ATTACH_READY: '+$instance)
     Write-Host 'Run the following in a separate CMD console in the same RDP session:'
-    if($attachPath -match '[%!]'){Write-Host $line}else{Write-Host ('"'+$attachPath+'"')}
+    if($attachPath -match '[%!]'){Write-Host $launcher}else{Write-Host ('"'+$attachPath+'"')}
     if(-not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($inTask,$outTask),(Operator-Remaining $attachDeadline))){throw 'Operator OpenSSH was not attached'}
     if([Text.Encoding]::ASCII.GetString((Operator-Read 8 $attachDeadline)) -cne "EGWSSH$protocol`n"){throw 'The approved Linux SSH endpoint did not start the expected operator protocol'}
 }
@@ -573,7 +597,6 @@ try{
     if(-not $OperatorOpenSsh -and -not $RequireSignedAgents){throw 'Spawn backend requires a signed adapter'}
     $ssh=[IO.Path]::Combine([Environment]::GetFolderPath('System'),'OpenSSH\ssh.exe')
     Assert-PlainPath $ssh $true
-    [void](Assert-Signature $ssh $true)
     $sessionLease=[IO.File]::Open(([IO.Path]::Combine($SpoolDir,'.worker-session')),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
     if($OperatorOpenSsh){
         if(@($policy.targets.PSObject.Properties).Count -ne 1 -or ($RequireSignedAgents -and -not $TrustedSignerThumbprints.Count)){throw 'Operator backend requires one pinned SSH target and trusted publishers when adapter signing is enabled'}
@@ -588,8 +611,13 @@ try{
         $stateLeasePath=[IO.Path]::Combine($policy.operator_state_dir,'.worker-session')
         Assert-PlainPath $stateLeasePath $true
         $operatorStateLease=[IO.File]::Open($stateLeasePath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+        $attachPath=[IO.Path]::Combine($policy.operator_state_dir,'attach-ssh.cmd')
+        Assert-PlainPath $attachPath $true
+        [IO.File]::Delete($attachPath)
         $journal=[IO.Path]::Combine($policy.operator_state_dir,'.structured-transactions')
     }
+    if($OperatorOpenSsh){Write-Host 'Verifying system OpenSSH signature (may take up to 25s on offline hosts)...'}
+    [void](Assert-Signature $ssh $true)
     Assert-PlainPath $journal
     $binding=[IO.Path]::Combine($SpoolDir,'worker_structured_storage.json')
     $owner=Hash-Text ($sid+'|'+[Environment]::MachineName)

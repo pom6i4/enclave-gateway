@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- Accept up to five seconds of Bastion clock lead throughout heartbeat checks,
+  including repeated reads during chunked copy. Cap cached freshness at one
+  heartbeat window from the read.
+- Retry transient spool publication with delete-and-move when RDPDR rejects
+  replacement. Keep durable journal publication atomic. During operator staging,
+  retire stopped-session IPC and telemetry under the exclusive worker lease,
+  retaining payloads and transaction evidence.
+- Remove stale operator launchers before system OpenSSH signature verification.
+  Show verification progress and `OPERATOR_ATTACH_READY` after publication.
+- Select native system OpenSSH from both 32-bit and 64-bit CMD consoles.
+- Explain password-based sudo through `--secret-env` and `sudo -S` over stdin.
+- Source adapter SHA-256 for `security.worker_sha256` is
+  `51b8147c66bcb80d25f78dfbee2f952b132703af8d2b96535d8074203148d280`.
+  Recompute the deployment pin after signing the approved adapter.
+
 ## 0.3.0 Beta 6
 
 Package version `0.3.0b6` and Git tag `v0.3.0-beta.6`.

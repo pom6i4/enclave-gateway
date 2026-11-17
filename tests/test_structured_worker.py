@@ -54,6 +54,13 @@ class StructuredContractTests(unittest.TestCase):
             spec=BastionSpec(appliance_spool_dir='C:\\spool',execution_profile='structured_only',
                              worker_policy_sha256='b'*64)
             self.assertTrue(require_running_worker(channel,spec)['running'])
+            for lead, accepted in ((2, True), (7, False)):
+                stamp=time.time()+lead
+                os.utime(path,(stamp,stamp))
+                if accepted:
+                    self.assertTrue(require_running_worker(channel,spec)['running'])
+                else:
+                    with self.assertRaises(OperationError):require_running_worker(channel,spec)
             expired=time.time()-spec.heartbeat_max_age_sec-1
             os.utime(path,(expired,expired))
             with self.assertRaises(OperationError) as raised:

@@ -195,6 +195,11 @@ The OpenSSH target endpoint must match Host's configured target. Bastion's
 independent policy remains authoritative for the actual key paths.
 Password helpers are unavailable in this profile. Root operations require
 administrator-approved noninteractive `sudo -n` on the Linux target.
+For a target that requires a sudo password, omit `--sudo`, pass the approved
+SecretVault entry with `--secret-env EGW_SUDO_PASSWORD=APP01_SUDO_PASSWORD`, and
+feed it to `sudo -S -p ""` through stdin inside the remote command. Keep the
+password out of command arguments, tracing and output. See the
+[password-based sudo example](GUIDE.md#password-based-sudo-in-structured_only).
 
 ```sh
 egw config check

@@ -305,7 +305,7 @@ class EnclaveEngine:
 $statePath = Join-Path {ps_quote(self.config.bastion.appliance_spool_dir)} 'worker_state.json'
 if (Test-Path -LiteralPath $statePath) {{
     $age = ((Get-Date) - (Get-Item -LiteralPath $statePath).LastWriteTime).TotalSeconds
-    if ($age -ge 0 -and $age -lt {self.config.bastion.heartbeat_max_age_sec}) {{ $stateJson = [IO.File]::ReadAllText($statePath).Trim() }}
+    if ($age -ge -5 -and $age -lt {self.config.bastion.heartbeat_max_age_sec}) {{ $stateJson = [IO.File]::ReadAllText($statePath).Trim() }}
 }}
 """ if self.config.bastion.enabled and not operator else '')
         adapter = provider_adapter(provider.type)
@@ -386,7 +386,7 @@ ConvertTo-Json $out -Compress -Depth 8
             report['bastion']['worker_state'] = state.get('worker_state')
             report['bastion']['worker_healthy'] = (
                 state.get('running') is True
-                and 0 <= state['age_sec'] < self.config.bastion.heartbeat_max_age_sec
+                and -5.0 <= state['age_sec'] < self.config.bastion.heartbeat_max_age_sec
                 and state['execution_profile'] == 'structured_only'
                 and state['structured_backend'] == 'operator'
                 and state['spool_protocol'] == 'stream'
@@ -524,7 +524,8 @@ ConvertTo-Json $out -Compress -Depth 8
             try:
                 cleanup = self.control.exec_powershell(
                     cleanup_script(self.config.bastion.appliance_spool_dir,
-                                   execution_profile='structured_only', structured_backend='operator'),
+                                   execution_profile='structured_only', structured_backend='operator',
+                                   prepare_for_start=True),
                     timeout_sec=budget(15, 'agents.stage.prune'),
                 )
                 prefix = 'APPLIANCE_CLEAN_OK:'
