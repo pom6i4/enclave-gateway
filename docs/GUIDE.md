@@ -612,6 +612,20 @@ Completed orphan identifiers leave the local registry after an explicit QGA
 missing-PID response. Windows format-token descriptions are supported alongside
 numeric descriptions; unrelated errors retain the unresolved identifier.
 
+Stream response polling limits each QGA read exchange to three seconds within
+the original request deadline. Synchronization attempts have a one-second window
+and reopen the socket before any application command is sent. A lost read-side
+connection resumes observation of the same response slot; the published request
+and upload payload are not sent again. The same rule applies to worker-state
+observations while waiting for an operator response.
+
+After a complete response passes transaction and identity checks, cleanup can
+retry zeroing the remaining acknowledged ranges. Cleanup recovery has a
+five-second budget within the original request deadline. It does not parse the response again. Upload
+slots are released after the matching block acknowledgement. Unrecoverable
+cleanup reports `worker_result_cleanup_failed`; unresolved payloads remain
+available for reconciliation. Cancellation and request expiry still stop work.
+
 The ViPNet adapter includes Mobile installation candidates and `info`, guarded by
 exact configured version, architecture and trusted publisher matching. These are
 probe candidates, not evidence that every Client version/driver/architecture is

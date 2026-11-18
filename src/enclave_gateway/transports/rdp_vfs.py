@@ -20,10 +20,10 @@ from typing import Any
 
 from enclave_gateway.security.quoting import validate_endpoint, ps_quote
 from enclave_gateway.operations.request import PowerShellRequest
-from enclave_gateway.operations.context import budget, checkpoint, current, mark_dispatched, timed, bind_context, OperationError
+from enclave_gateway.operations.context import budget, checkpoint, current, mark_dispatched, timed, bind_context, limit_deadline, OperationError
 from enclave_gateway.transports.listener import TcpListener
 from enclave_gateway.config import BastionSpec
-from enclave_gateway.control.qga_client import ControlChannel, ExecResult, QgaCommandError
+from enclave_gateway.control.qga_client import ControlChannel, ExecResult, QgaClient, QgaCommandError
 
 
 @dataclass(slots=True)
@@ -713,12 +713,20 @@ exit 124
                 result = self._exchange_stream(req, frame, limit, envelope, info, deadline, started)
                 if not result.exit_code and result.stdout.strip() == "PART:" + envelope["sha256"]:
                     spans = [(slot, BLOCK, len(attachment)), (slot, 0, 1)]
-                    with timed("vfs.erase"):
-                        if callable(getattr(type(self.control), "stream_erase_many", None)):
-                            self.control.stream_erase_many(spans)
-                        else:
-                            for span in spans:
-                                self.control.stream_erase(*span)
+                    try:
+                        remaining=deadline-time.monotonic()
+                        if remaining<=0:
+                            raise OperationError('deadline_exceeded','vfs.erase',tx_id=envelope['tx_id'],indeterminate=True)
+                        with limit_deadline(remaining),timed("vfs.erase"):
+                            if callable(getattr(type(self.control), "stream_erase_many", None)):
+                                self.control.stream_erase_many(spans)
+                            else:
+                                for span in spans:
+                                    self.control.stream_erase(*span)
+                    except Exception as error:
+                        if isinstance(error,OperationError) and error.code in ('cancelled','deadline_exceeded'):raise
+                        raise OperationError('worker_result_cleanup_failed','vfs.erase',
+                                             tx_id=envelope['tx_id'],indeterminate=True) from error
                 return result
         if attachment is None:
             frame = encode_frame(envelope)
@@ -742,6 +750,20 @@ exit 124
         operator = self.spec.structured_backend == "operator"
         next_state_check = time.monotonic() + 1.0
         read_snapshot = getattr(type(self.control), "read_file_snapshot", None)
+        def read(method,*args,**kwargs):
+            # Local QGA exchange limits must leave room for a fresh observation
+            # within this request's original deadline. Other controls retain
+            # their own bounded local file implementations.
+            if isinstance(self.control,QgaClient):
+                remaining=deadline-time.monotonic()
+                if remaining<=0:raise TimeoutError('Worker response deadline expired')
+                kwargs['timeout_sec']=min(3.0,remaining)
+                try:
+                    with limit_deadline(remaining):return method(*args,**kwargs)
+                except OperationError as error:
+                    if error.code in ('cancelled','deadline_exceeded'):error.indeterminate=True
+                    raise
+            return method(*args,**kwargs)
         while time.monotonic() < deadline:
             checkpoint("vfs.response")
             completed=[];matched=[]
@@ -769,16 +791,26 @@ exit 124
             try:
                 if download is not None:
                     count = decoder.read_limit - cursor
-                    data = (self.control.stream_read_committed(res, cursor, validate, count=count)
-                            if combined else self.control.stream_read(res, cursor, count))
+                    data = (read(self.control.stream_read_committed,res,cursor,validate,count=count)
+                            if combined else read(self.control.stream_read,res,cursor,count))
                 else:
-                    data = self.control.stream_read_committed(res,cursor,validate) if combined else self.control.stream_read(res, cursor)
+                    data = (read(self.control.stream_read_committed,res,cursor,validate) if combined
+                            else read(self.control.stream_read,res,cursor))
+            except (TimeoutError,ConnectionError) as error:
+                checkpoint('vfs.response')
+                if completed:
+                    raise OperationError('worker_result_cleanup_failed','vfs.erase',
+                                         tx_id=envelope['tx_id'],indeterminate=True) from error
+                data=b''
             except QgaCommandError as error:
                 # A new result may be absent or exclusively held by its writer.
                 # Retry only this read-side open under the original deadline;
                 # never republish the request.
                 if error.command != "guest-file-open":
                     raise
+                if completed:
+                    raise OperationError('worker_result_cleanup_failed','vfs.erase',
+                                         tx_id=envelope['tx_id'],indeterminate=True) from error
                 data = b""
             cursor += len(data)
             if completed:
@@ -795,7 +827,16 @@ exit 124
                 if value.get("legacy_result") is True:
                     if value.get("worker_instance") != info["instance"] or value.get("worker_sha256") != info["worker_sha256"]:
                         raise ValueError("Stream delivery marker identity mismatch")
-                    raw = self.control.read_bytes(legacy).decode("utf-8-sig")
+                    while True:
+                        checkpoint('vfs.response')
+                        if time.monotonic()>=deadline:
+                            raise OperationError('worker_response_timeout','vfs.response',
+                                                 tx_id=envelope['tx_id'],indeterminate=True)
+                        try:
+                            raw = read(self.control.read_bytes,legacy).decode('utf-8-sig')
+                            break
+                        except (TimeoutError,ConnectionError):
+                            time.sleep(min(.015,max(0,deadline-time.monotonic())))
                 result = (parse(value) if download is not None else
                           self._parse_worker_response(raw, int((time.monotonic()-started)*1000), envelope["tx_id"], identity, strict=True))
                 with timed("vfs.erase"):
@@ -816,10 +857,13 @@ exit 124
                         if callable(read_snapshot):
                             state_raw, stamp = read_snapshot(self.control, state_path)
                         else:
-                            state_raw = self.control.try_read_bytes(state_path, truncate_after_read=False)
+                            state_raw = read(self.control.try_read_bytes,state_path,truncate_after_read=False)
                             stamp = None
                         state = json.loads(state_raw.decode("utf-8-sig")) if state_raw and len(state_raw) <= 65536 else {}
                     except (ValueError, RecursionError):
+                        state = {}
+                    except (TimeoutError,ConnectionError):
+                        checkpoint('vfs.response')
                         state = {}
                     except QgaCommandError as error:
                         if error.command != "guest-file-open":

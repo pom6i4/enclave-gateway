@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Recover transient Stream response-read failures within the original request
+  deadline. Bound QGA polling exchanges and retry synchronization before dispatch.
+- Retry only confirmed zeroing after a cleanup disconnect. Release upload slots
+  after a verified block acknowledgement and preserve unresolved payloads.
+
 - Recognize the Windows and numeric QGA missing-PID errors when retiring orphan
   observations. Preserve unresolved PIDs on unrelated control errors.
 - Observe Stream metadata with write/delete sharing and bounded retries during

@@ -144,6 +144,7 @@ class QgaClient:
     """Thread/process-safe client for QEMU Guest Agent over virtio-serial UNIX socket."""
 
     CHUNK_SIZE = 65536
+    _SYNC_ATTEMPT_SEC = 1.0
 
     def __init__(
         self,
@@ -173,26 +174,43 @@ class QgaClient:
     @contextmanager
     def _open_synced(self, deadline):
         from enclave_gateway.control.local_socket import connect_local
-        checkpoint("control.connect")
-        try:
-            connection = connect_local(self.socket_path, max(0.001, deadline-time.monotonic()))
-        except OSError as error:
-            raise OperationError("qga_unavailable", "control.connect", node="@appliance",
-                                 message="Cannot connect to QEMU Guest Agent. Check that the Appliance is running and its QGA endpoint is accessible.") from error
-        with connection as sock:
-            reader = SocketLineReader(sock, deadline)
-            sync_id = random.getrandbits(63)
-            payload = json.dumps({"execute": "guest-sync-delimited", "arguments": {"id": sync_id}})
-            sock.sendall(b"\xff" + (payload + "\n").encode("utf-8"))
-            reader.sync_marker()
-            while True:
+        while True:
+            checkpoint("control.connect")
+            remaining=deadline-time.monotonic()
+            if remaining<=0:raise TimeoutError('Control channel deadline expired')
+            try:
+                connection = connect_local(self.socket_path, min(self._SYNC_ATTEMPT_SEC,remaining))
+            except (TimeoutError,ConnectionError):
+                time.sleep(min(.015,max(0,deadline-time.monotonic())))
+                continue
+            except OSError as error:
+                raise OperationError("qga_unavailable", "control.connect", node="@appliance",
+                                     message="Cannot connect to QEMU Guest Agent. Check that the Appliance is running and its QGA endpoint is accessible.") from error
+            with connection as sock:
+                reader = SocketLineReader(sock, min(deadline,time.monotonic()+self._SYNC_ATTEMPT_SEC))
+                sync_id = random.getrandbits(63)
+                payload = json.dumps({"execute": "guest-sync-delimited", "arguments": {"id": sync_id}})
                 try:
-                    response = json.loads(reader.readline(sync=True))
-                except (ValueError, UnicodeError):
-                    continue
-                if isinstance(response, dict) and type(response.get("return")) is int and response["return"] == sync_id:
-                    break
-            yield sock, reader
+                    sock.sendall(b"\xff" + (payload + "\n").encode("utf-8"))
+                    reader.sync_marker()
+                    while True:
+                        checkpoint('control.sync')
+                        if time.monotonic()>=reader.deadline:raise TimeoutError('Control channel deadline expired')
+                        try:
+                            response = json.loads(reader.readline(sync=True))
+                        except (ValueError, UnicodeError):
+                            continue
+                        if isinstance(response, dict) and type(response.get("return")) is int and response["return"] == sync_id:
+                            break
+                except (TimeoutError,ConnectionError):
+                    pass
+                else:
+                    # Only synchronization is retried. Exceptions after yield
+                    # must reach the caller without replaying any QGA command.
+                    reader.deadline=deadline
+                    yield sock, reader
+                    return
+            time.sleep(min(.015,max(0,deadline-time.monotonic())))
 
     def wait_until_ready(self, timeout_sec: float) -> None:
         deadline = time.monotonic() + budget(timeout_sec, "control.connect")
@@ -215,9 +233,9 @@ class QgaClient:
         if arguments is not None:
             payload["arguments"] = arguments
         checkpoint("qga." + command)
-        context = current()
-        if context:
-            sock.settimeout(context.remaining())
+        remaining=reader.deadline-time.monotonic()
+        if remaining<=0:raise TimeoutError('Control channel deadline expired')
+        sock.settimeout(budget(remaining,'qga.'+command))
         if command == "guest-exec":
             mark_dispatched()
         sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
@@ -425,10 +443,10 @@ class QgaClient:
         import io
         self._write_stream(io.BytesIO(data), guest_path)
 
-    def read_bytes(self, guest_path: str) -> bytes:
+    def read_bytes(self, guest_path: str, *, timeout_sec: float = 30.0) -> bytes:
         import io
         stream = io.BytesIO()
-        self._read_stream(stream, guest_path)
+        self._read_stream(stream, guest_path, timeout_sec=timeout_sec)
         return stream.getvalue()
 
     @contextmanager
@@ -487,33 +505,41 @@ class QgaClient:
                     break
         return bytes(output)
 
-    def stream_read(self, path: str, offset: int, count: int = 65536) -> bytes:
-        with self._connect_synced() as (sock, reader):
+    def stream_read(self, path: str, offset: int, count: int = 65536, *, timeout_sec=30.0) -> bytes:
+        with self._connect_synced(timeout_sec) as (sock, reader):
             return self._stream_read_on_connection(sock, reader, path, offset, count)
 
-    def stream_read_committed(self, path, offset, validate, *, count=65536):
+    def stream_read_committed(self, path, offset, validate, *, count=65536, timeout_sec=30.0):
         """Read, validate, then erase acknowledged spans without another sync.
 
         The callback performs no control-channel IO. Empty/incomplete and legacy
-        delivery markers return no spans. No payload or validator is retried.
+        delivery markers return no spans. After validation only pending erasure
+        is retried; the validator and the worker request are never replayed.
         """
         pending=[]
-        with self._connect_synced() as (sock, reader):
-            data=self._stream_read_on_connection(sock, reader, path, offset, count)
-            spans=validate(data)
-            if spans:
-                pending=self._validate_stream_spans(spans)
-                try:
+        try:
+            with self._connect_synced(timeout_sec) as (sock, reader):
+                data=self._stream_read_on_connection(sock, reader, path, offset, count)
+                spans=validate(data)
+                if spans:
+                    pending=self._validate_stream_spans(spans)
+                    # The short observation budget ends at validation. Erasure
+                    # has its own bounded budget within the operation deadline.
+                    if reader is not None:reader.deadline=time.monotonic()+budget(5,'vfs.erase')
                     with timed('vfs.erase'):self._erase_stream_on_connection(sock,reader,pending)
-                except QgaCommandError as error:
-                    if error.command!='guest-file-open':
-                        raise OperationError('worker_result_cleanup_failed','vfs.erase',indeterminate=True) from error
+        except Exception as error:
+            if not pending:raise
+            if isinstance(error,OperationError) and error.code in ('cancelled','deadline_exceeded'):raise
+            if not (isinstance(error,(TimeoutError,ConnectionError)) or
+                    isinstance(error,QgaCommandError) and error.command=='guest-file-open'):
+                raise OperationError('worker_result_cleanup_failed','vfs.erase',indeterminate=True) from error
         if pending:
             # An unrelated reader may briefly prevent write-open. Release the
             # channel and retry only remaining zeroing, never response parsing.
             try:
                 with timed('vfs.erase'):self.stream_erase_many(pending)
             except Exception as error:
+                if isinstance(error,OperationError) and error.code in ('cancelled','deadline_exceeded'):raise
                 raise OperationError('worker_result_cleanup_failed','vfs.erase',indeterminate=True) from error
         return data
 
@@ -594,12 +620,13 @@ class QgaClient:
         remaining=self._validate_stream_spans(spans)
         deadline=time.monotonic()+budget(5,'vfs.stream_erase')
         while remaining:
-            before=len(remaining)
             try:
-                with self._connect_synced() as(sock,reader):self._erase_stream_on_connection(sock,reader,remaining)
-            except QgaCommandError as error:
-                if len(remaining)<before:deadline=time.monotonic()+budget(5,'vfs.stream_erase')
-                if error.command!='guest-file-open' or time.monotonic()>=deadline:raise
+                left=deadline-time.monotonic()
+                if left<=0:raise TimeoutError('Stream erasure deadline expired')
+                with self._connect_synced(min(3,left)) as(sock,reader):self._erase_stream_on_connection(sock,reader,remaining)
+            except (TimeoutError,ConnectionError,QgaCommandError) as error:
+                if isinstance(error,QgaCommandError) and error.command!='guest-file-open':raise
+                if time.monotonic()>=deadline:raise
                 checkpoint('vfs.stream_erase');time.sleep(.005)
 
     def publish_bytes(self, data: bytes, guest_path: str) -> None:
@@ -654,11 +681,11 @@ if($name -match '^(req|cancel)_[A-Za-z0-9_-]{1,128}\.json$'){
     def consume_file(self, guest_path: str) -> None:
         self.write_bytes(b"", guest_path)
 
-    def try_read_bytes(self, guest_path: str, *, truncate_after_read: bool = False) -> bytes | None:
+    def try_read_bytes(self, guest_path: str, *, truncate_after_read: bool = False, timeout_sec: float = 30.0) -> bytes | None:
         # Publication uses rename; never consume or truncate an incomplete envelope.
         # Missing files are normal while polling. Other QGA failures remain visible.
         try:
-            data = self.read_bytes(guest_path)
+            data = self.read_bytes(guest_path,timeout_sec=timeout_sec)
         except RuntimeError as exc:
             if any(marker in str(exc).lower() for marker in ("no such file", "cannot find", "not found")):
                 return None
