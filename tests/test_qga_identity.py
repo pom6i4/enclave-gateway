@@ -94,7 +94,7 @@ class QgaIdentityTests(unittest.TestCase):
 
     def test_launch_drains_multiple_records_of_a_recycled_pid(self):
         prefix='EGW_QGA:'+'a'*32+'\n'
-        missing=QgaCommandError('guest-exec-status',{'error':{'desc':'PID does not exist'}})
+        missing=QgaCommandError('guest-exec-status',{'error':{'class':'GenericError','desc':'PID does not exist'}})
         client=self.client([exited('first orphan'),{'pid':17},exited('second orphan'),
                             exited(prefix+'current'),missing,{'pid':18},exited('next')])
         client._unreaped_pids.add(17)
@@ -102,6 +102,40 @@ class QgaIdentityTests(unittest.TestCase):
             self.assertEqual(client.exec_powershell('payload',timeout_sec=2).stdout,'current')
         self.assertEqual(client.exec_guest('fixture.exe',timeout_sec=1).stdout,'next')
         self.assertFalse(client._unreaped_pids)
+
+    def test_real_missing_pid_errors_release_reaped_pid_for_raw_commands(self):
+        for description in ('PID does not exist','PID 4628 does not exist',
+                            ' PID lld does not exist ',"Parameter 'pid' expects invalid pid"):
+            with self.subTest(description=description):
+                missing=QgaCommandError('guest-exec-status',{'error':{'class':'GenericError','desc':description}})
+                client=self.client([exited('orphan'),{'pid':30},exited('first'),
+                                    missing,{'pid':4628},exited('reused current'),
+                                    {'pid':31},exited('third')])
+                client._unreaped_pids.add(4628)
+                self.assertEqual(client.exec_guest('fixture.exe',timeout_sec=1).stdout,'first')
+                self.assertEqual(client._unreaped_pids,{4628})
+                self.assertEqual(client.exec_guest('fixture.exe',timeout_sec=1).stdout,'reused current')
+                self.assertFalse(client._unreaped_pids)
+                calls=len(client._request.call_args_list)
+                self.assertEqual(client.exec_guest('fixture.exe',timeout_sec=1).stdout,'third')
+                self.assertEqual([c.args[2] for c in client._request.call_args_list[calls:]],
+                                 ['guest-exec','guest-exec-status'])
+
+    def test_other_errors_never_forget_an_unresolved_pid(self):
+        for detail in ({'class':'GenericError','desc':'PID 9999 does not exist'},
+                       {'class':'PermissionDenied','desc':'PID 4628 does not exist'},
+                       {'class':'GenericError','desc':'Access denied: PID 4628 does not exist'},
+                       {'class':'GenericError','desc':"Parameter 'path' expects invalid pid"},
+                       {'class':'GenericError','desc':'PID 4628 does not exist; retry later'},
+                       {'class':'GenericError','desc':None},'unstructured error'):
+            with self.subTest(detail=detail):
+                error=QgaCommandError('guest-exec-status',{'error':detail})
+                client=self.client([error,{'pid':4628}])
+                client._unreaped_pids.add(4628)
+                with self.assertRaises(OperationError) as raised:
+                    client.exec_guest('fixture.exe',timeout_sec=1)
+                self.assertEqual(raised.exception.code,'qga_pid_collision')
+                self.assertEqual(client._unreaped_pids,{4628})
 
     @unittest.skipUnless(os.environ.get('EGW_TEST_POWERSHELL'),'Requires real PowerShell')
     def test_real_interpreter_marker_and_large_stdin_source_preserve_output_and_exit(self):

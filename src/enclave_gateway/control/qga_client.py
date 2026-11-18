@@ -7,6 +7,7 @@ import errno
 import json
 import os
 import random
+import re
 import secrets
 import socket
 import subprocess
@@ -339,8 +340,18 @@ class QgaClient:
                     except QgaCommandError as error:
                         # QGA uses GenericError for both a missing PID and other
                         # failures. Retain the record unless absence is explicit.
-                        description=error.response.get('error',{}).get('desc','')
-                        if description == "PID does not exist":self._unreaped_pids.discard(pid)
+                        detail=error.response.get('error') if isinstance(error.response,dict) else None
+                        if not isinstance(detail,dict):continue
+                        description=detail.get('desc')
+                        if not isinstance(description,str):continue
+                        description=description.strip()
+                        missing=re.fullmatch(r'PID ([0-9]{1,20}|lld) does not exist',description)
+                        # Windows builds can emit the literal format token lld.
+                        # A numeric error must refer to the PID being observed.
+                        absent=(description in ('PID does not exist',"Parameter 'pid' expects invalid pid") or
+                                (missing and (missing[1]=='lld' or int(missing[1])==pid)))
+                        if detail.get('class') in ('GenericError','InvalidParameterValue') and absent:
+                            self._unreaped_pids.discard(pid)
                         continue
                     # Retain the PID until QGA confirms absence: more than one
                     # orphan can have the same recycled Windows identifier.

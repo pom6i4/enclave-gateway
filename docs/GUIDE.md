@@ -608,6 +608,9 @@ result and continues observing the acknowledged process within its original
 deadline. It does not replay the command. Later launches perform bounded orphan
 collection. A raw guest command with a known unresolved PID collision fails as
 `qga_pid_collision` with an indeterminate outcome.
+Completed orphan identifiers leave the local registry after an explicit QGA
+missing-PID response. Windows format-token descriptions are supported alongside
+numeric descriptions; unrelated errors retain the unresolved identifier.
 
 The ViPNet adapter includes Mobile installation candidates and `info`, guarded by
 exact configured version, architecture and trusted publisher matching. These are
@@ -861,6 +864,10 @@ when QGA synchronization is unavailable or fails.
 For the foreground operator, `heal` observes the session and leaves the
 existing bundle in place. Use `egw heal --policy-source ./worker-policy.json`
 to explicitly stage the approved policy and worker.
+The Stream session observer reads metadata with write/delete sharing and retries
+up to three snapshots with 100 ms backoff between attempts. A writer or transient
+publication can therefore settle without reconnecting the operator session.
+A fresh stopping/stopped pulse takes precedence over the running-state fallback.
 
 Heartbeat checks accept up to five seconds of Bastion clock lead. Older
 heartbeats still expire at `heartbeat_max_age_sec`, and the cached expiry never

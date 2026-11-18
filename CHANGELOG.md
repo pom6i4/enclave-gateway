@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Recognize the Windows and numeric QGA missing-PID errors when retiring orphan
+  observations. Preserve unresolved PIDs on unrelated control errors.
+- Observe Stream metadata with write/delete sharing and bounded retries during
+  `heal`. Preserve typed heartbeat timestamps and stopped-pulse precedence.
+
 - Bind PowerShell QGA results to a fresh invocation marker. Drain timed-out
   process records on later launches and reject unresolved raw-command PID
   collisions without replaying commands.
