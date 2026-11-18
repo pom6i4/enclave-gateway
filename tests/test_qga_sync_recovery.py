@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from enclave_gateway.control.qga_client import QgaClient
+from enclave_gateway.operations.context import OperationError
 
 
 class QgaSyncRecoveryTests(unittest.TestCase):
@@ -60,6 +61,17 @@ class QgaSyncRecoveryTests(unittest.TestCase):
                 with self.assertRaises(ConnectionError):client.exec_guest('fixture.exe',timeout_sec=1)
             self.assertEqual(connect.call_count,1)
             self.assertEqual(self.commands,['guest-exec'])
+
+    def test_missing_or_refused_endpoint_keeps_the_connect_diagnostic(self):
+        for error in (FileNotFoundError('endpoint missing'),ConnectionRefusedError('endpoint refused')):
+            with self.subTest(error=type(error).__name__),tempfile.TemporaryDirectory() as directory:
+                client=QgaClient(Path(directory)/'qga.sock')
+                with patch('enclave_gateway.control.local_socket.connect_local',side_effect=error) as connect:
+                    with self.assertRaises(OperationError) as raised:
+                        with client._connect_synced(1):self.fail('Missing endpoint yielded a connection')
+                self.assertEqual(raised.exception.code,'qga_unavailable')
+                self.assertEqual(raised.exception.stage,'control.connect')
+                self.assertEqual(connect.call_count,1)
 
     def test_repeated_sync_failures_respect_the_original_deadline(self):
         with tempfile.TemporaryDirectory() as directory:

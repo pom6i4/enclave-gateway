@@ -180,7 +180,7 @@ class QgaClient:
             if remaining<=0:raise TimeoutError('Control channel deadline expired')
             try:
                 connection = connect_local(self.socket_path, min(self._SYNC_ATTEMPT_SEC,remaining))
-            except (TimeoutError,ConnectionError):
+            except TimeoutError:
                 time.sleep(min(.015,max(0,deadline-time.monotonic())))
                 continue
             except OSError as error:
