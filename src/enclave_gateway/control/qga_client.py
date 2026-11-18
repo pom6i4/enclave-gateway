@@ -7,6 +7,7 @@ import errno
 import json
 import os
 import random
+import secrets
 import socket
 import subprocess
 import threading
@@ -155,6 +156,10 @@ class QgaClient:
             Path(lock_path) if lock_path else Path(f"{self.socket_path}.lock")
         )
         self.supports_direct_spool_ipc = direct_spool_ipc
+        self._unreaped_pids: set[int] = set()
+        self._exec_state_lock = threading.Lock()
+        self._active_pids: set[int] = set()
+        self._reap_cursor = 0
 
     @contextmanager
     def _connect_synced(self, timeout_sec: float = 30.0) -> Iterator[tuple[socket.socket, object]]:
@@ -278,30 +283,99 @@ class QgaClient:
 
     def exec_powershell(self, script: str, timeout_sec: float = 120.0) -> ExecResult:
         request_data=getattr(script,"request_data",None)
-        source="$ProgressPreference='SilentlyContinue';\n"+script
+        prefix='EGW_QGA:'+secrets.token_hex(16)+'\n'
+        source=("$ProgressPreference='SilentlyContinue';\n"
+                "[Console]::Out.WriteLine('"+prefix.rstrip('\n')+"');[Console]::Out.Flush();\n")
         preamble="[Console]::InputEncoding=[Text.UTF8Encoding]::new($false);"
         if request_data:preamble+="$RequestData=[Console]::In.ReadLine()|ConvertFrom-Json;"
-        command=(preamble+'\n' if request_data else '')+source
+        # Parse the caller's source only after publishing the marker, so a
+        # syntax error is still an identifiable result with its real stderr.
+        # An invoked scriptblock resets $? on return. Preserve the caller's
+        # final failure inside that block before it returns to the bootstrap.
+        tail="+[char]10+'if(-not $?){exit 1}'"
+        encoded_source=base64.b64encode(script.encode('utf-8')).decode('ascii')
+        command=(source+(preamble+'\n' if request_data else '')+
+                 "& ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('"+encoded_source+"'))"+tail+"))")
         encoded_cmd=base64.b64encode(command.encode('utf-16le')).decode('ascii')
         data=(json.dumps(request_data)+'\n').encode() if request_data else b''
         # Windows CreateProcess limits the complete command line to 32767 UTF-16
         # characters. Keep argv bounded; QGA can carry the source through stdin.
         if len(encoded_cmd)>24000:
-            bootstrap="$ProgressPreference='SilentlyContinue';"+preamble+"& ([scriptblock]::Create([Console]::In.ReadToEnd()))"
+            bootstrap=source+preamble+"& ([scriptblock]::Create([Console]::In.ReadToEnd()"+tail+"))"
             encoded_cmd=base64.b64encode(bootstrap.encode('utf-16le')).decode('ascii')
-            data+=source.encode('utf-8')
+            data+=script.encode('utf-8')
         return self.exec_guest('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',encoded_cmd],
-                               input_data=data or None,timeout_sec=timeout_sec)
+                               input_data=data or None,timeout_sec=timeout_sec,_stdout_prefix=prefix)
 
-    def exec_guest(self,path: str,arguments=(),*,input_data: bytes | None=None,timeout_sec: float=120.0) -> ExecResult:
+    @contextmanager
+    def _exec_state(self, deadline):
+        while not self._exec_state_lock.acquire(timeout=max(0, min(.05, deadline-time.monotonic()))):
+            checkpoint('qga.exec_state')
+            if time.monotonic() >= deadline:
+                raise TimeoutError('Timed out waiting for QGA process observation')
+        try:
+            if time.monotonic() >= deadline:
+                raise TimeoutError('Timed out waiting for QGA process observation')
+            yield
+        finally:
+            self._exec_state_lock.release()
+
+    def _reap_unreaped(self, deadline):
+        """One bounded observation per orphan; never wait for or restart it.
+
+        The caller holds the process registry lock through the next launch, so
+        maintenance cannot consume the result of a concurrently registered PID.
+        """
+        pending=sorted(self._unreaped_pids-self._active_pids)
+        if not pending:return
+        start=self._reap_cursor%len(pending)
+        self._reap_cursor=start+8
+        pending=(pending[start:]+pending[:start])[:8]
+        try:
+            with self._connect_synced(min(.25,max(.001,deadline-time.monotonic()))) as (sock,reader):
+                for pid in pending:
+                    try:
+                        self._request(sock,reader,'guest-exec-status',{'pid':pid})
+                    except QgaCommandError as error:
+                        # QGA uses GenericError for both a missing PID and other
+                        # failures. Retain the record unless absence is explicit.
+                        description=error.response.get('error',{}).get('desc','')
+                        if description == "PID does not exist":self._unreaped_pids.discard(pid)
+                        continue
+                    # Retain the PID until QGA confirms absence: more than one
+                    # orphan can have the same recycled Windows identifier.
+        except (TimeoutError,ConnectionError):
+            pass
+
+    def exec_guest(self,path: str,arguments=(),*,input_data: bytes | None=None,timeout_sec: float=120.0,
+                   _stdout_prefix: str | None=None) -> ExecResult:
         if not isinstance(arguments,(list,tuple)) or not isinstance(path,str) or not path or '\0' in path or any(not isinstance(item,str) or '\0' in item for item in arguments):
             raise ValueError('Invalid guest command')
         timeout_sec=budget(timeout_sec,'qga.exec');started=time.monotonic();deadline=started+timeout_sec
         request={'path':path,'arg':list(arguments),'capture-output':True}
         if input_data is not None:request['input-data']=base64.b64encode(input_data).decode('ascii')
-        with self._connect_synced(min(timeout_sec,30.0)) as (sock,reader):
-            result=self._request(sock,reader,'guest-exec',request)
-            pid=result['pid']
+        with self._exec_state(deadline):
+            self._reap_unreaped(deadline)
+            remaining=deadline-time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('QGA execution budget expired before launch')
+            with self._connect_synced(min(30.0,remaining)) as (sock,reader):
+                result=self._request(sock,reader,'guest-exec',request)
+                pid=result['pid']
+            if pid in self._active_pids or (pid in self._unreaped_pids and _stdout_prefix is None):
+                self._unreaped_pids.add(pid)
+                raise OperationError('qga_pid_collision','qga.exec',node='@appliance',indeterminate=True,
+                                     message='QGA reused an unresolved process ID; command result cannot be identified. No command was replayed.')
+            self._active_pids.add(pid)
+        try:
+            return self._wait_guest(pid,started,deadline,timeout_sec,_stdout_prefix)
+        except BaseException:
+            with self._exec_state_lock:self._unreaped_pids.add(pid)
+            raise
+        finally:
+            with self._exec_state_lock:self._active_pids.discard(pid)
+
+    def _wait_guest(self,pid,started,deadline,timeout_sec,stdout_prefix):
         delay = 0.015
         while time.monotonic() < deadline:
             checkpoint("qga.exec_status")
@@ -321,9 +395,17 @@ class QgaClient:
             if status.get("exited"):
                 def decode(key):
                     return base64.b64decode(status.get(key, ""), validate=True).decode("utf-8", errors="replace").replace("\r\n", "\n")
+                stdout=decode('out-data')
+                if stdout_prefix is not None:
+                    # guest-exec-status removes the oldest matching PID. A
+                    # timed-out predecessor can therefore exit before our new
+                    # process. Consume it, then observe this PID again; never
+                    # replay guest-exec or return an unbound exit code/output.
+                    if not stdout.startswith(stdout_prefix):continue
+                    stdout=stdout[len(stdout_prefix):]
                 return ExecResult(
                     int(status.get("exitcode", 128 + int(status.get("signal", 0)))),
-                    decode("out-data"), decode("err-data"),
+                    stdout, decode("err-data"),
                     int((time.monotonic() - started) * 1000),
                 )
         raise TimeoutError(f"QGA guest-exec timed out after {timeout_sec}s; guest process may still be running")

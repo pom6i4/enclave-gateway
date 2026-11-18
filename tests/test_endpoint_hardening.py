@@ -76,7 +76,10 @@ class RequestDataTests(unittest.TestCase):
             def __init__(self):pass
             def exec_guest(self,path,arguments,**options):
                 result=subprocess.run([os.environ['EGW_TEST_POWERSHELL'],*arguments],input=options['input_data'],capture_output=True,timeout=15)
-                return ExecResult(result.returncode,result.stdout.decode(),result.stderr.decode(),0)
+                stdout=result.stdout.decode().replace('\r\n','\n')
+                prefix=options['_stdout_prefix']
+                assert stdout.startswith(prefix), result.stderr
+                return ExecResult(result.returncode,stdout[len(prefix):],result.stderr.decode(),0)
         source='[Console]::Write($RequestData.marker);\n#'+'x'*13000
         result=Channel().exec_powershell(PowerShellRequest(source,{'marker':'fixture-данные'}))
         self.assertEqual((result.exit_code,result.stdout),(0,'fixture-данные'),result.stderr)

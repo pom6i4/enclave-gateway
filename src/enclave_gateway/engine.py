@@ -33,7 +33,7 @@ DEFAULT_SYNC_EXCLUDES = (
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 from enclave_gateway.audit.flight_recorder import FlightRecorder
-from enclave_gateway.operations.context import OperationError, budget, checkpoint, current, mark_dispatched, principal, timed, owned_cleanup
+from enclave_gateway.operations.context import OperationError, budget, checkpoint, current, mark_dispatched, principal, timed, owned_cleanup, limit_deadline
 from enclave_gateway.operations.journal import TransactionJournal, TERMINAL
 from enclave_gateway.operations.runner import tracked
 from enclave_gateway.providers import provider_adapter
@@ -264,7 +264,7 @@ class EnclaveEngine:
             result.duration_ms=int((time.monotonic()-started)*1000)
         return result
 
-    def status(self) -> dict[str, Any]:
+    def status(self, *, worker_probe_timeout_sec: float = 10) -> dict[str, Any]:
         """Collect health telemetry across Appliance, VPN provider, and Bastion."""
         vm_running, pid = self.hypervisor.is_running()
         report: dict[str, Any] = {
@@ -389,8 +389,15 @@ ConvertTo-Json $out -Compress -Depth 8
             from enclave_gateway.worker_channel import _structured_worker_state
             path = self.config.bastion.appliance_spool_dir.rstrip('\\/') + '\\worker_state.json'
             try:
-                state = _structured_worker_state(self.control, path, self.config.bastion)
-            except Exception:
+                with limit_deadline(worker_probe_timeout_sec):
+                    state = _structured_worker_state(self.control, path, self.config.bastion,
+                                                      timeout_sec=worker_probe_timeout_sec)
+            except Exception as error:
+                report['bastion']['control_probe_error'] = {
+                    'code': 'control_probe_error',
+                    'cause': getattr(error, 'code', 'timeout' if isinstance(error, TimeoutError) else type(error).__name__),
+                    'message': self.vault.scrubber.scrub(str(error)),
+                }
                 state = {}
             report['bastion']['worker_state'] = state.get('worker_state')
             report['bastion']['worker_healthy'] = (
@@ -1189,7 +1196,7 @@ echo "SYNC_PACK_OK"
     ) -> dict[str, Any]:
         """Run end-to-end L1-L7 diagnostic checklist across Host, Appliance, VPN, Bastion, and Targets."""
         from enclave_gateway.diagnostics import remediation,diagnostic_code
-        st=self.status();checks=[];needs_heal=False
+        st=self.status(worker_probe_timeout_sec=15);checks=[];needs_heal=False
         def add(name,ok,detail,applicable=True):
             row={'check':name,'ok':bool(ok),'detail':self.vault.scrubber.scrub(str(detail)),'applicable':applicable}
             if not ok:row.update(remediation=remediation(detail),code=diagnostic_code(detail))
@@ -1235,6 +1242,9 @@ Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue |
         wrk_ok=False
         if self.config.bastion.enabled:
             wrk_ok=bool(st['bastion']['worker_healthy']);detail='No fresh worker heartbeat; spool or worker unavailable'
+            probe_error=st['bastion'].get('control_probe_error')
+            if probe_error:
+                detail='Control probe error: '+probe_error['cause']+'; '+probe_error['message']
             if wrk_ok:
                 try:
                     if self.config.security.enforce_worker_attestation:
@@ -1244,14 +1254,18 @@ Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue |
                     wrk_ok=ping.exit_code==0 and 'VFS_PONG' in ping.stdout
                     detail='VFS round trip='+str(ping.duration_ms)+'ms' if wrk_ok else ping.stderr
                 except Exception as error:wrk_ok=False;detail=str(error)
-            add('bastion_rdp_vfs_ipc',wrk_ok,detail);needs_heal=needs_heal or not wrk_ok
+            add('bastion_rdp_vfs_ipc',wrk_ok,detail)
+            needs_heal=needs_heal or (not wrk_ok and not probe_error)
         else:add('bastion_rdp_vfs_ipc',True,'Bastion disabled; no RDP worker needed',False)
         if probe_targets and vm_ok:
             for name,target in self.config.targets.items():
                 if nodes is not None and name not in nodes:continue
                 hop,_=self._resolve_hop_and_jump(target)
                 if hop is self.bastion_ssh and not wrk_ok:
-                    add('target_ssh:'+name,False,'Bastion worker unavailable; provision verified known_hosts and keys on Bastion first');continue
+                    reason=('Control probe error: target check skipped until Appliance control responds'
+                            if st['bastion'].get('control_probe_error') else
+                            'Bastion worker unavailable; provision verified known_hosts and keys on Bastion first')
+                    add('target_ssh:'+name,False,reason);continue
                 try:
                     result=self.exec_node(name,'echo TARGET_SSH_OK',timeout_sec=45,actor=actor)
                     add('target_ssh:'+name,result.exit_code==0 and 'TARGET_SSH_OK' in result.stdout,result.stdout or result.stderr)

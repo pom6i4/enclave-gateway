@@ -318,6 +318,11 @@ if(@(Get-ChildItem $PSScriptRoot -Filter '*.tmp').Count){throw 'Temporary public
             descriptor.write_text('old descriptor')
             request = spool / ('ipc_req_' + 'a' * 32 + '.bin')
             request.write_bytes(b'preserved payload')
+            slots=[]
+            for index in range(400):
+                slot=spool / ('ipc_res_'+'a'*32+'_'+str(index)+'.bin')
+                slot.write_bytes(b'preserved slot')
+                slots.append(slot)
             journal = spool / '.structured-transactions'
             journal.mkdir()
             (journal / 'receipt.json').write_text('preserved journal')
@@ -346,8 +351,11 @@ if(@(Get-ChildItem $PSScriptRoot -Filter '*.tmp').Count){throw 'Temporary public
             engine = engine_at(Path(directory), control, EnclaveConfig.from_dict(raw))
             receipt = engine.stage_agents()['stream_prune']
             self.assertTrue(receipt['stopped_worker_verified'])
-            self.assertEqual(receipt['retired_state_files'], 3)
+            self.assertEqual(receipt['stream_cleanup'], 'complete')
+            self.assertEqual(receipt['retired_state_files'], 403)
             retired = Path(receipt['retired_state_directory'])
             self.assertEqual((retired / request.name).read_bytes(), b'preserved payload')
+            self.assertTrue(all(not slot.exists() and (retired / slot.name).read_bytes() == b'preserved slot'
+                                for slot in slots))
             self.assertFalse(request.exists() or descriptor.exists() or state_path.exists())
             self.assertEqual((journal / 'receipt.json').read_text(), 'preserved journal')

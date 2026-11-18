@@ -596,6 +596,19 @@ The short-command gate remains 800 ms. Select stream mode for its separate
 heartbeat and request path; the compatible files protocol still performs costly
 redirected metadata operations on WAN routes.
 
+Doctor allows 15 seconds for operator heartbeat observation and retries
+one transient timeout within that budget and the enclosing operation deadline.
+A QGA failure appears as `control_probe_error` in Status and Doctor. It leaves worker health
+unconfirmed and skips target probes with the control-channel cause. Check QGA
+responsiveness before repeating the diagnostic.
+
+PowerShell QGA calls carry a fresh invocation marker. If Windows recycles a PID
+whose old QGA result has not been collected, the client discards the unrelated
+result and continues observing the acknowledged process within its original
+deadline. It does not replay the command. Later launches perform bounded orphan
+collection. A raw guest command with a known unresolved PID collision fails as
+`qga_pid_collision` with an indeterminate outcome.
+
 The ViPNet adapter includes Mobile installation candidates and `info`, guarded by
 exact configured version, architecture and trusted publisher matching. These are
 probe candidates, not evidence that every Client version/driver/architecture is
@@ -859,6 +872,15 @@ session lease, it moves old IPC files and telemetry into a unique
 `.retired-state-*` directory inside the Appliance spool. The staging receipt
 reports that directory in `stream_prune.retired_state_directory`. Payloads and
 the transaction journal remain available for reconciliation.
+
+Operator staging retires publication metadata before up to 4096 IPC/history
+files. An ordinary 128 MiB transfer does not exceed this file-count bound.
+After a verified stop, one `egw clean` call can inspect up to 4096 IPC files
+within a 4 GiB byte budget and a ten-second local scan window. It deletes only
+files whose contents are entirely zero, validated and deleted through the same
+exclusive native handle. Nonzero payloads remain available. Larger or slower
+spools report `stream_cleanup: bounded`; locked files are deferred. Retired
+directories and durable transaction journals remain untouched.
 
 ### Password-based sudo in structured_only
 

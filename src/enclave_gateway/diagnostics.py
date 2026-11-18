@@ -8,6 +8,7 @@ import shutil
 def diagnostic_code(detail, exit_code=None):
     """Stable guidance categories; SSH 255 cannot prove transport versus remote exit."""
     value=str(detail).lower()
+    if 'control probe error' in value:return 'control_probe_error'
     if 'selected ssh route' in value or 'disabled rdp bastion' in value:return 'route_unavailable'
     if exit_code is not None and exit_code not in (0,255):return 'remote_command_failed'
     if any(s in value for s in ('host key verification failed','remote host identification has changed','no ed25519 host key','no rsa host key')):return 'ssh_host_key'
@@ -58,6 +59,8 @@ def save_support(config,output,expected_sha256):
 
 def remediation(detail):
     value=str(detail).lower()
+    if 'control probe error' in value:
+        return 'Check the Appliance QGA service and control endpoint responsiveness, then repeat the read-only probe. A failed control observation does not establish worker failure.'
     if 'structured_only requires approved ssh keys and noninteractive sudo' in value:
         return ('Use approved SSH keys. For password-based sudo, omit --sudo and pass the approved vault secret '
                 'with --secret-env EGW_SUDO_PASSWORD=VAULT_KEY, then feed it with '

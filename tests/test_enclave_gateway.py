@@ -1338,7 +1338,7 @@ class AuditRegressionTests(unittest.TestCase):
         client._request = Mock(side_effect=[{"pid": 9}, {"exited": True, "signal": 9,
             "out-data": base64.b64encode(b" padded \n").decode(),
             "err-data": base64.b64encode(b"#< CLIXML\nerror details").decode()}])
-        result = client.exec_powershell("exit 1", 1)
+        result = client.exec_guest("fixture.exe", timeout_sec=1)
         self.assertEqual(result.exit_code, 137)
         self.assertEqual(result.stdout, " padded \n")
         self.assertIn("error details", result.stderr)

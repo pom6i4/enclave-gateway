@@ -34,7 +34,7 @@ class QgaPollingTests(unittest.TestCase):
     def test_transient_status_failure_reuses_acknowledged_process(self):
         client=self.client([{'pid':17},TimeoutError('sync'),ConnectionResetError('closed'),
                             {'exited':True,'exitcode':0,'out-data':base64.b64encode(b'once').decode()}])
-        result=client.exec_powershell('payload',timeout_sec=1)
+        result=client.exec_guest('fixture.exe',timeout_sec=1)
         self.assertEqual(result.stdout,'once')
         commands=[call.args[2] for call in client._request.call_args_list]
         self.assertEqual(commands,['guest-exec']+['guest-exec-status']*3)

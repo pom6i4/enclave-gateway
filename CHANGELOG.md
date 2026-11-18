@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Bind PowerShell QGA results to a fresh invocation marker. Drain timed-out
+  process records on later launches and reject unresolved raw-command PID
+  collisions without replaying commands.
+- Retire stopped operator publication metadata even after large transfers.
+  Reclaim up to 4096 scrubbed IPC files in one local maintenance pass while
+  retaining payloads and transaction evidence.
+- Report worker control-observation errors separately from missing heartbeats.
+  Give Doctor's operator snapshot reads a 15-second observation budget.
+
 - Allow deletion sharing in structured readiness snapshots. Retry transient
   publication with bounded backoff and rewrite transient state in place when a
   reader blocks replacement. Durable transaction records keep atomic publication.

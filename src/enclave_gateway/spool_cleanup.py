@@ -147,10 +147,11 @@ if([IO.File]::Exists($path)){
     $_.Name -cmatch '^ipc_(?:req_|upload_|res_)[a-f0-9]{32}(?:_[0-9]{1,5})?\.bin$' -or
     $_.Name -cmatch '^worker_pulse_[a-f0-9]{32}_[ab]\.json$'
    })
-   if($candidates.Count -gt 128){$cleanup='bounded';$deferred=$candidates.Count}
-   else{
-    $candidates+=@([IO.FileInfo]::new([IO.Path]::Combine($spool,'ipc_descriptor.json')),
-                  [IO.FileInfo]::new($statePath))
+   # Always retire publication metadata. Ordinary transfers can leave hundreds
+   # of slots; the maintenance bound must not block the next adapter startup.
+   if($candidates.Count -gt 4096){$cleanup='bounded';$deferred=$candidates.Count-4096}
+   $candidates=@([IO.FileInfo]::new([IO.Path]::Combine($spool,'ipc_descriptor.json')),
+                [IO.FileInfo]::new($statePath))+@($candidates|Select-Object -First 4096)
     foreach($file in $candidates){
      if(-not $file.Exists){continue}
      if($file.Attributes -band [IO.FileAttributes]::ReparsePoint){$preserved++;$cleanup='linked_state';break}
@@ -163,20 +164,22 @@ if([IO.File]::Exists($path)){
       $retiredFiles++
      }catch [IO.IOException]{$deferred++;$cleanup='busy_state';break}
     }
-   }
   }elseif($stopped){
    $cleanup='unsupported_platform'
    if($env:OS -eq 'Windows_NT'){
     $cleanup='complete'
-    $attempts=0;$remaining=134217728;$prunerReady=$false
+    # Bound both total bytes inspected and file count. The local same-handle
+    # zero check still preserves payloads and interrupted transaction evidence.
+    $attempts=0;$remaining=[long]4294967296;$prunerReady=$false
+    $timer=[Diagnostics.Stopwatch]::StartNew()
     foreach($file in [IO.DirectoryInfo]::new($spool).EnumerateFiles()){
      if($file.Name -cnotmatch '^ipc_(?:req_|upload_|res_)([a-f0-9]{32})(?:_[0-9]{1,5})?\.bin$'){continue}
      if($file.Name.StartsWith('ipc_res_') -ne ($file.Name -cmatch '_[0-9]{1,5}\.bin$')){continue}
-     if($attempts -ge 128 -or $remaining -le 0){$cleanup='bounded';break}
+     if($attempts -ge 4096 -or $remaining -le 0 -or $timer.Elapsed.TotalSeconds -ge 10){$cleanup='bounded';$deferred++;break}
      $attempts++
      try{
       if(($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $file.Length -gt 67108864){$preserved++;continue}
-      if($file.Length -gt $remaining){$deferred++;continue}
+      if($file.Length -gt $remaining){$deferred++;$cleanup='bounded';continue}
       $length=[uint32]$file.Length;$remaining-=$length
       if(-not $prunerReady){STREAM_HELPER
        $prunerReady=$true

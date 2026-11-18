@@ -90,7 +90,7 @@ def _stream_state_from_reader(reader,spec):
     return max(candidates,key=lambda item:(item[0],item[1].get('status')!='running'))[1] if candidates else {}
 
 
-def _structured_worker_state(control,path,spec):
+def _structured_worker_state(control,path,spec,*,timeout_sec=5):
     reader=getattr(type(control),'read_file_snapshot',None)
     try:
         if callable(reader):
@@ -115,12 +115,15 @@ if([IO.File]::Exists($p)){
 """
             with read_only_preflight():
                 try:
-                    result = control.exec_powershell(script, timeout_sec=budget(5, 'vfs.preflight'))
+                    result = control.exec_powershell(script, timeout_sec=budget(timeout_sec, 'vfs.preflight'))
                 except TimeoutError:
                     # The snapshot cannot dispatch a worker operation. A slow
                     # guest can get one fresh read within the caller's deadline.
-                    result = control.exec_powershell(script, timeout_sec=budget(5, 'vfs.preflight'))
-            if result.exit_code or not result.stdout:return {}
+                    result = control.exec_powershell(script, timeout_sec=budget(timeout_sec, 'vfs.preflight'))
+            if result.exit_code:
+                raise OperationError('control_probe_error','vfs.preflight',node='@appliance',
+                                     message='Control probe error: worker snapshot command failed on the Appliance')
+            if not result.stdout:return {}
             snapshot=json.loads(result.stdout)
             raw=snapshot['state'].encode('utf-8')
             stamp=snapshot['stamp_ms']/1000
