@@ -565,6 +565,33 @@ each direction matched SHA-256; the slowest block or auxiliary request took
 Detection and File Threat Protection active and no changes to exclusions.
 This verifies manual recovery on the lab route and policy.
 
+### Beta 7 installed-release field acceptance
+
+The operator reported **PASS / УСПЕХ** for installed `0.3.0b7` from
+`v0.3.0-beta.7` at `bcafbb1ae71bd044ed6ec4a8a0cf7fafbefd7f44` under KES
+`21.3.10.1001`. All 65 installed package files matched the exact release.
+The Standard operator route retained the same worker throughout a first-attempt
+128 MiB push in 960.868 seconds and immediate pull in 606.161 seconds.
+All three copies matched size and SHA-256.
+
+Three consecutive `heal` calls preserved the active session and QGA clock sync.
+Host-to-Appliance measurement uncertainty was below 88 ms. The historical
+approximately 1.6-second rollback did not recur. The Appliance supervisor ran
+only in `-ObserveOnly` mode. Background supervisor restart was not exercised.
+
+Controlled QGA recovery preserved application-request identity and deadlines.
+Deliberately lost acknowledgement and persistent cleanup failure retained
+explicit indeterminate outcomes without replay. Stop released the lease in
+30.202 seconds. Cleanup preserved nonzero evidence and durable journals.
+KES protection remained active with zero new observed events.
+
+See the [anonymized installed-release record](../contrib/qualification/FIELD_ACCEPTANCE.md#accepted-release-beta-7)
+for the initial installation correction and evidence limits. Direct Bastion
+clock-offset measurement was unavailable through the restricted protocol.
+Production-orphan collection was not exercised because no accumulated orphan
+existed. The operator's raw evidence remains private. This acceptance does not
+qualify other endpoint policies or Enterprise signing profiles.
+
 ### Beta 6 field acceptance
 
 #### Accepted post-tag source 65e1fb9

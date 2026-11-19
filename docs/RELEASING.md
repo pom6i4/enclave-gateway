@@ -42,8 +42,22 @@ exact tested scope and remaining acceptance. Beta 7 is a source and Python prere
 Beta 7 packages the application code accepted at
 `65e1fb9abf7a609955aa0dafabf42fdae47f096d`. Its runtime source change is the
 Python package version declaration. Agent bytes and protocol identities remain
-unchanged. The field report stays bound to its tested commit; the release
+unchanged. The earlier field report stays bound to its tested commit; the release
 manifest binds the versioned artifacts and their build/install checks separately.
+
+The installed Beta 7 wheel subsequently passed operator-reported acceptance at
+`bcafbb1ae71bd044ed6ec4a8a0cf7fafbefd7f44`. All 65 installed package files
+matched the release. Both first-attempt 128 MiB directions matched SHA-256.
+The run verified clock-preserving `heal` and controlled QGA recovery without
+application-request replay. Stop released the worker lease within 60 seconds.
+KES `21.3.10.1001` stayed active with zero new events. See the
+[installed-release acceptance record](../contrib/qualification/FIELD_ACCEPTANCE.md#accepted-release-beta-7)
+for scope and evidence limits.
+
+The Release's post-release `BETA7_FIELD_ACCEPTANCE.md` supplement has a separate
+`BETA7_FIELD_ACCEPTANCE.sha256`. Its original six assets retain their bytes.
+The original manifest and checksum set continue to describe the initial build.
+The tag remains bound to the original release commit.
 
 The earlier tags retain their original source revisions and artifacts.
 

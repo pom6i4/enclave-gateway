@@ -10,6 +10,16 @@ This source/Python prerelease packages the application code field-accepted at
 `65e1fb9abf7a609955aa0dafabf42fdae47f096d`. Runtime source differs only in the
 package version declaration. Agent scripts and protocol identities are unchanged.
 
+- Record post-release operator-reported **PASS / УСПЕХ** for installed `0.3.0b7`
+  at `bcafbb1ae71bd044ed6ec4a8a0cf7fafbefd7f44` under KES `21.3.10.1001`.
+  All 65 installed package files matched the release. First-attempt 128 MiB
+  push took 960.868 s. Immediate pull took 606.161 s with matching SHA-256.
+  Three `heal` calls preserved the worker and QGA-synchronized clock.
+  Controlled recovery verified no application-request replay. Stop released
+  the lease in 30.202 s. Protection remained active with zero new KES events.
+  See the [installed Beta 7 acceptance record](contrib/qualification/FIELD_ACCEPTANCE.md#accepted-release-beta-7)
+  for injected indeterminate outcomes and measurement limits.
+
 - Record successful operator-reported field acceptance of
   `65e1fb9abf7a609955aa0dafabf42fdae47f096d` under KES `21.3.10.1001`.
   A 128 MiB push completed in 952.45 s on its first attempt. The immediate
