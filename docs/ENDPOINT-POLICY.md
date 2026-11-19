@@ -567,6 +567,23 @@ This verifies manual recovery on the lab route and policy.
 
 ### Beta 6 field acceptance
 
+#### Accepted post-tag source 65e1fb9
+
+The operator reported **PASS** for exact source
+`65e1fb9abf7a609955aa0dafabf42fdae47f096d` on the Standard foreground operator
+route under KES `21.3.10.1001`. A 128 MiB push completed in 952.45 seconds on
+its first attempt. Immediate pull of the same file completed in 729.39 seconds
+on its first attempt with matching size and SHA-256. The worker instance remained
+unchanged. Controlled QGA recovery checks confirmed no request replay.
+
+The [anonymized source-bound record](../contrib/qualification/FIELD_ACCEPTANCE.md#accepted-source-65e1fb9)
+separates ordinary transfers from deliberately injected faults and records
+protection observations. Raw evidence remains private. Acceptance applies to the
+reported route and policy; it does not establish compatibility with other KES
+versions or Enterprise signing profiles.
+
+#### Earlier pre-release baseline
+
 The operator reported an end-to-end pass on the pre-release baseline
 `69f0acf`, from QGA through VPN and domain RDP to system OpenSSH. The run used
 a non-administrator domain account under active KES 14.1 and reported zero

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Record successful operator-reported field acceptance of
+  `65e1fb9abf7a609955aa0dafabf42fdae47f096d` under KES `21.3.10.1001`.
+  A 128 MiB push completed in 952.45 s on its first attempt. The immediate
+  pull completed in 729.39 s on its first attempt with matching SHA-256.
+  Controlled QGA recovery preserved one request publication per copy step.
+  See the [anonymized acceptance record](contrib/qualification/FIELD_ACCEPTANCE.md#accepted-source-65e1fb9)
+  for scope and evidence limits.
+
 - Recover transient Stream response-read failures within the original request
   deadline. Bound QGA polling exchanges and retry synchronization before dispatch.
 - Retry only confirmed zeroing after a cleanup disconnect. Release upload slots

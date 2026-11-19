@@ -9,6 +9,7 @@ qualification plans nor historical reports.
 - [Independent builds and full installation](REPRODUCIBLE_ACCEPTANCE.md)
 - [Extended runtime profile](EXTENDED_ACCEPTANCE.md)
 - [Backend isolation and release procedure](HARDENING_AND_QUALIFICATION.md)
+- [Source-bound field acceptance](FIELD_ACCEPTANCE.md)
 - [Historical source-bound records](HISTORY.md)
 
 Safe unfilled plan templates live in `plans/`. Runtime runner code remains under

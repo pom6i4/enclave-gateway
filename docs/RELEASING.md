@@ -32,6 +32,12 @@ exact tested scope and remaining acceptance. Beta 6 is a source and Python prere
   Appliance changes preserve milliseconds in clock sync and allow up to five
   seconds of forward skew in Stream heartbeat timestamps. See the
   [reported field acceptance](ENDPOINT-POLICY.md#beta-6-field-acceptance).
+- The post-tag `0.3.0b6` source
+  `65e1fb9abf7a609955aa0dafabf42fdae47f096d` passed operator-reported field
+  acceptance under KES `21.3.10.1001`. The first-attempt 128 MiB round trip
+  retained the worker instance and matched SHA-256. See the
+  [source-bound acceptance record](../contrib/qualification/FIELD_ACCEPTANCE.md#accepted-source-65e1fb9)
+  for recovery checks and qualification limits.
 
 The earlier tags retain their original source revisions and artifacts.
 
