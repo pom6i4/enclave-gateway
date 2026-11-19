@@ -18,6 +18,68 @@ Additional plan steps can invoke the existing disposable Windows provisioning, c
 
 For a new VM, put its fixture `--output` below `{run_dir}` and list its generated `config.json` in `managed_vm_configs`. In `finally`, the runner checks the laboratory name, restricted user networking, custom provider without installer/key material, owned disk/NVRAM/TPM state paths, QMP identity and actual attached disk before graceful shutdown and TPM quiescence. An absent config means the resource was never created. Ambiguous ownership or cleanup failure makes the entire run fail and preserves its state. Previously existing VMs are not accepted as owned resources. Stop only the runner's child processes and their process groups on a step deadline.
 
+## Installed v0.3.0 local MCP verification
+
+Result: **PASS / УСПЕХ** for a newly launched local stdio server from the
+installed `0.3.0` package. This was a direct local check with an isolated test
+configuration. The real deployment configuration was not loaded.
+
+- Release tag: `v0.3.0`.
+- Release source: `29dad2ea643e5eed7fffc1a795827aa485ab1b85`.
+- Published wheel SHA-256:
+  `23f0d4852749ec587ce16c589a76b55802183042961c49836266fae7c9a00fbd`.
+- CLI version: `enclave-gateway 0.3.0`.
+- Installed distribution metadata version: `0.3.0`.
+- Imported module version: `0.3.0`.
+- Import location: the selected launcher's installed `site-packages`.
+- Editable installation: false.
+- Runtime files compared with the published wheel: 65.
+- Runtime mismatches: zero.
+
+The actual installed launcher started a separate server in a new private test
+namespace. Its configuration disabled Bastion and contained no targets.
+It used `--read-only`. No working credentials or deployment state were supplied.
+
+Network access was denied by an operating-system sandbox. A preliminary
+loopback probe confirmed the denial before the MCP server started. Standard
+input and output carried the test protocol without opening a network listener.
+
+The fresh `initialize` response contained:
+
+```json
+{
+  "result": {
+    "protocolVersion": "2025-03-26",
+    "serverInfo": {
+      "name": "enclave-gateway",
+      "version": "0.3.0"
+    }
+  }
+}
+```
+
+Further results on that same test connection:
+
+- `ping`: passed.
+- `tools/list`: 18 tool definitions returned.
+- Local `enclave_capabilities`: passed.
+- Bastion disabled in the returned capabilities: confirmed.
+- Shutdown: the test client closed its own server's stdin.
+- Server process exit code: zero.
+- Manual operating-system signals: none.
+- Existing IDE sessions touched: none.
+
+The private receipt and protocol transcript were retained outside Git. Public
+documentation omits local paths and process identifiers. The result verifies
+the installed package and a fresh local server. It is not a benchmark or a
+verification of resident modules in previously opened IDE sessions.
+
+This check required no connection to QGA or the real enclave. It did not start
+an Appliance or change VPN/RDP state. It did not launch or stop a Bastion worker.
+Old IDE connections can be reconnected through their own controls when idle.
+Their individual migration is operational maintenance rather than a remaining
+gate for the accepted Standard operator release.
+
 ## Fresh Windows preparation
 
 `egw init --completion-mode StartupTask` is the default. During specialize, machine preparation stages its script/media policy under the administrative machine directory and registers a SYSTEM task. The task starts immediately, waits for all Windows Setup/OOBE flags to clear, and has a startup trigger for recovery across setup reboots. It installs drivers/QGA, verifies deletion of its own matching task and only then publishes readiness revision 2. A completed generation can finish interrupted cleanup without reinstalling MSI or requiring the removed media; the existing agent process is preserved. The disposable checker requires the selected completion mode, the final readiness revision and actual task absence. No user password is stored in the task and no automatic logon is configured. A conflicting task is rejected. Only an ObjectNotFound task-query error establishes absence; scheduler or permission failures block readiness and retain diagnostics. A failed or timed-out task leaves diagnostic phase records for operator inspection.

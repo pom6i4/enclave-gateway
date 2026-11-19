@@ -34,6 +34,14 @@ boundaries for future releases. The
 [RC field prompt](../contrib/qualification/STANDARD_OPERATOR_FIELD_PROMPT_RU.md)
 is retained as the historical RC lifecycle program.
 
+The release cycle is complete for the accepted Standard operator scope.
+The [local MCP verification](../contrib/qualification/LOCAL_ACCEPTANCE.md#installed-v030-local-mcp-verification)
+confirmed installed `0.3.0` and the fresh server's `serverInfo.version`.
+It used an isolated configuration with operating-system network denial.
+Existing IDE sessions were not restarted. Their later client-side reconnect
+is operational maintenance, not a remaining release gate.
+See the [scope-bound closure](STANDARD_OPERATOR_CANDIDATE.md#release-cycle-status).
+
 ## Beta release history
 
 The last Beta package version was `0.3.0b7`. Its Git release tag is

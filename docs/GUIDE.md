@@ -53,6 +53,12 @@ Verify the new server version through the client before treating that session as
 updated. A successful CLI upgrade does not attest existing MCP process versions.
 Do not terminate unrelated client processes as part of worker cleanup.
 
+A fresh local server can be verified through `initialize` with an isolated test
+configuration. That check does not require the real enclave. The
+[installed v0.3.0 local record](../contrib/qualification/LOCAL_ACCEPTANCE.md#installed-v030-local-mcp-verification)
+confirms this path. Reconnecting old IDE sessions is normal client maintenance
+and does not reopen the accepted release's field qualification.
+
 ### Configuration discovery and private state
 
 For an installed `egw` executable on PATH:

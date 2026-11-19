@@ -7,6 +7,15 @@
 Package version `0.3.0` and immutable tag `v0.3.0` at
 `29dad2ea643e5eed7fffc1a795827aa485ab1b85`.
 
+- Record successful local verification of installed `0.3.0` and a fresh stdio
+  MCP server. All 65 runtime files matched the published wheel.
+  `initialize` reported `serverInfo.version: 0.3.0`. Local smoke checks passed.
+  Operating-system network denial kept the check isolated from the real enclave.
+  The test process exited through stdin EOF with code zero.
+  Existing IDE sessions were untouched.
+- Close the release cycle for the accepted Standard operator scope.
+  Broader platform and profile qualification remains separate.
+  The tag and original release assets remain unchanged.
 - Record post-release operator-reported **PASS / УСПЕХ** for installed `0.3.0`
   under KES `21.3.10.1001`. All 65 runtime files matched the release.
   First-attempt 128 MiB push took 996.247 s. Immediate pull took 688.846 s.

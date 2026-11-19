@@ -6,6 +6,7 @@ Start users at [GUIDE.md](../../docs/GUIDE.md) and
 qualification plans nor historical reports.
 
 - [Local and installed-distribution checks](LOCAL_ACCEPTANCE.md)
+- [Installed v0.3.0 local MCP verification](LOCAL_ACCEPTANCE.md#installed-v030-local-mcp-verification)
 - [Independent builds and full installation](REPRODUCIBLE_ACCEPTANCE.md)
 - [Extended runtime profile](EXTENDED_ACCEPTANCE.md)
 - [Backend isolation and release procedure](HARDENING_AND_QUALIFICATION.md)

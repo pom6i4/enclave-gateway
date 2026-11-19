@@ -12,6 +12,29 @@ Actual reconnect and upgrade/rollback are closed for that tested RC route.
 Final runtime differs from the RC only in its package version declaration.
 Other profile and platform acceptance remains separate.
 
+## Release cycle status
+
+The `0.3.0` release cycle is **complete for the accepted Standard operator
+scope and exercised route**.
+
+- The immutable final release is published at the source commit above.
+- All six source CI jobs passed for that exact release commit.
+- Installed final-package field acceptance passed on the recorded route.
+- The RC separately covered actual RDP reconnect and upgrade/rollback.
+- [Local installed-package and fresh MCP verification](../contrib/qualification/LOCAL_ACCEPTANCE.md#installed-v030-local-mcp-verification)
+  passed without contacting the real enclave.
+- GitHub Private Vulnerability Reporting is enabled.
+
+No mandatory correction is identified for that accepted scope by these results.
+Normal operation can continue. New failures or changes to runtime/environment
+determine the next regression scope. There is no requirement to repeat the
+accepted field program solely to reconnect old IDE sessions.
+
+The local MCP result does not certify every existing IDE connection. Those
+connections remain under their client owners' normal lifecycle controls.
+Broader Host platforms and execution profiles still need their own acceptance.
+Native Enterprise qualification is outside this completed release scope.
+
 ## Published Standard operator scope
 
 - Source and pure Python distribution.
@@ -48,7 +71,7 @@ existing typed models. MCP request schemas retain their existing arguments.
 The CLI provides `cp --chunked --timeout`; MCP `node_transfer` does not expose
 that chunked-copy interface. No schema change was needed for the final package.
 
-## Candidate gates
+## Qualification checklist for future candidates
 
 Publication requires a source-bound result for every applicable gate. Historical
 reports do not become acceptance of new artifacts solely through a version bump.
