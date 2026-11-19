@@ -1,8 +1,8 @@
 # Endpoint policy and the foreground OpenSSH profile
 
-This describes the experimental foreground profile in the unpublished `0.3.0rc1` candidate.
+This describes the foreground profile in the prepared, unpublished `0.3.0` artifacts.
 The [Standard operator candidate gates](STANDARD_OPERATOR_CANDIDATE.md) define
-its proposed stable scope. Beta 7 acceptance remains bound to its tested release.
+its Standard operator scope. Each field acceptance remains bound to its tested source.
 It does not change the published `v0.2.0` tag or certify antivirus compatibility. Deployment on a
 managed endpoint requires its administrator's approval. An active security
 incident must be resolved through the organization's incident process first.
@@ -566,6 +566,22 @@ each direction matched SHA-256; the slowest block or auxiliary request took
 2.88 s. KES 14.1.0.423 logged no new events during this run, with AMSI, Behavior
 Detection and File Threat Protection active and no changes to exclusions.
 This verifies manual recovery on the lab route and policy.
+
+### RC lifecycle field acceptance
+
+The operator reported **PASS / УСПЕХ** for `0.3.0rc1` at
+`33fbcdecfba01ea8ed995379d39d8bc49886f706` under KES `21.3.10.1001`.
+Actual native RDP disconnect/reconnect retained the same Windows session.
+The old foreground worker exited. A new manual attachment passed attestation.
+Completed and interrupted IDs caused no repeat effect through either Host
+journal lookup or the independent durable worker-ledger check.
+
+Upgrade from Beta 7 and explicit rollback preserved the working configuration.
+Accumulated journals remained readable without restoring an older database.
+Final stop took 27.584 seconds with lease release. KES stayed active with zero
+new events. The optional additional chunked-transfer disconnect was not run.
+See the [RC lifecycle record](../contrib/qualification/FIELD_ACCEPTANCE.md#accepted-candidate-030rc1)
+for evidence limits. Final `0.3.0` artifacts are checked separately.
 
 ### Beta 7 installed-release field acceptance
 

@@ -31,18 +31,20 @@ The diagram shows the RDP route. When policy permits SSH, use the
   </picture>
 </p>
 
-**Beta software.** Standard mode is for a trusted operator and RDP session.
+**Standard operator scope.** Standard mode is for a trusted operator and RDP session.
 Enterprise adds signed native isolation and verified identities. Neither mode
 replaces the organization's endpoint policy, VPN entitlement or host-key approval.
 
-The current version is [**0.3.0 Beta 7**](https://github.com/pom6i4/enclave-gateway/releases/tag/v0.3.0-beta.7) (`0.3.0b7`). The foreground
+The latest published version is [**0.3.0 Beta 7**](https://github.com/pom6i4/enclave-gateway/releases/tag/v0.3.0-beta.7) (`0.3.0b7`). The foreground
 `structured_only` profile is **experimental** and requires explicit endpoint
 approval. KES compatibility is not certified. See [release boundaries](docs/RELEASING.md#current-beta-candidate).
 
-A local **0.3.0rc1** candidate targets Standard operator acceptance. It is not
-published or approved as stable. See the
-[candidate gates](docs/STANDARD_OPERATOR_CANDIDATE.md) and the
-[field validation prompt](contrib/qualification/STANDARD_OPERATOR_FIELD_PROMPT_RU.md).
+Final **0.3.0** source and Python artifacts are prepared locally for Standard
+operator. They are not published. The accepted RC completed actual RDP reconnect
+and package upgrade/rollback on its recorded route. Other profiles retain their
+separate qualification boundaries. See the
+[release gates](docs/STANDARD_OPERATOR_CANDIDATE.md) and the
+[RC acceptance record](contrib/qualification/FIELD_ACCEPTANCE.md#accepted-candidate-030rc1).
 
 ## Key capabilities
 

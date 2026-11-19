@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.3.0 — prepared, unpublished
+
+- Prepare final source and Python artifacts for Standard operator.
+  Publication remains a separate explicit action.
+- Record operator-reported **PASS / УСПЕХ** for `0.3.0rc1` at
+  `33fbcdecfba01ea8ed995379d39d8bc49886f706` under KES `21.3.10.1001`.
+- Verify actual RDP disconnect/reconnect with the same Windows session.
+  The old worker exited. A new manual attachment passed fresh attestation.
+- Confirm no repeated effect through the Host journal and independently through
+  the durable worker ledger for completed and interrupted transaction IDs.
+- Verify Beta 7 to RC upgrade and explicit rollback without journal loss.
+  Final worker stop took 27.584 s. Protection stayed active with zero new events.
+- Preserve all agent bytes and worker attestation version `0.3.0`.
+  Final runtime differs from the accepted RC only in its package version.
+- Retain platform qualification limits and the pending publication gates.
+  See the [RC acceptance record](contrib/qualification/FIELD_ACCEPTANCE.md#accepted-candidate-030rc1).
+
 ## 0.3.0rc1 — unpublished Standard operator candidate
 
 - Prepare a source/Python candidate for the Standard foreground operator scope.

@@ -6,6 +6,148 @@ The operator retains raw evidence in private storage. The public summary was
 reviewed against the immutable source hashes; raw private logs were not
 independently inspected for this record.
 
+## Accepted candidate: 0.3.0rc1
+
+- Result: **PASS / УСПЕХ**, as reported by the operator.
+- Tested package: `0.3.0rc1`.
+- Tested commit: `33fbcdecfba01ea8ed995379d39d8bc49886f706`.
+- Candidate wheel SHA-256:
+  `7a7f108e0384a4e8e99024e47480de77682f6ea04448f4d6ca61c8c354621d5b`.
+- Candidate sdist SHA-256:
+  `74cdc38a5c4ef97eed933ffb6ba1206a8e0557d43f1f4b49168c8dd6d6887595`.
+- Candidate source archive SHA-256:
+  `1253f417038b2ce47992fa6e659f992f3de3e6ff80203bcfcbefd8c71c4d3672`.
+- Rollback baseline: published `0.3.0b7` at
+  `bcafbb1ae71bd044ed6ec4a8a0cf7fafbefd7f44`.
+- Installation identity: all 65 runtime files matched at each stage.
+- Evidence provenance: the operator's completed RC lifecycle report.
+
+The reported artifacts match the locally prepared candidate hashes. All eight
+entries in the candidate checksum file passed. The only runtime source change
+from Beta 7 was the package version statement. Agent bytes were unchanged.
+The independent worker attestation version remained `0.3.0` throughout.
+
+### RC deployment scope
+
+- Host: macOS ARM64 with Python `3.14.5`.
+- Appliance: Windows 11 ARM64 through QGA `109.1.0`.
+- Route: approved VPN followed by native RDP drive redirection.
+- Bastion: Windows 10 x64 with a non-administrator domain operator session.
+- Target: Linux x64 with Python `3.11.2` and the forced-command peer.
+- Protection: Kaspersky Endpoint Security for Windows `21.3.10.1001`.
+- Security mode: `standard`.
+- Execution profile: `structured_only`.
+- Structured backend: `operator`.
+- Spool protocol: `stream`.
+- Worker attestation: enforced with unchanged independently approved pins.
+- Foreground lease: eight hours.
+- Advertised copy-step cap: 45 seconds.
+- Whole-copy timeout: 1800 seconds.
+
+Actual deployment identifiers are excluded. The private policy hash and
+staging-bundle identifier are not recorded. Public agent hashes remain those
+in [Component identity](#component-identity).
+
+### RC upgrade and clock smoke
+
+The operator stopped the baseline worker and confirmed lease release before
+installing the RC wheel into the same working Host environment. A consistent
+SQLite backup was retained. The working configuration was unchanged. The same
+Host journal namespace remained active without migration or restoration of an
+older database. Earlier Beta 7 results were readable through the RC CLI.
+
+Manual attachment produced a freshly attested worker without agent restaging.
+A safe target command passed. `heal` returned `APPLIANCE_INIT_OK` and
+`SESSION_ACTIVE` with that worker unchanged.
+
+The Appliance clock had fallen approximately 772 seconds behind after a Host
+pause. QGA synchronization corrected it. Initialization received
+`HostEpochUtcMs 0` and did not call the `Set-Date` fallback. The final median
+offset was -1.761 ms with reported total uncertainty of ±47.620 ms. The earlier
+approximately 1.6-second rollback did not recur.
+
+One new 1 MiB file completed push and immediate pull with matching size and
+all three SHA-256 values. Push took 22.734 seconds. Pull took 11.013 seconds.
+
+### RC actual RDP reconnect and duplicate rejection
+
+The operator interrupted only the test's native `mstsc.exe` client on Appliance.
+QGA and the VM were not restarted. Windows LocalSessionManager events 24 and 25
+confirmed disconnection and reconnection of the same Windows session.
+The redirected drive returned.
+
+The old worker exited on redirected-channel loss during `ssh_reply`. It did
+not respawn. Both session leases were free before a new manual attachment.
+The last on-disk state still said `running` because the disconnected drive
+could not receive a final stopped snapshot. Process exit and exclusive lease
+checks established actual termination. A new worker instance passed fresh
+attestation and executed a new safe command.
+
+| Test operation | Independently observed effect | Host journal duplicate check | New worker ledger duplicate check |
+| --- | --- | --- | --- |
+| Completed operation | One completed execution | Returned the stored result | Rejected at request phase before SSH |
+| Interrupted operation | One start and zero completions | Rejected as `transaction_indeterminate` | Rejected at request phase before SSH |
+
+The interrupted command had a 28-second budget. Host observation returned
+`worker_response_timeout` at `vfs.response` after 28.079 seconds without replay.
+Both journals retained an indeterminate outcome. Its start marker was observed
+before the actual RDP interruption. No finish marker appeared.
+
+The separate worker-ledger harness bypassed Host result caching. Both duplicate
+identifiers returned exit code 125 at the existing-tombstone check without
+sending a new SSH command. Independent target counters remained unchanged.
+The report therefore distinguishes one interrupted start from a successful
+completion. Indeterminate status was not converted into completion.
+
+### RC rollback, stop and protection
+
+- The RC worker stopped in 29.497 seconds before rollback.
+- The verified Beta 7 wheel was reinstalled into the same Host environment.
+- All 65 restored runtime files matched the baseline.
+- Configuration and independent pins remained unchanged.
+- Existing Beta 7 and RC records remained readable through the Beta 7 CLI.
+- The current Host database was preserved without restoring the old backup.
+- The durable worker ledger retained both tested transaction tombstones.
+- A manually attached baseline worker passed fresh attestation.
+- Repeated access to both test IDs caused zero additional target executions.
+- A new 1 MiB round trip matched all three sizes and SHA-256 values.
+- Baseline push took 10.109 seconds.
+- Baseline pull took 7.485 seconds.
+- Final stop completed in 27.584 seconds within the 60-second budget.
+- Fresh stopped telemetry and exclusive lease access confirmed termination.
+- The worker remained stopped in a subsequent observation after ten seconds.
+- One `clean` call completed in 1.447 seconds with zero errors.
+- Cleanup removed 79 zeroed IPC files.
+- Cleanup preserved the interrupted 135168-byte request.
+- Cleanup preserved a prior 416-byte nonzero response.
+- Host journal and worker ledger remained available.
+- KES retained 28 running protection components.
+- Both observed Kaspersky event logs recorded zero new events.
+- Protection policy was not weakened.
+
+The operator left Host on Beta 7 with the test worker stopped and its lease free.
+The route remained available. No second worker or hidden autostart was left.
+
+### RC evidence limits and retained attempts
+
+This record summarizes an operator-supplied report. Underlying field receipts
+and raw logs remain private and were not independently inspected here.
+
+Original observer/setup failures were retained. They concerned archiving over
+RDPDR and attachment-readiness timing. A helper parser-name collision was fixed
+before the actual RDP disconnect; the real reconnect scenario then passed.
+These were not reported runtime defects. The interrupted operation above was
+the sole new intentional indeterminate outcome.
+
+The optional additional disconnect during a partially consumed chunked transfer
+was not run. This acceptance does not qualify other Host platforms or other
+execution profiles. Background supervisor reconnect was not exercised.
+No release or tag was published by the field run.
+
+Prepared final `0.3.0` artifacts have separate exact-artifact checks and hashes.
+Their runtime equivalence to this accepted RC must be verified; they are not
+described as independently field-tested final packages.
+
 ## Accepted release: Beta 7
 
 - Result: **PASS / УСПЕХ**, as reported by the operator.

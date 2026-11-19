@@ -1,8 +1,14 @@
-# Standard operator candidate for 0.3.0
+# Standard operator release gates for 0.3.0
 
-The package candidate is `0.3.0rc1`. It is not a stable release. Its source and
-artifacts remain local until publication is explicitly authorized. The exact
-commit is recorded in the candidate manifest outside the checkout.
+Final package `0.3.0` is prepared locally. Publication is not authorized by
+preparation. The exact source commit and artifact hashes are recorded in the
+local final-artifact manifest outside the checkout.
+
+RC `0.3.0rc1` at `33fbcdecfba01ea8ed995379d39d8bc49886f706` passed
+[operator-reported lifecycle acceptance](../contrib/qualification/FIELD_ACCEPTANCE.md#accepted-candidate-030rc1).
+Actual reconnect and upgrade/rollback are closed for that tested route.
+Final runtime differs from the RC only in its package version declaration.
+Other profile and platform acceptance remains separate.
 
 ## Proposed stable scope
 
@@ -17,7 +23,7 @@ commit is recorded in the candidate manifest outside the checkout.
 - Fresh worker attestation with the pinned operator identity.
 - Existing approved endpoint policy without new protection exclusions.
 
-The candidate does not promote other execution profiles to stable. It does not
+This preparation does not promote other execution profiles to stable. It does not
 change configuration defaults. It does not deliver native helpers or establish
 Enterprise signing qualification. Host installation acceptance is separate from
 Appliance or Bastion architecture. A platform is qualified only by an explicit
@@ -30,7 +36,7 @@ The rollback baseline is `0.3.0b7` from `v0.3.0-beta.7` at
 Its [field acceptance](../contrib/qualification/FIELD_ACCEPTANCE.md#accepted-release-beta-7)
 covers the exercised route under KES `21.3.10.1001`.
 
-The candidate's only runtime source difference is its package version statement.
+Final runtime differs from the accepted RC only in its package version statement.
 Agent hashes remain those in the baseline record. The attestation version stays
 `0.3.0`. Existing independently approved deployment pins must not be weakened.
 Signed deployment bytes require their own approved hashes.
@@ -68,16 +74,17 @@ reports do not become acceptance of new artifacts solely through a version bump.
 - Confirm a working private vulnerability-reporting channel before stable release.
 
 The [field prompt](../contrib/qualification/STANDARD_OPERATOR_FIELD_PROMPT_RU.md)
-defines the missing lifecycle checks. Beta 7's completed 128 MiB round trip is
+defines the completed RC lifecycle program. Its report remains bound to the RC. Beta 7's completed 128 MiB round trip is
 retained as prior evidence. A small candidate round trip checks installation.
 Repeat the larger regression if runtime behavior or deployment components change.
 
-## Promotion to final 0.3.0
+## Final artifact preparation and publication
 
-Successful RC acceptance does not publish a release. Final promotion is a
-separate authorized operation.
+Successful RC acceptance permits final artifact preparation. Publication remains
+a separate authorized operation. The final manifest records which local checks
+passed and which platform or publication gates remain pending.
 
-- Set the package version to `0.3.0`.
+- Verify the package version is `0.3.0`.
 - Update its metadata status after acceptance is complete.
 - Review the complete difference from the accepted RC.
 - Rebuild the exact final artifacts.

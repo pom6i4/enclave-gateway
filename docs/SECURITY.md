@@ -43,7 +43,7 @@ journal and reconcile indeterminate operations instead of blindly replaying them
 
 ## Endpoint policy
 
-The experimental `structured_only` foreground profile in `0.3.0rc1` uses an independently
+The `structured_only` foreground profile in prepared `0.3.0` uses an independently
 approved Bastion policy and the Microsoft-signed system OpenSSH client.
 Installation is explicit and there is no startup registration. Request data cannot
 select a Bastion interpreter or arbitrary SSH options. The default `spawn`
@@ -73,6 +73,10 @@ Fresh attestation reports the transfer features for the approved worker.
 
 See [endpoint preparation and qualification boundaries](ENDPOINT-POLICY.md).
 Compatibility with a particular EDR policy requires separate acceptance.
+
+The Standard operator RC passed [source-bound field acceptance](../contrib/qualification/FIELD_ACCEPTANCE.md#accepted-candidate-030rc1).
+Its other profile and platform boundaries remain separate. Final-artifact
+verification does not publish a release.
 
 ## Approve a release on a build workstation
 
