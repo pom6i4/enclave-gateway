@@ -39,6 +39,11 @@ The current version is [**0.3.0 Beta 7**](https://github.com/pom6i4/enclave-gate
 `structured_only` profile is **experimental** and requires explicit endpoint
 approval. KES compatibility is not certified. See [release boundaries](docs/RELEASING.md#current-beta-candidate).
 
+A local **0.3.0rc1** candidate targets Standard operator acceptance. It is not
+published or approved as stable. See the
+[candidate gates](docs/STANDARD_OPERATOR_CANDIDATE.md) and the
+[field validation prompt](contrib/qualification/STANDARD_OPERATOR_FIELD_PROMPT_RU.md).
+
 ## Key capabilities
 
 - **QEMU Appliance & 6 VPN Provider Adapters** — `vipnet`, `kontinent`,

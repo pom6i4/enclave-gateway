@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.3.0rc1 — unpublished Standard operator candidate
+
+- Prepare a source/Python candidate for the Standard foreground operator scope.
+  Beta 7 field acceptance remains bound to its original release.
+- Preserve agent bytes and the worker attestation version `0.3.0`.
+  The only runtime source change from Beta 7 is the package version declaration.
+- Correct security guidance for negotiated 45-second copy steps. Older adapters
+  retain their 15-second budget.
+- Define separate RDP reconnect and upgrade/rollback acceptance gates.
+  Add an anonymized operator prompt without private deployment identifiers.
+- Keep stable promotion pending exact-artifact checks and remaining acceptance.
+  No release tag or package publication is implied.
+
 ## 0.3.0 Beta 7
 
 Package version `0.3.0b7` and Git tag `v0.3.0-beta.7`.

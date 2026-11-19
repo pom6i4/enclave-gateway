@@ -22,6 +22,11 @@ foreground-профиль `structured_only` является **эксперим�
 явного согласования с ИБ. Совместимость с KES не сертифицирована.
 См. [границы выпуска](docs/RELEASING.md#current-beta-candidate).
 
+Локальный кандидат **0.3.0rc1** подготовлен для проверки Standard operator.
+Он не опубликован и пока не принят как стабильный. См.
+[критерии кандидата](docs/STANDARD_OPERATOR_CANDIDATE.md) и
+[полный промпт полевой проверки](contrib/qualification/STANDARD_OPERATOR_FIELD_PROMPT_RU.md).
+
 ## Возможности
 
 - **Windows-апплаенс.** QEMU с HVF, KVM или WHPX при совместимой архитектуре хоста и гостя. Windows Direct использует существующий Windows-хост. Поддерживаются адаптеры `vipnet`, `kontinent`, `anyconnect`, `openvpn`, `wireguard` и `custom`. Проверка бинарника адаптера и допуск конкретного VPN-клиента к эксплуатации — отдельные этапы.

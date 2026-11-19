@@ -1,6 +1,8 @@
 # Endpoint policy and the foreground OpenSSH profile
 
-This describes the experimental foreground profile in `0.3.0b7` (Beta 7).
+This describes the experimental foreground profile in the unpublished `0.3.0rc1` candidate.
+The [Standard operator candidate gates](STANDARD_OPERATOR_CANDIDATE.md) define
+its proposed stable scope. Beta 7 acceptance remains bound to its tested release.
 It does not change the published `v0.2.0` tag or certify antivirus compatibility. Deployment on a
 managed endpoint requires its administrator's approval. An active security
 incident must be resolved through the organization's incident process first.

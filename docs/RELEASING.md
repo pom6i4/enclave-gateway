@@ -4,6 +4,24 @@ The candidate assembly procedure creates a source-bound bundle for review. It do
 tag, upload packages, change repository visibility or establish Enterprise signing
 trust. Hosted workflows are not needed for these steps.
 
+## Current Standard operator candidate
+
+The working candidate package is `0.3.0rc1`. It is unpublished. No candidate tag
+or stable release is implied. Its scope and remaining gates are defined in
+[Standard operator candidate acceptance](STANDARD_OPERATOR_CANDIDATE.md).
+
+The candidate preserves the Beta 7 runtime except for the package version
+statement. It preserves all agent bytes. The worker attestation contract stays
+at `0.3.0`; do not change `security.worker_version` to the Python prerelease.
+Configuration validation and MCP request schemas are unchanged. Chunked copy
+acceptance uses the CLI; the MCP `node_transfer` schema does not expose
+`--chunked` or a whole-copy timeout.
+
+The published Beta 7 remains the accepted rollback baseline. The full program
+for reconnect and package upgrade/rollback is the
+[anonymized field prompt](../contrib/qualification/STANDARD_OPERATOR_FIELD_PROMPT_RU.md).
+Its execution receipts must identify the exact candidate artifact hashes.
+
 ## Current Beta candidate
 
 The current Python package version is `0.3.0b7`. Its Git release tag is
@@ -110,7 +128,7 @@ package, sign release artifacts or establish production Enterprise trust.
 
 | Component | Contract | Validation boundary |
 | --- | --- | --- |
-| Python CLI/package | `0.3.0b7`, Python 3.10 or newer; the release matrix exercises 3.10–3.14 | Pure Python has no mandatory third-party runtime dependencies. Record exact Python patches and platform for each run. |
+| Python CLI/package | `0.3.0rc1` candidate, Python 3.10 or newer; the release matrix exercises 3.10–3.14 | Pure Python has no mandatory third-party runtime dependencies. Record exact Python patches and platform for each run. |
 | Windows native helpers | `net10.0`, self-contained `win-x64` and `win-arm64` | Use the exact pinned SDK/runtime and both helper projects. Cross compilation and PE inspection do not prove Windows execution. |
 | Worker identity | Attestation version `0.3.0`, fresh nonce, approved hashes/signer/SID when required | This is an independent worker contract, not the Python package version. Deploy matching approved scripts/runtime together. |
 | Legacy worker journal and telemetry | Revision 2, Bastion-local journal with protected spool binding | Preserve transaction identities across restart, migration and backup reconciliation. |
@@ -206,7 +224,7 @@ artifact directory from the successful comparison:
 
 ```powershell
 python scripts/qualification/artifact_acceptance.py `
-  --wheel C:\Acceptance\enclave_gateway-0.3.0b7-py3-none-any.whl `
+  --wheel C:\Acceptance\enclave_gateway-0.3.0rc1-py3-none-any.whl `
   --pip-wheel C:\Acceptance\pip-approved-py3-none-any.whl `
   --runtime C:\Acceptance\egw-runtime.exe --askpass C:\Acceptance\egw-askpass.exe `
   --allow-unsigned-lab --work-dir C:\Acceptance\new-client `
@@ -231,7 +249,7 @@ with `pidfd_open` support (Linux 5.3 or newer) for PID-safe cancellation checks:
 
 ```sh
 python3 scripts/qualification/artifact_acceptance.py \
-  --wheel /input/enclave_gateway-0.3.0b7-py3-none-any.whl \
+  --wheel /input/enclave_gateway-0.3.0rc1-py3-none-any.whl \
   --pip-wheel /input/pip-approved-py3-none-any.whl \
   --work-dir /work/new-client --output /work/new-result.json
 ```

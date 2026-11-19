@@ -43,7 +43,7 @@ journal and reconcile indeterminate operations instead of blindly replaying them
 
 ## Endpoint policy
 
-The experimental `structured_only` foreground profile in `0.3.0b6` uses an independently
+The experimental `structured_only` foreground profile in `0.3.0rc1` uses an independently
 approved Bastion policy and the Microsoft-signed system OpenSSH client.
 Installation is explicit and there is no startup registration. Request data cannot
 select a Bastion interpreter or arbitrary SSH options. The default `spawn`
@@ -65,7 +65,10 @@ Fresh attestation reports the transfer features for the approved worker.
   Each 1 MiB block has a SHA-256 check. The adapter holds back the final upload
   byte until the block hash matches. The receiver verifies the entire file
   before publishing it atomically.
-- Each chunk request keeps the 15 s limit. Attestation keeps its 10 s budget.
+- A matching attested adapter and Linux peer can advertise
+  `operator_copy_max_sec: 45`. Each chunk step then has a 45 s budget including
+  preflight and delivery. Older adapters retain the 15 s step budget.
+- Attestation keeps its 10 s budget. The copy timeout bounds the entire transfer.
   A lost receipt requires reconciliation before reusing the upload slot.
 
 See [endpoint preparation and qualification boundaries](ENDPOINT-POLICY.md).
