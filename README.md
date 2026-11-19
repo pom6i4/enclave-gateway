@@ -35,16 +35,12 @@ The diagram shows the RDP route. When policy permits SSH, use the
 Enterprise adds signed native isolation and verified identities. Neither mode
 replaces the organization's endpoint policy, VPN entitlement or host-key approval.
 
-The latest published version is [**0.3.0 Beta 7**](https://github.com/pom6i4/enclave-gateway/releases/tag/v0.3.0-beta.7) (`0.3.0b7`). The foreground
-`structured_only` profile is **experimental** and requires explicit endpoint
-approval. KES compatibility is not certified. See [release boundaries](docs/RELEASING.md#current-beta-candidate).
-
-Final **0.3.0** source and Python artifacts are prepared locally for Standard
-operator. They are not published. The accepted RC completed actual RDP reconnect
-and package upgrade/rollback on its recorded route. Other profiles retain their
-separate qualification boundaries. See the
-[release gates](docs/STANDARD_OPERATOR_CANDIDATE.md) and the
-[RC acceptance record](contrib/qualification/FIELD_ACCEPTANCE.md#accepted-candidate-030rc1).
+The latest release is [**0.3.0 — Standard operator**](https://github.com/pom6i4/enclave-gateway/releases/tag/v0.3.0) (`0.3.0`).
+Installed-release field acceptance passed on the recorded Standard operator route
+under KES `21.3.10.1001`. Endpoint approval remains explicit. Other execution
+profiles retain their separate qualification boundaries. See the
+[installed-release record](contrib/qualification/FIELD_ACCEPTANCE.md#accepted-installed-release-v030)
+and [release scope](docs/STANDARD_OPERATOR_CANDIDATE.md).
 
 ## Key capabilities
 
@@ -60,7 +56,7 @@ separate qualification boundaries. See the
   and block deltas use SHA-256, default 4 MiB blocks and optional zlib compression.
   Standard executes commands in warm PowerShell runspaces; transfer scripts use
   a RunspacePool. No C# compiler or additional worker `.exe` is required.
-- **Operator-started OpenSSH** — the experimental `structured_only` profile
+- **Operator-started OpenSSH** — the Standard operator `structured_only` profile
   can use `operator` with Stream for `egw exec` and `egw cp` to one Linux target
   through an approved RDP session.
   - Use `egw cp --chunked` for files up to 512 MiB after the worker advertises
@@ -162,7 +158,7 @@ Standard; migrating an existing deployment is an operator decision.
   keys, CLI recipes, existing VM prerequisites and troubleshooting.
 - [Security architecture and Enterprise deployment](docs/SECURITY.md): trust
   boundaries, signing, attestation, roles and operational limits.
-- [Managed endpoint policies](docs/ENDPOINT-POLICY.md): the experimental approved
+- [Managed endpoint policies](docs/ENDPOINT-POLICY.md): the explicitly approved
   foreground OpenSSH profile and its qualification limits.
 - [Explicit SSH and RDP routes](docs/ROUTING.md): choose the approved route;
   transport failures never select an alternative.

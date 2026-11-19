@@ -4,38 +4,45 @@ The candidate assembly procedure creates a source-bound bundle for review. It do
 tag, upload packages, change repository visibility or establish Enterprise signing
 trust. Hosted workflows are not needed for these steps.
 
-## Prepared final Standard operator artifacts
+## Published Standard operator release
 
-The prepared package version is `0.3.0`. The source and Python artifacts remain
-local and unpublished. No final tag exists as part of this preparation.
-The [Standard operator release gates](STANDARD_OPERATOR_CANDIDATE.md) retain
-applicable platform and publication requirements.
+Package `0.3.0` is published as
+[`v0.3.0`](https://github.com/pom6i4/enclave-gateway/releases/tag/v0.3.0) at
+`29dad2ea643e5eed7fffc1a795827aa485ab1b85`.
+The tag and original eight assets remain immutable. All six source CI jobs
+passed for that exact release commit. GitHub Private Vulnerability Reporting
+is enabled.
 
-The accepted RC is `0.3.0rc1` at
-`33fbcdecfba01ea8ed995379d39d8bc49886f706`. It passed operator-reported actual
-RDP reconnect and upgrade/rollback on the recorded route. See the
-[RC acceptance record](../contrib/qualification/FIELD_ACCEPTANCE.md#accepted-candidate-030rc1).
+Installed `0.3.0` subsequently passed operator-reported field acceptance.
+First-attempt 128 MiB push took 996.247 seconds. Immediate pull took 688.846
+seconds with matching size and SHA-256. Three `heal` calls retained the worker
+and synchronized clock. Stop released the lease in 32.223 seconds. KES
+`21.3.10.1001` stayed active with zero new events. See the
+[installed-release record](../contrib/qualification/FIELD_ACCEPTANCE.md#accepted-installed-release-v030).
 
-Final runtime differs from that RC only in the package version statement.
-All agent bytes remain unchanged. The worker attestation version stays `0.3.0`.
-Configuration validation and MCP request schemas are unchanged. The final
-manifest records fresh exact-artifact build and installation checks separately
-from the source-bound field report.
+The prior RC at `33fbcdecfba01ea8ed995379d39d8bc49886f706` independently covered
+actual RDP reconnect and upgrade/rollback. Its report remains bound to that RC.
+Final runtime differs only in the package version. Agent bytes and the worker
+attestation contract remain unchanged.
 
-The published Beta 7 remains the accepted rollback baseline. The
+The post-release `V030_FIELD_ACCEPTANCE.md` supplement has its own
+`V030_FIELD_ACCEPTANCE.sha256`. The original `FIELD_ACCEPTANCE.md` and manifest
+retain the initial build-time records. Their original `SHA256SUMS` remains
+valid. Adding later evidence does not replace those assets or move the tag.
+The [release gates](STANDARD_OPERATOR_CANDIDATE.md) retain applicable platform
+boundaries for future releases. The
 [RC field prompt](../contrib/qualification/STANDARD_OPERATOR_FIELD_PROMPT_RU.md)
-is retained for that historical candidate. Do not label it a final-package
-field receipt. Stable publication is a separate explicitly authorized action.
+is retained as the historical RC lifecycle program.
 
-## Current Beta candidate
+## Beta release history
 
-The latest published Python package version is `0.3.0b7`. Its Git release tag is
+The last Beta package version was `0.3.0b7`. Its Git release tag is
 `v0.3.0-beta.7`. The previously published `v0.2.0` tag remains immutable at
 `2d0167f2402a923f7eb95e4e752559cea250eaef`.
 
-The foreground `structured_only` profile is experimental. See
+Beta 7 published the foreground `structured_only` profile as experimental. See
 [endpoint-policy qualification](ENDPOINT-POLICY.md#qualification-status) for the
-exact tested scope and remaining acceptance. Beta 7 is a source and Python prerelease.
+historical tested scope. Its source and Python prerelease stays immutable.
 
 - Beta 2 recorded 24 of 24 ordinary 1 MiB uploads in 5.07–11.49 s on the isolated
   KES 14.1 RDP route. Target hashes matched and no new KES events were logged.
@@ -133,7 +140,7 @@ package, sign release artifacts or establish production Enterprise trust.
 
 | Component | Contract | Validation boundary |
 | --- | --- | --- |
-| Python CLI/package | `0.3.0` prepared, Python 3.10 or newer; the release matrix exercises 3.10–3.14 | Pure Python has no mandatory third-party runtime dependencies. Record exact Python patches and platform for each run. |
+| Python CLI/package | `0.3.0`, Python 3.10 or newer; the release matrix exercises 3.10–3.14 | Pure Python has no mandatory third-party runtime dependencies. Record exact Python patches and platform for each run. |
 | Windows native helpers | `net10.0`, self-contained `win-x64` and `win-arm64` | Use the exact pinned SDK/runtime and both helper projects. Cross compilation and PE inspection do not prove Windows execution. |
 | Worker identity | Attestation version `0.3.0`, fresh nonce, approved hashes/signer/SID when required | This is an independent worker contract, not the Python package version. Deploy matching approved scripts/runtime together. |
 | Legacy worker journal and telemetry | Revision 2, Bastion-local journal with protected spool binding | Preserve transaction identities across restart, migration and backup reconciliation. |

@@ -5,6 +5,6 @@ exposing a service or choosing a trust model. Standard runspaces are for trusted
 operators; Enterprise has explicit signed isolation and identity prerequisites.
 
 Do not include credentials, private keys, customer topology or exploit-sensitive
-logs in public issues. Use the repository's private vulnerability reporting channel
-when available, or agree a private channel with the maintainer before sharing
-sensitive details. Source and lab checks do not constitute provider certification.
+logs in public issues. GitHub Private Vulnerability Reporting is enabled.
+[Report a vulnerability privately](https://github.com/pom6i4/enclave-gateway/security/advisories/new).
+Source and lab checks do not constitute provider certification.

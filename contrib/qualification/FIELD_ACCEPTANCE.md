@@ -6,6 +6,161 @@ The operator retains raw evidence in private storage. The public summary was
 reviewed against the immutable source hashes; raw private logs were not
 independently inspected for this record.
 
+## Accepted installed release: v0.3.0
+
+- Result: **PASS / УСПЕХ**, as reported by the operator.
+- Tested installed package: `0.3.0`.
+- Tested tag: `v0.3.0`.
+- Release commit: `29dad2ea643e5eed7fffc1a795827aa485ab1b85`.
+- Published wheel size: 278099 bytes.
+- Published wheel SHA-256:
+  `23f0d4852749ec587ce16c589a76b55802183042961c49836266fae7c9a00fbd`.
+- Installation identity: all 65 runtime files matched the exact release source.
+- Content differences: zero.
+- Unexpected additional runtime files: zero.
+- Evidence provenance: the operator's completed installed-release field report.
+
+The reported artifact identities were checked against the published Release.
+The wheel and source archive matched their published hashes. The release
+manifest and checksum file matched too. All seven entries in `SHA256SUMS`
+passed before installation.
+
+### Installed release scope and update
+
+- Host: macOS ARM64 with Python `3.14.5`.
+- Appliance: Windows 11 ARM64 through QGA `109.1.0`.
+- Route: approved VPN followed by native RDP drive redirection.
+- Bastion: Windows 10 x64 with a non-administrator domain operator session.
+- Target: Linux x64 with Python `3.11.2` and the forced-command peer.
+- Protection: Kaspersky Endpoint Security for Windows `21.3.10.1001`.
+- Security mode: `standard`.
+- Execution profile: `structured_only`.
+- Structured backend: `operator`.
+- Spool protocol: `stream`.
+- Worker attestation: enforced with unchanged independently approved pins.
+- Heartbeat window: 300 seconds throughout the run.
+- Advertised copy-step cap: 45 seconds.
+- Whole-copy timeout: 1800 seconds.
+- Foreground lease: eight hours.
+
+The working Host environment was updated from `0.3.0b7` using the published
+wheel. Installation completed in 462.21 ms with exit code zero. Both CLI and
+package metadata reported `0.3.0` from installed `site-packages`. There was no
+source-path override or editable-install substitution.
+
+Configuration bytes and private permissions remained unchanged. Prior journal
+records stayed readable in the same namespace. Consistent backups were retained
+privately. The existing nonzero spool evidence was preserved.
+
+Agent copies matched the approved public source hashes in
+[Component identity](#component-identity). Arbitrary restaging was unnecessary.
+Fresh attestation confirmed the loaded adapter and deployed bytes. The worker
+identity contract stayed at `0.3.0`. The existing system OpenSSH startup signature
+check was allowed to finish before readiness was asserted.
+
+No background supervisor ran on Bastion. Appliance initialization invoked
+`session_supervisor.ps1` once per `heal` with `-ObserveOnly`. This run does not
+qualify automatic background supervisor restart.
+
+### Installed release heal and clocks
+
+All three consecutive `heal` calls returned `APPLIANCE_INIT_OK` and
+`SESSION_ACTIVE`. The same worker instance remained active. OpenSSH did not
+reconnect and heartbeat kept updating.
+
+Each call performed successful QGA clock synchronization. Appliance
+initialization received `HostEpochUtcMs 0`; the `Set-Date` fallback was not
+invoked. Measurements used QGA UTC observations with Host request midpoints.
+There were five samples before and five after each call. RTT and timer
+uncertainty were retained in private evidence.
+
+| Heal | Duration | Median offset before | Median offset after | Reported total uncertainty | Previous 1.6 s rollback |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 2.767 s | +27.820 ms | +10.187 ms | ±75.116 ms | Absent |
+| 2 | 2.653 s | -2.473 ms | -0.337 ms | ±32.511 ms | Absent |
+| 3 | 2.381 s | -0.729 ms | -0.861 ms | ±20.730 ms | Absent |
+
+Final offsets were consistent with zero within the reported uncertainty.
+Direct millisecond Host-to-Bastion clock measurement was unavailable through
+the restricted worker protocol. Its domain time source was confirmed
+separately. No Bastion offset measurement is claimed.
+
+### Installed release ordinary 128 MiB round trip
+
+A new incompressible file generated with `os.urandom` completed push and
+immediate pull without fault injection. All three copies matched size and
+SHA-256. The same worker remained active throughout both transfers.
+
+| Direction | Bytes | Data blocks | Duration | Attempt | Exit code |
+| --- | --- | --- | --- | --- | --- |
+| Push | 134217728 | 128 | 996.247 s | First | 0 |
+| Immediate pull | 134217728 | 128 | 688.846 s | First | 0 |
+
+The worker journal was correlated only with the current transfer operations.
+Push had exactly 128 unique `push_part` entries and one `push_commit`.
+Pull had one `pull_info` and 128 unique `pull_part` entries. Each direction had
+129 completed entries with exit code zero. No duplicate step publication was
+observed. Temporary upload parts were absent after commit.
+
+Both directions exceeded the 300-second heartbeat window. There were no new
+indeterminate operations during the installed `0.3.0` program.
+
+### Installed release stop, cleanup and protection
+
+- `agents stop --timeout 60` completed in 32.223 seconds with exit code zero.
+- `WORKER_STOP_ACCEPTED` was followed by fresh `stopped` telemetry.
+- The foreground worker and its attachment process exited normally.
+- No worker-held IPC handles remained.
+- Exclusive session-lease access succeeded immediately after stop.
+- A second check after 10.5 seconds confirmed stopped status and free lease.
+- No automatic worker restart occurred.
+- One `clean` call completed in 1.923 seconds with exit code zero.
+- Cleanup removed 332 fully zeroed IPC buffers.
+- Cleanup preserved both historical nonzero evidence files.
+- The preserved request size was 135168 bytes.
+- The preserved response size was 416 bytes.
+- There were no deferred removals or cleanup errors.
+- Durable Host and worker journals remained available.
+- Historical indeterminate records were retained separately from this run.
+- Synthetic test files were removed after integrity evidence was recorded.
+- Host remained on installed `0.3.0` with the test worker stopped.
+- VPN and QGA remained available.
+- KES retained 28 running protection components.
+- Both observed Kaspersky logs recorded zero new events.
+- No protection exclusions or trust-policy relaxations were introduced.
+
+Protection observations used direct operating-system and vendor status checks.
+New-event filtering used both the pre-run record boundary and the trial time
+window. Log rotation was checked and had not occurred.
+
+Before the upgrade, one historical expired running operation was reconciled to
+indeterminate without execution. It was counted with the known historical
+negative-test records. The count remained unchanged during the `0.3.0` run.
+Historical uncertainty was not erased or presented as a new product failure.
+
+### Installed release evidence limits and operational notes
+
+The report identified no product defect or deployment error. All product
+commands in this program completed successfully on their first attempt.
+An incidental preparation adjustment in the diagnostic observer was separate
+from the product-command results.
+
+The CLI trial used new `0.3.0` processes. Existing IDE-owned stdio MCP sessions
+were outside its scope. Such clients need their normal connection restart to
+load updated modules. The CLI result does not attest their resident versions.
+
+This record is based on the operator's supplied report. Underlying receipts and
+raw field logs remain private and were not independently inspected here.
+Acceptance applies to the exact installed package on the exercised route.
+Other Host platforms and execution profiles require separate qualification.
+Actual environment identities are omitted. Private policy hashes and
+staging-bundle identifiers are omitted.
+
+The Release adds `V030_FIELD_ACCEPTANCE.md` with a separate
+`V030_FIELD_ACCEPTANCE.sha256`. The original eight release assets retain their
+published bytes. The original manifest and checksum set remain valid for the
+initial distribution. The tag stays bound to the original release commit.
+
 ## Accepted candidate: 0.3.0rc1
 
 - Result: **PASS / УСПЕХ**, as reported by the operator.
@@ -144,9 +299,9 @@ was not run. This acceptance does not qualify other Host platforms or other
 execution profiles. Background supervisor reconnect was not exercised.
 No release or tag was published by the field run.
 
-Prepared final `0.3.0` artifacts have separate exact-artifact checks and hashes.
-Their runtime equivalence to this accepted RC must be verified; they are not
-described as independently field-tested final packages.
+Final `0.3.0` artifacts had separate exact-artifact checks and hashes.
+The later installed-release entry above provides its own field result.
+RC acceptance remains bound to its exact tested revision.
 
 ## Accepted release: Beta 7
 

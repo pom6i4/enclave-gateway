@@ -44,6 +44,15 @@ positional value, which can enter shell history. `secret get` reports only wheth
 a value is present. These commands and MCP schema/client-config exports work
 without a topology or audit database.
 
+### Existing MCP clients after a Host upgrade
+
+Updating a virtual environment changes files used by newly started processes.
+Existing IDE-owned stdio MCP sessions may still hold the prior modules in memory.
+Reconnect those clients through their normal application controls after updating.
+Verify the new server version through the client before treating that session as
+updated. A successful CLI upgrade does not attest existing MCP process versions.
+Do not terminate unrelated client processes as part of worker cleanup.
+
 ### Configuration discovery and private state
 
 For an installed `egw` executable on PATH:
@@ -801,7 +810,7 @@ see [Microsoft's duplicate SID guidance](https://support.microsoft.com/en-au/ser
 
 For an administrator-approved foreground worker without Bastion autostart or
 custom executables, see [the endpoint-policy guide](ENDPOINT-POLICY.md).
-The `structured_only` profile in prepared `0.3.0` rejects unsupported
+The `structured_only` profile in `0.3.0` rejects unsupported
 operations and never falls back to the universal worker. Its
 [Windows qualification scope](ENDPOINT-POLICY.md#qualification-status) is
 separate from EDR approval and the portable interpreter tests.

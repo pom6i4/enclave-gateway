@@ -1,16 +1,18 @@
 # Standard operator release gates for 0.3.0
 
-Final package `0.3.0` is prepared locally. Publication is not authorized by
-preparation. The exact source commit and artifact hashes are recorded in the
-local final-artifact manifest outside the checkout.
+Package `0.3.0` is published as `v0.3.0` at
+`29dad2ea643e5eed7fffc1a795827aa485ab1b85`.
+The [installed-release field report](../contrib/qualification/FIELD_ACCEPTANCE.md#accepted-installed-release-v030)
+records PASS / УСПЕХ for the exact published package on the exercised route.
+The tag and original release assets retain their published bytes.
 
-RC `0.3.0rc1` at `33fbcdecfba01ea8ed995379d39d8bc49886f706` passed
+RC `0.3.0rc1` at `33fbcdecfba01ea8ed995379d39d8bc49886f706` separately passed
 [operator-reported lifecycle acceptance](../contrib/qualification/FIELD_ACCEPTANCE.md#accepted-candidate-030rc1).
-Actual reconnect and upgrade/rollback are closed for that tested route.
+Actual reconnect and upgrade/rollback are closed for that tested RC route.
 Final runtime differs from the RC only in its package version declaration.
 Other profile and platform acceptance remains separate.
 
-## Proposed stable scope
+## Published Standard operator scope
 
 - Source and pure Python distribution.
 - `security.mode: standard`.
@@ -23,7 +25,7 @@ Other profile and platform acceptance remains separate.
 - Fresh worker attestation with the pinned operator identity.
 - Existing approved endpoint policy without new protection exclusions.
 
-This preparation does not promote other execution profiles to stable. It does not
+This release does not promote other execution profiles to stable. It does not
 change configuration defaults. It does not deliver native helpers or establish
 Enterprise signing qualification. Host installation acceptance is separate from
 Appliance or Bastion architecture. A platform is qualified only by an explicit
@@ -44,7 +46,7 @@ Signed deployment bytes require their own approved hashes.
 No config or journal migration is introduced. Configuration is validated by the
 existing typed models. MCP request schemas retain their existing arguments.
 The CLI provides `cp --chunked --timeout`; MCP `node_transfer` does not expose
-that chunked-copy interface. No schema change is needed for this candidate.
+that chunked-copy interface. No schema change was needed for the final package.
 
 ## Candidate gates
 
@@ -74,15 +76,15 @@ reports do not become acceptance of new artifacts solely through a version bump.
 - Confirm a working private vulnerability-reporting channel before stable release.
 
 The [field prompt](../contrib/qualification/STANDARD_OPERATOR_FIELD_PROMPT_RU.md)
-defines the completed RC lifecycle program. Its report remains bound to the RC. Beta 7's completed 128 MiB round trip is
-retained as prior evidence. A small candidate round trip checks installation.
+defines the completed RC lifecycle program. Its report remains bound to the RC.
+Installed final-package acceptance separately covers the 128 MiB round trip.
 Repeat the larger regression if runtime behavior or deployment components change.
 
 ## Final artifact preparation and publication
 
-Successful RC acceptance permits final artifact preparation. Publication remains
-a separate authorized operation. The final manifest records which local checks
-passed and which platform or publication gates remain pending.
+The final manifest records the initial build and qualification cohort. Later
+field evidence is added as a separate supplement. Future publication remains
+an explicitly authorized operation with exact-source checks.
 
 - Verify the package version is `0.3.0`.
 - Update its metadata status after acceptance is complete.

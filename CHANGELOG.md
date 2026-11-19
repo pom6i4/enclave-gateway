@@ -2,10 +2,20 @@
 
 ## Unreleased
 
-## 0.3.0 — prepared, unpublished
+## 0.3.0
 
-- Prepare final source and Python artifacts for Standard operator.
-  Publication remains a separate explicit action.
+Package version `0.3.0` and immutable tag `v0.3.0` at
+`29dad2ea643e5eed7fffc1a795827aa485ab1b85`.
+
+- Record post-release operator-reported **PASS / УСПЕХ** for installed `0.3.0`
+  under KES `21.3.10.1001`. All 65 runtime files matched the release.
+  First-attempt 128 MiB push took 996.247 s. Immediate pull took 688.846 s.
+  All three copies matched size and SHA-256. Three `heal` calls retained the
+  worker and synchronized clock. Stop released the lease in 32.223 s.
+  No new indeterminate outcomes or KES events were observed.
+  See the [installed v0.3.0 record](contrib/qualification/FIELD_ACCEPTANCE.md#accepted-installed-release-v030).
+- Publish source and Python artifacts for Standard operator.
+  Post-release documentation supplements preserve the original asset bytes.
 - Record operator-reported **PASS / УСПЕХ** for `0.3.0rc1` at
   `33fbcdecfba01ea8ed995379d39d8bc49886f706` under KES `21.3.10.1001`.
 - Verify actual RDP disconnect/reconnect with the same Windows session.
@@ -16,7 +26,7 @@
   Final worker stop took 27.584 s. Protection stayed active with zero new events.
 - Preserve all agent bytes and worker attestation version `0.3.0`.
   Final runtime differs from the accepted RC only in its package version.
-- Retain platform qualification limits and the pending publication gates.
+- Retain platform qualification limits and source-bound acceptance records.
   See the [RC acceptance record](contrib/qualification/FIELD_ACCEPTANCE.md#accepted-candidate-030rc1).
 
 ## 0.3.0rc1 — unpublished Standard operator candidate

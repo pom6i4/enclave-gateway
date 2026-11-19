@@ -17,17 +17,12 @@
 
 **Область Standard operator.** Standard предполагает доверие к оператору, RDP-сеансу и всем процессам с правом записи в спул. Enterprise требует проверенных подписей, закреплённых хешей и SID, свежей аттестации и нативной модели исполнения. В обоих режимах действуют политики Windows и правила доступа организации.
 
-Последняя опубликованная версия — [**0.3.0 Beta 7**](https://github.com/pom6i4/enclave-gateway/releases/tag/v0.3.0-beta.7) (`0.3.0b7`).
-foreground-профиль `structured_only` является **экспериментальным** и требует
-явного согласования с ИБ. Совместимость с KES не сертифицирована.
-См. [границы выпуска](docs/RELEASING.md#current-beta-candidate).
-
-Финальные исходники и Python-пакет **0.3.0** подготовлены локально для Standard
-operator. Публикация не выполнялась. Принятый RC прошёл реальный RDP reconnect
-и цикл upgrade/rollback в указанном контуре. Другие профили сохраняют отдельные
-границы квалификации. См.
-[критерии выпуска](docs/STANDARD_OPERATOR_CANDIDATE.md) и
-[приёмку RC](contrib/qualification/FIELD_ACCEPTANCE.md#accepted-candidate-030rc1).
+Последний релиз — [**0.3.0 — Standard operator**](https://github.com/pom6i4/enclave-gateway/releases/tag/v0.3.0) (`0.3.0`).
+Установленная версия прошла полевую приёмку на указанном маршруте под KES
+`21.3.10.1001`. Согласование политики конечных точек остаётся обязательным.
+Другие профили имеют отдельные границы квалификации. См.
+[приёмку установленного релиза](contrib/qualification/FIELD_ACCEPTANCE.md#accepted-installed-release-v030)
+и [границы выпуска](docs/STANDARD_OPERATOR_CANDIDATE.md).
 
 ## Возможности
 

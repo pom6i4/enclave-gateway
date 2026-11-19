@@ -1,7 +1,7 @@
 # Endpoint policy and the foreground OpenSSH profile
 
-This describes the foreground profile in the prepared, unpublished `0.3.0` artifacts.
-The [Standard operator candidate gates](STANDARD_OPERATOR_CANDIDATE.md) define
+This describes the foreground profile in published `0.3.0`.
+The [Standard operator release gates](STANDARD_OPERATOR_CANDIDATE.md) define
 its Standard operator scope. Each field acceptance remains bound to its tested source.
 It does not change the published `v0.2.0` tag or certify antivirus compatibility. Deployment on a
 managed endpoint requires its administrator's approval. An active security
@@ -566,6 +566,26 @@ each direction matched SHA-256; the slowest block or auxiliary request took
 2.88 s. KES 14.1.0.423 logged no new events during this run, with AMSI, Behavior
 Detection and File Threat Protection active and no changes to exclusions.
 This verifies manual recovery on the lab route and policy.
+
+### Installed v0.3.0 field acceptance
+
+The operator reported **PASS / УСПЕХ** for installed `0.3.0` from published
+`v0.3.0` at `29dad2ea643e5eed7fffc1a795827aa485ab1b85` under KES
+`21.3.10.1001`. All 65 runtime files matched. First-attempt 128 MiB push
+completed in 996.247 seconds. Immediate pull took 688.846 seconds. All three
+copies matched size and SHA-256 with the same worker.
+
+Three `heal` calls preserved QGA clock synchronization and the active session.
+The previous approximately 1.6-second rollback did not recur. Stop released the
+lease in 32.223 seconds. Cleanup removed 332 zeroed buffers while preserving
+both historical nonzero evidence files. No new indeterminate operation occurred.
+KES remained active with zero new events.
+
+See the [installed-release record](../contrib/qualification/FIELD_ACCEPTANCE.md#accepted-installed-release-v030)
+for measurement uncertainty and evidence limits. Existing IDE-owned MCP clients
+were outside the CLI trial and need their normal connection restart after
+updating the package. This acceptance does not extend to other Host platforms
+or other endpoint policies.
 
 ### RC lifecycle field acceptance
 
