@@ -1,6 +1,6 @@
 # Endpoint policy and the foreground OpenSSH profile
 
-This describes the experimental foreground profile in `0.3.0b6` (Beta 6).
+This describes the experimental foreground profile in `0.3.0b7` (Beta 7).
 It does not change the published `v0.2.0` tag or certify antivirus compatibility. Deployment on a
 managed endpoint requires its administrator's approval. An active security
 incident must be resolved through the organization's incident process first.

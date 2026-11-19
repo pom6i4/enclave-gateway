@@ -138,3 +138,11 @@ The public record omits:
 - Filled configuration files.
 - Raw logs.
 - Customer-specific artifact identifiers.
+
+## Release mapping
+
+`v0.3.0-beta.7` packages the accepted application code as Python version
+`0.3.0b7`. The runtime source difference from the tested revision is the package
+version declaration. All three agent scripts retain the hashes listed above.
+Release build and installation checks are recorded separately in
+`release-manifest.json`. The field acceptance remains bound to `65e1fb9`.

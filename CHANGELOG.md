@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.3.0 Beta 7
+
+Package version `0.3.0b7` and Git tag `v0.3.0-beta.7`.
+
+This source/Python prerelease packages the application code field-accepted at
+`65e1fb9abf7a609955aa0dafabf42fdae47f096d`. Runtime source differs only in the
+package version declaration. Agent scripts and protocol identities are unchanged.
+
 - Record successful operator-reported field acceptance of
   `65e1fb9abf7a609955aa0dafabf42fdae47f096d` under KES `21.3.10.1001`.
   A 128 MiB push completed in 952.45 s on its first attempt. The immediate
