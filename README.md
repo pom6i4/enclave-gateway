@@ -154,6 +154,8 @@ Standard; migrating an existing deployment is an operator decision.
 
 ## Documentation
 
+- [Post-0.3.0 roadmap](docs/ROADMAP.md): unpublished development scope and next
+  candidate gates.
 - [Engineer and administrator guide](docs/GUIDE.md): installation, first connection,
   keys, CLI recipes, existing VM prerequisites and troubleshooting.
 - [Security architecture and Enterprise deployment](docs/SECURITY.md): trust

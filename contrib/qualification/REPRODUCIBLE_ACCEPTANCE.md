@@ -135,6 +135,10 @@ entry points and actual installed provisioning, and records platform plus exact
 package-input hashes before/after acceptance. Compare those input hashes with
 the final source; an older platform report is not promoted to a new cohort.
 
+It also runs [fresh installed MCP acceptance](LOCAL_ACCEPTANCE.md#automated-installed-mcp-check)
+against that exact wheel. The nested `mcp/result.json` records version agreement
+and local protocol results. A nested failure fails installed-package acceptance.
+
 `compare_installed.py --report <report> --report <report> --require-platform
 <system:architecture> --output <new-receipt>` compares the complete input sets
 with the current source, normalizes Windows path separators, rejects ambiguous

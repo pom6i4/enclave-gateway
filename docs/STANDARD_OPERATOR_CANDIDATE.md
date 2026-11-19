@@ -68,15 +68,21 @@ Signed deployment bytes require their own approved hashes.
 
 No config or journal migration is introduced. Configuration is validated by the
 existing typed models. MCP request schemas retain their existing arguments.
-The CLI provides `cp --chunked --timeout`; MCP `node_transfer` does not expose
-that chunked-copy interface. No schema change was needed for the final package.
+The published CLI provides `cp --chunked --timeout`; the published `0.3.0` MCP
+`node_transfer` does not expose that chunked-copy interface. No schema change was
+needed for the final package. Unpublished `0.4.0.dev0` adds the explicit MCP
+options described in the [roadmap](ROADMAP.md#first-040-block).
 
 ## Qualification checklist for future candidates
 
 Publication requires a source-bound result for every applicable gate. Historical
 reports do not become acceptance of new artifacts solely through a version bump.
+Select and record the stable upgrade/rollback baseline before running a new
+candidate. The first `0.4.0` candidate uses `v0.3.0`; the Beta 7 baseline above
+belongs to the completed `0.3.0` cycle.
 
-- Compare every runtime file against Beta 7 and account for the version change.
+- Compare every runtime file against the selected stable baseline.
+- Account for every runtime change beyond the version statement.
 - Confirm each agent digest and the independent attestation version.
 - Run the ordinary source suite on Python 3.10 through 3.14.
 - Run the applicable PowerShell fixtures with their actual skip reasons retained.
@@ -89,8 +95,8 @@ reports do not become acceptance of new artifacts solely through a version bump.
 - Record unavailable platform checks as pending.
 - Verify actual RDP disconnection and reconnection during a test operation.
 - Prove no duplicate effect for completed and interrupted transaction IDs.
-- Verify Beta 7 to candidate upgrade in the working Host environment.
-- Verify explicit rollback to the retained Beta 7 wheel.
+- Verify stable-baseline to candidate upgrade in the working Host environment.
+- Verify explicit rollback to the retained baseline wheel.
 - Preserve the same configuration and journal namespace across that cycle.
 - Verify safe stop and lease release before each worker replacement.
 - Verify final readiness and fresh attestation after each approved attachment.
@@ -103,7 +109,7 @@ defines the completed RC lifecycle program. Its report remains bound to the RC.
 Installed final-package acceptance separately covers the 128 MiB round trip.
 Repeat the larger regression if runtime behavior or deployment components change.
 
-## Final artifact preparation and publication
+## Historical 0.3.0 artifact preparation and publication
 
 The final manifest records the initial build and qualification cohort. Later
 field evidence is added as a separate supplement. Future publication remains

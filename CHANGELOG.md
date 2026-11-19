@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+Working package version: `0.4.0.dev0`. No release is published by these changes.
+
+- Add explicit MCP `node_transfer` chunked mode through the existing operator
+  copy engine. Add a whole-copy timeout with bounded numeric validation.
+  Ordinary copy remains the default. Unsupported chunked routes fail closed.
+- Preserve copy authorization and stable transaction results without replay.
+  Add MCP wrapper coverage for a 128 MiB round trip and ambiguous completion.
+  Add an opt-in worker/peer pipe fixture for the same MCP transfer size.
+- Automate fresh installed stdio MCP acceptance against the exact wheel.
+  Isolate configuration and inherited environment. Verify a Python audit I/O
+  guard before initialization. Require version agreement and clean EOF shutdown.
+- Expand source and installed-package CI to Python 3.10 through 3.14 on all
+  three hosted operating systems.
+- Add a post-0.3.0 roadmap and select the stable release as the next candidate's
+  upgrade/rollback baseline. Historical acceptance remains unchanged.
+
 ## 0.3.0
 
 Package version `0.3.0` and immutable tag `v0.3.0` at

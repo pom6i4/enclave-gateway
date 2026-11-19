@@ -16,12 +16,14 @@ import venv
 import zipfile
 
 ROOT=Path(__file__).resolve().parents[2]
+sys.path.insert(0,str(Path(__file__).resolve().parent))
+from mcp_installed import run as check_installed_mcp
 
 
 def run(output: Path,pip_wheel: Path|None=None):
     if output.exists() and any(output.iterdir()):raise FileExistsError('Use a new artifact acceptance directory')
     output.mkdir(parents=True,mode=0o700,exist_ok=True)
-    output=output.resolve();report={'status':'running','scope':'built-sdist-wheel-clean-installed-cli','runs':[]}
+    output=output.resolve();report={'status':'running','scope':'built-sdist-wheel-clean-installed-cli-mcp','runs':[]}
     environment={key:value for key,value in os.environ.items() if key not in ('PYTHONPATH','PYTHONHOME')}
     environment['PYTHONNOUSERSITE']='1'
     report['platform']={'system':__import__('platform').system(),'machine':__import__('platform').machine(),'python':sys.version.split()[0]}
@@ -106,6 +108,7 @@ assert pathlib.Path(m['autounattend_xml']).is_file() and pathlib.Path(m['post_in
 print(json.dumps({'package':str(p),'version':enclave_gateway.__version__,'agents':m['copied_agents']}))
 '''
             report['installed']=json.loads(command('installed-provision',[str(python),'-I','-c',probe],clean))
+            report['mcp']=check_installed_mcp(python,wheel,output/'mcp')
             (clean/'config.json').write_text(json.dumps({'appliance':{'runtime_dir':str(Path(runtime).resolve()),'disk_path':str(clean/'disk.qcow2'),
                 'efi_vars_path':str(clean/'efi_vars.fd'),'snapshot_dir':str(clean/'states')},'provider':{'type':'custom'},'bastion':{'enabled':False}}))
             environment['ENCLAVE_APPLIANCE_PASSWORD']=secrets.token_urlsafe(24)

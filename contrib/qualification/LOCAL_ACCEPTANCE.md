@@ -18,6 +18,41 @@ Additional plan steps can invoke the existing disposable Windows provisioning, c
 
 For a new VM, put its fixture `--output` below `{run_dir}` and list its generated `config.json` in `managed_vm_configs`. In `finally`, the runner checks the laboratory name, restricted user networking, custom provider without installer/key material, owned disk/NVRAM/TPM state paths, QMP identity and actual attached disk before graceful shutdown and TPM quiescence. An absent config means the resource was never created. Ambiguous ownership or cleanup failure makes the entire run fail and preserves its state. Previously existing VMs are not accepted as owned resources. Stop only the runner's child processes and their process groups on a step deadline.
 
+## Automated installed MCP check
+
+The installed-package checker now includes a fresh local MCP smoke test:
+
+```sh
+python scripts/qualification/installed_package.py --output /private/new-installed-check
+```
+
+To verify an already installed private test environment against its exact wheel:
+
+```sh
+python scripts/qualification/mcp_installed.py \
+  --python /path/to/venv/bin/python \
+  --wheel /path/to/enclave_gateway.whl \
+  --output /private/new-mcp-check
+```
+
+On Windows, select the environment's `Scripts/python.exe`. The checker preserves
+the interpreter symlink rather than resolving it out of its virtual environment.
+It rejects editable packages and runtime differences from the supplied wheel.
+The expected version comes from that wheel's metadata.
+
+The server uses a new private configuration with Bastion disabled and no targets.
+Inherited deployment environment variables are not passed to the child. An
+audited Python guard rejects socket and child-process events. Actual socket
+creation and DNS probes must fail. An actual subprocess probe must also fail.
+This is an accidental-I/O guard for trusted test code, not an OS sandbox.
+The original `0.3.0` receipt below used a separate OS sandbox.
+
+The client waits for initialization before sending further requests. It checks
+the expected server version and local smoke responses. It closes only its own
+server's stdin and requires exit zero. Failure cleanup may kill that newly
+created test child only. No existing IDE process is inspected or stopped.
+The bounded private receipt retains failure status and protocol output.
+
 ## Installed v0.3.0 local MCP verification
 
 Result: **PASS / УСПЕХ** for a newly launched local stdio server from the

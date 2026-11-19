@@ -645,6 +645,9 @@ class OperatorWorkerTests(unittest.TestCase):
     def test_chunked_cli_copy_exceeds_stream_capacity_and_checks_each_block(self):
         self._exercise_worker(disconnect=False, chunked=True)
 
+    def test_chunked_mcp_128_mib_round_trip_through_worker_and_peer(self):
+        self._exercise_worker(disconnect=False, chunked=True, mcp=True)
+
     def test_unsigned_adapter_under_operator_sid(self):
         self._exercise_worker(disconnect=False, unsigned=True)
 
@@ -696,7 +699,7 @@ if($pulses -ne 1){throw 'Long copy did not refresh heartbeat while waiting on th
                                     capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def _exercise_worker(self, *, disconnect, corrupt_upload=False, chunked=False, unsigned=False, foreign_writer=False, extended=False, slow_copy=False):
+    def _exercise_worker(self, *, disconnect, corrupt_upload=False, chunked=False, unsigned=False, foreign_writer=False, extended=False, slow_copy=False, mcp=False):
         import socket
         import time
         from enclave_gateway import cli
@@ -898,6 +901,20 @@ function Get-Acl {
 
                 def invoke(*args, expected=0):
                     out, err = io.StringIO(), io.StringIO()
+                    if mcp and args[0] == 'cp' and '--chunked' in args:
+                        from enclave_gateway.mcp_server.server import McpJsonRpcServer
+                        src, dst = args[1:3]
+                        pulling = src.startswith('app01:')
+                        options = {'direction': 'pull' if pulling else 'push', 'node': 'app01',
+                                   'local_path': dst if pulling else src,
+                                   'remote_path': (src if pulling else dst).removeprefix('app01:'),
+                                   'chunked': True, 'timeout_sec': float(args[args.index('--timeout')+1]) if '--timeout' in args else 900}
+                        engine = make_engine(config=EnclaveConfig.load(cfg), state_dir=root/'host')
+                        response = McpJsonRpcServer(engine).handle_message({'jsonrpc': '2.0', 'id': 1,
+                            'method': 'tools/call', 'params': {'name': 'node_transfer', 'arguments': options}})
+                        failed = 'error' in response or response.get('result', {}).get('isError', False)
+                        self.assertEqual(int(failed), expected, str(response))
+                        return response.get('result', {}).get('content', [{'text': ''}])[0]['text'], json.dumps(response) if failed else ''
                     with patch.object(cli, "EnclaveEngine", side_effect=make_engine), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                         code = cli.main(["-c", str(cfg), "--state-dir", str(root/"host"), *args])
                     self.assertEqual(code, expected, out.getvalue()+err.getvalue()+(root/"worker.log").read_text()+(root/"spool"/"worker_state.json").read_text()+str((root/"spool"/"worker_state.json").stat().st_mtime-time.time()))
@@ -959,9 +976,10 @@ function Get-Acl {
                 if chunked:
                     payload = random.Random(23).randbytes(1024 * 1024)
                     with upload.open("wb") as stream:
-                        for _ in range(65):
+                        for _ in range(128 if mcp else 65):
                             stream.write(payload)
-                        stream.write(b"tail")
+                        if not mcp:
+                            stream.write(b"tail")
                     expected = hashlib.sha256(upload.read_bytes()).hexdigest()
                     remote = root / "target with 'quotes'"
                     remote_spec = "app01:" + str(remote)

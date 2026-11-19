@@ -937,6 +937,39 @@ for the password, so use it for commands that do not consume additional stdin.
 
 ### Chunked copy
 
+Unpublished `0.4.0.dev0` also exposes this mode through MCP `node_transfer`.
+The published `0.3.0` tool does not accept these new options.
+
+```json
+{
+  "name": "node_transfer",
+  "arguments": {
+    "direction": "push",
+    "local_path": "./artifact.bin",
+    "node": "app01",
+    "remote_path": "/tmp/artifact.bin",
+    "chunked": true,
+    "timeout_sec": 1800,
+    "tx_id": "copy_artifact_001"
+  }
+}
+```
+
+Use `direction: pull` to download. The default is ordinary copy with
+`chunked: false`. Delta sync is ignored in chunked mode. The whole-copy budget
+must be finite and positive, at most 86,400 seconds. The worker lease must cover
+the transfer. Existing ordinary operator limits remain in effect.
+
+The chunked engine requires an approved Linux TargetNode through the operator
+backend and fresh `chunked_copy_slots_v1` capability. Missing capability or an
+unsupported route fails without a copy-mode fallback. Existing policy grants
+still apply. Read-only MCP refuses transfers in either direction.
+
+Keep the same `tx_id` when retrieving an earlier result. A completed operation
+returns its retained result. An ambiguous operation cannot be replayed. Changing
+copy mode under the same ID is a transaction conflict. Reconcile uncertain
+effects before starting a new operation. See [the transaction guidance](SECURITY.md#ssh-secrets-and-persistence).
+
 For files up to 512 MiB, use chunked copy after `egw agent-verify` reports
 `chunked_copy_slots_v1: true`. It transfers 1 MiB blocks, verifies SHA-256 on each
 block and publishes the destination after verifying the whole file. Deploy the

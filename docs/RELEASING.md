@@ -164,6 +164,12 @@ for their prerequisites and evidence limits.
 
 ## Validate the source and Python matrix
 
+The development CI matrix runs Python 3.10 through 3.14 on all three hosted
+operating systems. Each job also builds and installs the distribution, then
+checks a fresh isolated stdio MCP server against the exact wheel. This remains
+separate from native-helper or hypervisor qualification. See the
+[post-0.3.0 roadmap](ROADMAP.md).
+
 Start from clean committed source. Keep reports, toolchains, virtual environments,
 installers, credentials and built binaries outside the public checkout. Preserve
 failed attempts under different output names.

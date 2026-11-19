@@ -104,8 +104,13 @@ def validate_tool_arguments(name: str, args: Any) -> str | None:
         kind = prop["type"]
         if not isinstance(value, types[kind]) or (kind in ("integer", "number") and isinstance(value, bool)):
             return f"Invalid type for {key}"
-        if kind == "number" and not math.isfinite(value):
-            return f"Invalid number for {key}"
+        if kind == "number":
+            try:
+                finite = math.isfinite(value)
+            except OverflowError:
+                finite = False
+            if not finite:
+                return f"Invalid number for {key}"
         if "enum" in prop and value not in prop["enum"]:
             return f"Invalid value for {key}"
         if kind == "array" and any(not isinstance(item, str) for item in value):
@@ -236,7 +241,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     },
     {
         "name": "node_transfer",
-        "description": "Push or pull a file between the Host and '@appliance', '@bastion', or a TargetNode with SHA-256 verification and optional block delta sync.",
+        "description": "Push or pull a file with SHA-256 verification. Explicit chunked mode supports up to 512 MiB through an attested operator backend; it never falls back to ordinary copy.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -266,6 +271,18 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "type": "boolean",
                     "description": "Use 4 MB block-level SHA-256 delta synchronization on push.",
                     "default": True,
+                },
+                "chunked": {
+                    "type": "boolean",
+                    "description": "Use operator chunked copy for a Linux TargetNode. Requires chunked_copy_slots_v1 attestation. Delta sync is not used in this mode.",
+                    "default": False,
+                },
+                "timeout_sec": {
+                    "type": "number",
+                    "description": "Whole-copy budget including readiness and attestation. Ordinary operator copy retains its per-operation cap. The worker lease must cover the copy.",
+                    "exclusiveMinimum": 0,
+                    "maximum": 86400,
+                    "default": 900.0,
                 },
             },
             "required": ["direction", "local_path", "node", "remote_path"],
@@ -934,14 +951,18 @@ class McpJsonRpcServer:
             return self._exec_to_tool_result(req_id, res)
 
         if tool_name == "node_transfer":
-            meta = self.engine.transfer_file(
+            chunked = args.get("chunked", False)
+            transfer = self.engine.transfer_file_chunked if chunked else self.engine.transfer_file
+            options = {} if chunked else {"use_delta": args.get("use_delta", True)}
+            meta = transfer(
                 str(args["direction"]),
                 str(args["local_path"]),
                 str(args["node"]),
                 str(args["remote_path"]),
                 as_root=bool(args.get("as_root", False)),
-                use_delta=bool(args.get("use_delta", True)),
+                timeout_sec=float(args.get("timeout_sec", 900.0)),
                 tx_id=args.get("tx_id"), actor="mcp",
+                **options,
             )
             return self._tool_result(req_id, self._json_dump(meta, indent=2))
 
