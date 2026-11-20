@@ -14,8 +14,12 @@ Confirmed maintenance defects can be addressed separately in `0.3.x`.
 
 ## First 0.4.0 block
 
-The following changes are implemented for local verification. They are not a
-field acceptance or a published release.
+The following changes are implemented at
+`363d8f72dc2c3ab1eebf9d60a3a95215cba468b3`. Local checks passed.
+The exact source also passed all 15 hosted CI jobs. The
+[operator-supplied field record](../contrib/qualification/FIELD_ACCEPTANCE.md#accepted-development-block-040dev0)
+reports functional acceptance under explicit session-continuity conditions.
+It does not establish unattended reliability or a published release.
 
 ### P1: large transfers through MCP
 
@@ -32,8 +36,9 @@ field acceptance or a published release.
 The ordinary source suite includes a 128 MiB MCP/engine/journal wrapper test with
 a local backend substitute. The opt-in portable PowerShell fixture exercises
 MCP through the worker and persistent Python peer using local pipes. Neither
-test establishes real RDP or endpoint-policy compatibility. The changed MCP
-path still needs a source-bound field receipt before release promotion.
+test establishes real RDP or endpoint-policy compatibility. The separate field
+receipt covers the exercised real route. Its full round trip passed on attempt
+four. Failed attempts remain part of the evidence.
 
 ### P1: installed-package MCP acceptance
 
@@ -67,8 +72,9 @@ restarts them or contacts a deployment.
 - Give the workflow read-only repository permissions.
 
 Hosted CI qualifies only the actual runner environment. It does not qualify all
-Host architectures or hypervisor acceleration. Local passing results do not
-establish a hosted CI result before these workflow changes are pushed and run.
+Host architectures or hypervisor acceleration. Local passing results alone do
+not establish a hosted result. The linked CI receipt applies to the exact
+implementation commit above; later documentation does not qualify new runtime.
 The macOS Python 3.10 cell explicitly uses `macos-15-intel`. Other macOS cells use
 `macos-latest`. The official [Python build manifest](https://github.com/actions/python-versions/blob/main/versions-manifest.json)
 has newer 3.10 patches for Intel than ARM64. The explicit
@@ -86,6 +92,18 @@ avoids qualifying that cell with an older ARM64 patch.
 ## Later priorities
 
 ### P2: operator transfer performance
+
+The development field report leaves specific follow-up work:
+
+- Reconcile the attempt-3 block attribution against retained traces.
+- Keep the reported block-123 versus 75-ledger-record discrepancy visible.
+- Isolate the source of the reported late response before changing timeout gates.
+- Establish session continuity within the approved RDP idle policy.
+- Measure first-attempt long-transfer reliability under those normal conditions.
+
+The reported 61.7-second response interval exceeded the attested 45-second step
+budget. Increasing the whole-copy timeout does not extend that step budget.
+Do not add automatic mutating retries to conceal an indeterminate result.
 
 Measure time spent at each boundary on the accepted route before optimizing.
 Keep first-attempt failures and uncertainty in the results. The historical
@@ -117,6 +135,9 @@ Keep native Windows-host managed TPM unsupported until its backend is qualified.
 Use `v0.3.0` as the stable upgrade/rollback baseline for the first 0.4.0 candidate.
 Run the [candidate checklist](STANDARD_OPERATOR_CANDIDATE.md#qualification-checklist-for-future-candidates)
 against the new source and exact wheel. Field acceptance of the MCP addition
-must cover a 128 MiB push and pull through the changed tool. Include interruption
-and no-replay checks. Broaden the lifecycle regression when deployment components
-or runtime behavior change. No next release is authorized by this roadmap alone.
+at `363d8f7` covers a 128 MiB push and pull through the changed tool. It includes
+controlled cancellation and no-replay checks. Preserve all failed attempts and
+the qualified acceptance scope. New runtime changes require their own regression.
+Broaden the lifecycle regression when deployment components or runtime behavior
+change. The field receipt alone does not close stable promotion. No next release
+is authorized by this roadmap alone.

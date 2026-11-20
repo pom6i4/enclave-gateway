@@ -991,6 +991,13 @@ renewed before dispatch. Each reply must match the verified instance and adapter
 A changed instance ends the transfer for reconciliation. These caches end with
 the copy and do not extend the overall timeout.
 
+The whole-copy timeout does not extend an attested step budget. Active redirected
+file traffic also does not establish that an RDP input-idle policy will keep the
+session open. Arrange session continuity within the approved policy before a
+long transfer. The [development MCP field record](../contrib/qualification/FIELD_ACCEPTANCE.md#accepted-development-block-040dev0)
+retains three failed pulls before a successful round trip under externally
+maintained session activity. It does not establish unattended operation.
+
 For the operator backend, `agents stop` waits for `stopped` telemetry and release
 of the worker session lease after acknowledgement. Redirected handles can take
 more than 20 seconds to close. If its timeout expires first, the command reports

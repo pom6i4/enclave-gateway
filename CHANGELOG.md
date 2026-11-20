@@ -4,6 +4,15 @@
 
 Working package version: `0.4.0.dev0`. No release is published by these changes.
 
+- Record operator-reported functional **PASS / УСПЕХ** for installed development
+  commit `363d8f72dc2c3ab1eebf9d60a3a95215cba468b3`. Fresh MCP initialization and
+  a 128 MiB round trip passed. Completed and interrupted transaction checks
+  showed zero new copy-dispatch after MCP restart.
+  The round trip passed on attempt four; three failed pulls remain recorded.
+  Session continuity depended on external test activity. An exact failing-block
+  counter discrepancy remains unresolved. This does not establish unattended
+  reliability or authorize stable promotion. See the
+  [development field record](contrib/qualification/FIELD_ACCEPTANCE.md#accepted-development-block-040dev0).
 - Add explicit MCP `node_transfer` chunked mode through the existing operator
   copy engine. Add a whole-copy timeout with bounded numeric validation.
   Ordinary copy remains the default. Unsupported chunked routes fail closed.

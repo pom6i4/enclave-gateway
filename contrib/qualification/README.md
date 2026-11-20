@@ -12,6 +12,7 @@ qualification plans nor historical reports.
 - [Extended runtime profile](EXTENDED_ACCEPTANCE.md)
 - [Backend isolation and release procedure](HARDENING_AND_QUALIFICATION.md)
 - [Source-bound field acceptance](FIELD_ACCEPTANCE.md)
+- [Development 0.4.0 MCP field acceptance and limits](FIELD_ACCEPTANCE.md#accepted-development-block-040dev0)
 - [Historical source-bound records](HISTORY.md)
 
 Safe unfilled plan templates live in `plans/`. Runtime runner code remains under

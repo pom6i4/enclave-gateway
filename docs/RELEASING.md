@@ -42,6 +42,21 @@ Existing IDE sessions were not restarted. Their later client-side reconnect
 is operational maintenance, not a remaining release gate.
 See the [scope-bound closure](STANDARD_OPERATOR_CANDIDATE.md#release-cycle-status).
 
+## Unpublished 0.4.0 development field acceptance
+
+Installed `0.4.0.dev0` at `363d8f72dc2c3ab1eebf9d60a3a95215cba468b3`
+has an [operator-reported functional field acceptance](../contrib/qualification/FIELD_ACCEPTANCE.md#accepted-development-block-040dev0).
+Fresh MCP initialization passed. The fourth attempt completed a 128 MiB round
+trip. Deduplication across MCP restart passed. An intentionally cancelled copy
+was retained as indeterminate and could not dispatch again.
+
+The first three pulls failed and remain in the record. The successful program
+used external RDP input activity. The delay attribution and an inconsistent
+block counter remain explicitly qualified. This is not unattended reliability
+acceptance or a stable release. Keep the field-built wheel identity separate
+from published release materials. No version or agent bytes change as part of
+recording the report. Stable `v0.3.0` remains unchanged.
+
 ## Beta release history
 
 The last Beta package version was `0.3.0b7`. Its Git release tag is

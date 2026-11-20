@@ -6,6 +6,192 @@ The operator retains raw evidence in private storage. The public summary was
 reviewed against the immutable source hashes; raw private logs were not
 independently inspected for this record.
 
+## Accepted development block: 0.4.0.dev0
+
+- Operator-reported result: **PASS / УСПЕХ** for the tested MCP functionality.
+- Exact source: `363d8f72dc2c3ab1eebf9d60a3a95215cba468b3`.
+- Package version: `0.4.0.dev0`, unpublished development code.
+- Field-built wheel size: 278458 bytes.
+- Field-built wheel SHA-256:
+  `4db9a470e6fcef7a7fc71d2b9fdf987ceb113537773c8ef8871477b961a98aae`.
+- Field-built sdist size: 252604 bytes.
+- Field-built sdist SHA-256:
+  `1331e022f383c7c9ef59c1276a49cf5b688f56b36606783cc0d6eaffe6ffd0c4`.
+- Installed runtime comparison reported 65 matching files.
+- Runtime mismatches: zero.
+- Unexpected runtime files: zero.
+
+The supplied report binds these field-built artifacts to a clean detached
+checkout of the source above. It reports successful installed-package acceptance.
+The field-built archives and underlying private traces were not independently
+retrieved for this documentation update. Their hashes identify this field cohort;
+they are not published release checksums. Source agent identities were checked
+against the immutable Git source. The
+[15-job CI run](https://github.com/pom6i4/enclave-gateway/actions/runs/44612440164)
+passed for that exact source.
+
+### Development block scope and Host update
+
+- Host: macOS ARM64 with Python `3.14.5`.
+- Build tools: setuptools `81.0.0`.
+- Wheel build tool: wheel `0.47.0`.
+- Packaging library: packaging `26.3`.
+- Installer: pip `26.1.1`.
+- Route: QGA Appliance followed by approved VPN and actual RDP drive redirection.
+- Execution: system OpenSSH on Bastion to one Linux Target.
+- Target interpreter: Python `3.11.2` on Linux x64.
+- Security mode: `standard`.
+- Execution profile: `structured_only`.
+- Structured backend: `operator`.
+- Spool protocol: `stream`.
+- Worker attestation: enforced with unchanged approved deployment pins.
+- Protection: Kaspersky Endpoint Security for Windows `21.3.10.1001`.
+
+Host was updated from installed `0.3.0` to the exact field wheel using an offline,
+noneditable installation. Existing configuration and journal namespace were
+preserved. Historical transaction results remained available. The operator used
+the SQLite backup API before the update and retained the stable rollback wheel.
+Existing IDE-owned MCP processes were untouched.
+
+Agent bytes remained identical to `v0.3.0`. No restaging was reported.
+The worker attestation version stayed `0.3.0`. Fresh attestation reported
+`chunked_copy_slots_v1: true`. The attested copy-step budget was 45 seconds.
+The foreground lease was eight hours.
+
+### Installed and live MCP checks
+
+The automatic installed-package check passed against the exact field wheel.
+Its separate local MCP check also passed with an isolated empty configuration.
+The Python audit guard passed all three denial probes. This portable guard is
+not an operating-system sandbox.
+
+Three new real-route test MCP sessions reported the expected initialization:
+
+- Server name: `enclave-gateway`.
+- Server version: `0.4.0.dev0`.
+- Negotiated protocol: `2025-03-26`.
+- Tool definitions: 18.
+- `ping`: successful.
+- `node_transfer` exposed `chunked`.
+- `node_transfer` exposed bounded `timeout_sec`.
+- `node_transfer` exposed `tx_id`.
+
+The mutable test sessions used the original configuration and journal. The
+client disabled automatic retries. Its call timeout was 2400 seconds. Each main
+copy used `chunked: true` and a whole-copy timeout of 1800 seconds.
+
+### Four retained round-trip attempts
+
+All four 128 MiB pushes completed. The first three pulls failed and remained
+indeterminate. The fourth complete round trip passed. It must not be presented
+as first-attempt end-to-end success.
+
+| Attempt | Push wall time | Pull wall time | Pull outcome |
+| --- | ---: | ---: | --- |
+| 1 | 1141.7581 s | 333.8557 s | Response timeout with an RDP disconnect |
+| 2 | 1080.8767 s | 406.4611 s | Response timeout with an RDP disconnect |
+| 3 | 1061.7158 s | 646.1164 s | Response timeout at the 45-second step budget |
+| 4 | 1098.7722 s | 1168.3885 s | Completed with matching size and SHA-256 |
+
+The report associates the first two disconnects with an approximately 25-minute
+RDP input-idle policy. It records client event 1026 with reason 267. Subsequent
+tests used periodic synthetic pointer activity from an external observer.
+No further RDP disconnects were reported after that intervention. The product
+and agent bytes were unchanged. This is an explicit test condition, not proof
+of unattended operation or a recommendation to bypass an endpoint policy.
+Normal session continuity must be established within the approved policy.
+
+For attempt 3, the observer reported a complete 1 MiB response arriving at an
+interval of approximately 61.7 seconds, beyond the 45-second step budget.
+The RDP session and worker reportedly remained active. The proposed VPN/RDP
+throughput explanation is an observer inference; the delayed boundary was not
+independently isolated in this record.
+
+There is an unresolved counter discrepancy in the supplied narrative: an early
+update names block 123, while the final report lists 75 operation ledger records.
+These observations are not treated as equivalent counters. The exact failing
+block is not established here. Resolve the mapping from the retained private
+traces before publishing an exact block attribution; another full field run is
+not required merely to correct that narrative.
+
+Each failed pull left its Host destination unpublished. Before any new attempt,
+the operator reports reconciling the prior journal and filesystem evidence.
+New attempts used new transaction identities and new synthetic paths. No failed
+identity was cleared or automatically replayed.
+
+The successful attempt used 134217728 bytes of random, effectively
+incompressible data. All three copies matched size and SHA-256. The main push
+produced 129 worker records. The main pull produced 129 worker records. Each
+main operation completed in the Host journal with the retained result.
+
+### Completed-result deduplication across MCP restart
+
+The operator renamed the two owned local test files after the successful
+round trip. Their original source and received-file paths were confirmed absent.
+Only the test MCP server was closed through stdin EOF and restarted.
+The new session kept the same journal namespace and principal.
+
+Repeating each original request with the same transaction identity and unchanged
+arguments returned its retained result. New JSON-RPC request IDs were used.
+The push lookup took 0.0023 seconds. The pull lookup took 0.0007 seconds.
+Neither absent local path was recreated. The target file stayed unchanged.
+
+The report independently compares the durable worker ledger before and after
+the repeat window. No new copy records appeared. Active spool metadata stayed
+unchanged. FlightRecorder copy counts and hash-chain endpoint stayed unchanged.
+This evidence goes beyond comparing the final file hash alone.
+
+### Controlled cancellation and ambiguous-result rejection
+
+A separate 24 MiB synthetic upload was cancelled through
+`enclave_transaction` after observed dispatch. The original tool call returned
+`cancelled` with an indeterminate outcome after 13.1616 seconds. The Host journal
+retained that state.
+
+The operator channel closed and the worker stopped. The report confirms free
+session lease and released IPC handles before the next worker was attached.
+No target destination was published. One uncommitted 1 MiB part remained until
+the operator completed reconciliation and recorded the evidence.
+
+A fresh MCP session with the original journal repeated the unchanged request
+against its original transaction identity. The response was
+`transaction_indeterminate` at the journal stage in 0.0015 seconds.
+There were zero new copy-dispatch records. The target state did not change.
+This is rejection of replay, not resumption or rollback of the interrupted copy.
+
+### Final state and qualification limits
+
+Final acknowledged worker stop completed in 35.14637 seconds. Fresh `stopped`
+telemetry and exclusive lease access confirmed termination. A second observation
+after 10.5 seconds found no respawn. No IPC handles remained held. All three
+owned test MCP sessions closed through stdin EOF with exit code zero.
+
+Protection remained active. The product event log had zero new entries. A
+separate service log gained four informational events. No new detection or
+blocking event affecting Gateway was reported. No exclusions were added.
+
+Host remained on installed `0.4.0.dev0`. The stable rollback package was retained.
+No operations remained in progress. Historical indeterminate records were kept.
+Five additional indeterminate records were retained from this program:
+
+- Three failed main pulls.
+- The intentional cancellation.
+- An observer command during channel teardown.
+
+Owned synthetic files were removed only after reconciliation. Journals were not
+rolled back or globally cleaned. The operator reported no outstanding recovery.
+
+This is operator-reported functional acceptance of the exact development block
+under the stated session-continuity conditions. It does not establish reliable
+first-attempt or unattended long-running transfer. It does not close a new full
+RDP reconnect/upgrade/rollback program. It does not qualify other profiles.
+No code correction is established by this report alone. The source of the
+reported delay remains an investigation boundary.
+
+No `0.4.0` release or tag is created by recording this result. Stable `v0.3.0`
+and its original artifacts remain unchanged. Actual environment identities and
+private policy hashes are omitted. Staging-bundle identifiers are omitted.
+
 ## Accepted installed release: v0.3.0
 
 - Result: **PASS / УСПЕХ**, as reported by the operator.
