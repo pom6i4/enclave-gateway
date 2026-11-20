@@ -8,7 +8,7 @@ Its [Standard operator release cycle](STANDARD_OPERATOR_CANDIDATE.md#release-cyc
 is complete for the exercised route. Historical acceptance remains bound to its
 exact package and deployment scope. The original tag and assets are immutable.
 
-The working version is `0.4.0rc2`. It is an unpublished Standard operator clock candidate.
+The working version is `0.4.0rc3`. It is an unpublished Standard operator transfer candidate.
 Installing it is not required for continued operation of the accepted release.
 Confirmed maintenance defects can be addressed separately in `0.3.x`.
 
@@ -18,6 +18,14 @@ Clock field verification of the exact RC2 at
 One `heal` corrected the measured offset. Checks through 300 seconds passed.
 The worker and its RDP session were retained. This closes the clock program
 for that candidate, while 128 MiB round-trip acceptance remains incomplete.
+
+A subsequent RC2 MCP field upload stopped after 38 verified MiB during periodic
+attestation, before publishing part 39. RDP stayed connected. RC3
+now permits one fresh read-only challenge after a transient verification timeout,
+within the original part deadline. Each challenge retains the ten-second limit.
+Local regressions preserve pinned identity checks and no-replay behavior. This
+correction requires a new exact candidate before field qualification. It does
+not establish the physical cause of the real-channel delay.
 
 ## First 0.4.0 block
 

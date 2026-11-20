@@ -28,6 +28,8 @@ observations without publishing another copy request.
 | `length_bytes` | Requested part length |
 | `steps_started` | Copy actions started by the executor |
 | `request_publications` | Stream append attempts, including uncertain acknowledgements |
+| `attestation_attempts` | Fresh verification guard calls for the copy |
+| `attestation_retries` | New periodic challenges after a transient timeout |
 | `step_budget_ms` | Selected step budget before local dispatch |
 | `published_budget_ms` | Last envelope budget after local preparation |
 | `step_elapsed_ms` | Last step's elapsed monotonic time |
@@ -44,6 +46,13 @@ observations without publishing another copy request.
 Missing fields mean that boundary was not observed. A verified part is not a
 whole-file commit. Empty uploads use one zero-byte part. Empty downloads have
 no data parts. No deployment paths or identities are added to this structure.
+
+Attestation challenges are read-only and do not increment copy request
+publications. After a timed-out periodic challenge, RC3 permits
+one new challenge within the original part budget. Each has at most ten seconds.
+No data request is published until verification succeeds. Both counters remain
+visible in the retained result. Trust failures and cancellation are not retried.
+This behavior is outside the original RC2 wheel identity.
 
 `diagnostics.timings_ms` contains cumulative Host observations:
 

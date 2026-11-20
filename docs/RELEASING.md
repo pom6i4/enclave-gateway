@@ -99,6 +99,19 @@ prompt is a preparation template and must not be sent directly to an operator.
 Verify every bundle checksum before delivery. Keep original RC1 artifacts
 unchanged. No Git tag or GitHub Release is created by candidate assembly.
 
+## Unpublished 0.4.0rc3 transfer candidate
+
+RC3 permits one new read-only periodic challenge after a transient timeout.
+Each challenge retains its ten-second budget. Both attempts and data publication
+remain bounded by the original part deadline. Trust failures are not retried.
+No copy request is replayed. Worker bytes and attestation version remain unchanged.
+
+Assemble from clean committed source. Deliver a private manifest with the exact
+wheel hash and a filled 128 MiB field prompt. The preparation template is
+`contrib/qualification/MCP_128_FIELD_PROMPT_RU.md`. Local regression and hosted CI
+do not establish real-route acceptance. Keep earlier candidate artifacts intact.
+No Git tag or public Release is created by preparation.
+
 ## Beta release history
 
 The last Beta package version was `0.3.0b7`. Its Git release tag is

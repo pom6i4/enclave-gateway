@@ -71,6 +71,19 @@ Fresh attestation reports the transfer features for the approved worker.
 - Attestation keeps its 10 s budget. The copy timeout bounds the entire transfer.
   A lost receipt requires reconciliation before reusing the upload slot.
 
+During an ongoing Standard operator Stream copy, a timed-out periodic read-only
+challenge may be followed by one new challenge. This is not a copy retry.
+The initial forced verification keeps one attempt. Each new challenge retains
+the ten-second budget. The controller generates a new nonce and request identity.
+The original part deadline bounds the combined work. Cancellation is preserved.
+No part is published until the new proof is fully verified.
+
+This recovery does not extend the 30-second verified-evidence cache. It does
+not reuse a late answer to an earlier challenge. A nonce mismatch is fatal.
+A pinned identity mismatch is also fatal. Signature failures remain fatal.
+A worker-instance change invalidates the copy session. An unavailable second
+proof fails closed. No mutating request is repeated as part of this recovery.
+
 See [endpoint preparation and qualification boundaries](ENDPOINT-POLICY.md).
 Compatibility with a particular EDR policy requires separate acceptance.
 

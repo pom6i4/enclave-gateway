@@ -96,6 +96,37 @@ its build-time bytes and manifest. This later report does not rewrite them.
 Stable `v0.3.0` retains its tag and release artifacts. Recording this result
 does not publish a new release.
 
+### Subsequent RC2 128 MiB MCP attempt
+
+The operator subsequently reported **INCOMPLETE / ПРОВЕРКА НЕ ЗАВЕРШЕНА**
+for one main 128 MiB upload on the same original RC2 wheel. Host verified
+38 MiB before `deadline_exceeded` at `control.receive`. Step 39 was entered
+but its copy request was not published. No upload commit was issued. The target
+destination was absent; only uncommitted staging parts remained until cleanup.
+The required pull was not started after the failed push.
+
+A later offline review matched the saved Host observations with all 38 copied
+worker records for that operation. Every record was a completed `push_part`
+with exit code zero. Offsets covered the first 38 distinct parts without gaps
+or duplicates. The last target SSH reply took 353 ms. Host request publications
+were also 38. The timeout occurred during periodic read-only attestation before
+publishing part 39, not during a data request for that part.
+
+The operator reported no RDP disconnect. The worker remained running until
+the acknowledged stop. Clock observations remained within the accepted gate.
+One unchanged repeat of the indeterminate transaction returned its retained
+diagnostics without new copy-dispatch. Acknowledged stop took 35.59875 seconds.
+The lease was free without respawn at the later check. Protection stayed active
+with zero new events. The new indeterminate record was preserved.
+
+Controlled local regressions reproduce this stop after 38 verified MiB.
+The working-source correction permits one new read-only challenge within the
+original part budget. Each challenge retains its ten-second limit. No mutating
+request is replayed. This corrects the immediate Host abort on a transient
+periodic verification timeout. It does not establish why the physical route
+delayed that challenge. The corrected source is not the original RC2 artifact
+and has not received field acceptance.
+
 ## Incomplete candidate acceptance: 0.4.0rc1
 
 - Result: **INCOMPLETE / ПРОВЕРКА НЕ ЗАВЕРШЕНА**.

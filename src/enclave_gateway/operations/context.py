@@ -205,7 +205,7 @@ def copy_diagnostics(context=None):
                 'step_budget_ms', 'step_elapsed_ms', 'max_step_elapsed_ms',
                 'request_publications', 'published_budget_ms', 'response_reads',
                 'empty_response_reads', 'read_timeouts', 'connection_losses',
-                'state_reads', 'response_bytes_received'}
+                'state_reads', 'response_bytes_received', 'attestation_attempts', 'attestation_retries'}
     labels = {'direction': {'push', 'pull'}, 'action': {'push_part', 'push_commit', 'pull_info', 'pull_part'},
               'control_kind': {'qga', 'other'}}
     stages = {'vfs.preflight', 'attestation', 'vfs.publish', 'vfs.upload_slot',

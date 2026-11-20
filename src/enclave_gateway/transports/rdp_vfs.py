@@ -404,7 +404,24 @@ class RdpVfsTransport:
             elif not force:
                 if context and getattr(context,'worker_evidence',None): return context.worker_evidence
                 if context is None and self._verified_worker and time.monotonic()<self._verified_until: return self._verified_worker
-            evidence=guard()
+            periodic_copy = (session is not None and not force and op == 'ssh_copy'
+                             and self.spec.execution_profile == 'structured_only'
+                             and self.spec.structured_backend == 'operator'
+                             and self.spec.spool_protocol == 'stream')
+            for attempt in range(2 if periodic_copy else 1):
+                if op == 'ssh_copy':count_copy('attestation_attempts')
+                try:
+                    evidence=guard()
+                    break
+                except (TimeoutError, OperationError) as error:
+                    if (not periodic_copy or attempt or isinstance(error, OperationError)
+                            and error.code not in ('deadline_exceeded', 'worker_response_timeout')):
+                        raise
+                    # Only renew a read-only challenge. The guard creates a new
+                    # nonce and keeps its ten-second deadline. No copy envelope
+                    # may be published before it verifies; parent limits remain.
+                    budget(10, 'attestation.retry')
+                    count_copy('attestation_retries')
             if not isinstance(evidence,dict) or not evidence.get('verified'): raise OperationError('agent_attestation_failed','attestation')
             if session is not None:
                 previous=session['evidence']

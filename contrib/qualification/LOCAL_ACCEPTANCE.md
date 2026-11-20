@@ -53,6 +53,32 @@ server's stdin and requires exit zero. Failure cleanup may kill that newly
 created test child only. No existing IDE process is inspected or stopped.
 The bounded private receipt retains failure status and protocol output.
 
+## Periodic copy attestation recovery
+
+`tests/test_copy_attestation_recovery.py` exercises the actual MCP copy engine
+through local QGA file algorithms. A synthetic worker validates upload-slot
+hashes and emits framed replies. Host processing ages the normal 30-second
+verification window so that periodic attestation occurs after 38 verified MiB.
+A controlled read timeout interrupts that challenge before part 39 is published.
+The old source stops at that boundary. The correction completes a 128 MiB
+upload after a new nonce verifies, without duplicate data requests.
+
+A new MCP handler and engine reopen the same journal after completion. With the
+original source path absent, the unchanged transaction returns its retained
+result without remote dispatch. Failed renewals are also retained across a new
+handler and engine without another copy request.
+
+The failed challenge's late frame remains distinct from the new proof. Tests
+reject its nonce if it is presented as the new answer. Two timed-out checks
+stop before part 39. A retained transaction cannot dispatch again. Negative
+verification cases cover the pinned hash and current file hash separately.
+They also cover the account pin and policy pin. Version checks remain enforced.
+Signature checks remain enforced. A changed worker instance invalidates the
+session. Parent deadlines and cancellation prevent another challenge.
+
+These fixtures model a specific failure boundary. They do not reproduce the
+physical cause of the real RDP delay or qualify field transfer reliability.
+
 ## QGA clock repair verification
 
 `tests/test_qga_clock.py` models delayed lock acquisition before time setting.

@@ -2,8 +2,17 @@
 
 ## Unreleased
 
-Working package version: `0.4.0rc2`. No release is published by these changes.
+Working package version: `0.4.0rc3`. No release is published by these changes.
 
+- Recover one transient timeout of periodic Standard operator copy attestation
+  with a new read-only challenge. Each challenge retains its ten-second budget.
+  The original part deadline still bounds both checks and data publication.
+  Preserve nonce verification and pinned identity checks. Never replay a copy
+  request or continue on stale evidence. Add safe attestation attempt counters.
+- Reproduce the RC2 field stop after 38 verified MiB through the local MCP and
+  QGA file algorithms. Verify a complete 128 MiB synthetic upload after recovery.
+  Verify bounded failure without part 39 or commit when fresh verification fails.
+  The physical cause of the real-channel response delay remains unresolved.
 - Record operator-reported **PASS / УСПЕХ** for clock verification of exact
   candidate `18b43df51ca7360534447bde67953a819e5cb8cc`. One `heal` corrected a
   −17539 ms Appliance offset. Independent checks immediately afterward and at
