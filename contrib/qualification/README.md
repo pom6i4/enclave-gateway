@@ -13,6 +13,8 @@ qualification plans nor historical reports.
 - [Backend isolation and release procedure](HARDENING_AND_QUALIFICATION.md)
 - [Source-bound field acceptance](FIELD_ACCEPTANCE.md)
 - [Development 0.4.0 MCP field acceptance and limits](FIELD_ACCEPTANCE.md#accepted-development-block-040dev0)
+- [Copy diagnostics and offline offset analysis](../../docs/MCP_TRANSFER_DIAGNOSTICS.md)
+- [Targeted 0.4.0rc1 field prompt](MCP_RELIABILITY_FIELD_PROMPT_RU.md)
 - [Historical source-bound records](HISTORY.md)
 
 Safe unfilled plan templates live in `plans/`. Runtime runner code remains under

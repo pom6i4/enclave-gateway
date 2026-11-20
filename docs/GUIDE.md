@@ -998,6 +998,10 @@ long transfer. The [development MCP field record](../contrib/qualification/FIELD
 retains three failed pulls before a successful round trip under externally
 maintained session activity. It does not establish unattended operation.
 
+Unpublished `0.4.0rc1` adds [copy progress and read observations](MCP_TRANSFER_DIAGNOSTICS.md)
+to completed results and retained errors. These observations distinguish data
+offsets from request counts. They do not independently identify a network fault.
+
 For the operator backend, `agents stop` waits for `stopped` telemetry and release
 of the worker session lease after acknowledgement. Redirected handles can take
 more than 20 seconds to close. If its timeout expires first, the command reports

@@ -10,7 +10,7 @@ import secrets
 import time
 from dataclasses import asdict, is_dataclass
 
-from enclave_gateway.operations.context import OperationContext, OperationError, activate, current, principal
+from enclave_gateway.operations.context import OperationContext, OperationError, activate, current, principal, copy_diagnostics
 from enclave_gateway.operations.journal import TERMINAL
 
 
@@ -69,14 +69,16 @@ def tracked(operation: str):
                     if previous["error"] and not previous["result"]:
                         data = previous["error"]
                         raise OperationError(data["code"], data["stage"], tx_id=tx_id, node=node,
-                                             indeterminate=data.get("indeterminate", False), message=data.get("message", ""))
+                                             indeterminate=data.get("indeterminate", False), message=data.get("message", ""),
+                                             diagnostics=data.get('diagnostics'))
                     saved = previous["result"]
                     if saved and saved.get("kind") == "exec":
                         from enclave_gateway.control.qga_client import ExecResult
                         return ExecResult(**saved["value"])
                     return saved["value"] if saved else None
                 raise OperationError("transaction_indeterminate" if previous["state"] == "indeterminate" else "transaction_in_progress",
-                                     "journal", tx_id=tx_id, node=node, indeterminate=True)
+                                     "journal", tx_id=tx_id, node=node, indeterminate=True,
+                                     diagnostics=(previous.get('error') or {}).get('diagnostics'))
             context = OperationContext(tx_id, node, identity, started + timeout)
             with self._operations_lock:
                 self._operations[tx_id] = context
@@ -98,6 +100,7 @@ def tracked(operation: str):
                         if isinstance(value, dict):
                             value["tx_id"] = tx_id
                             value["timings_ms"] = dict(context.timings_ms)
+                            if diagnostics := copy_diagnostics(context): value['diagnostics'] = diagnostics
                     serialized = _serializable(value)
                     # Dataclass field names are protocol keys, never credential data.
                     saved = ({key: self.vault.scrubber.scrub(item) for key, item in serialized.items()}
@@ -112,6 +115,7 @@ def tracked(operation: str):
                     "deadline_exceeded" if isinstance(exc, TimeoutError) else "operation_failed", context.stage,
                     tx_id=tx_id, node=node, indeterminate=context.dispatched,
                     message=self.vault.scrubber.scrub(str(exc))[:8192])
+                if diagnostics := copy_diagnostics(context): error.diagnostics = diagnostics
                 try:
                     exc.operation_error = error
                 except (AttributeError, TypeError):
@@ -132,7 +136,8 @@ def tracked(operation: str):
                     # durable. The reserved identity remains; never replay it.
                     persistence=OperationError('journal_persistence_failed','journal',tx_id=tx_id,node=node,
                                                indeterminate=context.dispatched,
-                                               message='Restore journal storage and reconcile the retained transaction identity')
+                                               message='Restore journal storage and reconcile the retained transaction identity',
+                                               diagnostics=copy_diagnostics(context))
                     try:exc.operation_error=persistence
                     except (AttributeError,TypeError):pass
                 # Preserve established exception types for local callers.

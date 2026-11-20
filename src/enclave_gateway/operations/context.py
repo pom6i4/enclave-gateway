@@ -13,16 +13,18 @@ from typing import Callable, Iterator
 
 class OperationError(RuntimeError):
     def __init__(self, code: str, stage: str, *, tx_id: str = "", node: str = "", retryable: bool = False,
-                 indeterminate: bool = False, message: str = "") -> None:
+                 indeterminate: bool = False, message: str = "", diagnostics: dict | None = None) -> None:
         self.code, self.stage = code, stage
         self.tx_id, self.node = tx_id, node
         self.retryable, self.indeterminate = retryable, indeterminate
+        self.diagnostics = diagnostics or {}
         super().__init__(message or code.replace("_", " ").capitalize())
 
     def as_dict(self) -> dict:
         result={"code": self.code, "stage": self.stage, "tx_id": self.tx_id, "node": self.node,
                 "retryable": self.retryable, "indeterminate": self.indeterminate, "message": str(self)}
         if getattr(self,'known_outcome',False): result['known_outcome']=True
+        if self.diagnostics: result['diagnostics'] = self.diagnostics
         return result
 
 
@@ -38,6 +40,7 @@ class OperationContext:
     timings_ms: dict[str, int] = field(default_factory=dict)
     _callbacks: dict[str, Callable[[], None]] = field(default_factory=dict)
     _lock: threading.RLock = field(default_factory=threading.RLock)
+    copy_progress: dict = field(default_factory=dict)
 
     def check(self, stage: str | None = None) -> None:
         if stage:
@@ -161,6 +164,13 @@ def read_only_preflight() -> Iterator[None]:
 @contextmanager
 def timed(stage: str) -> Iterator[None]:
     checkpoint(stage)
+    with measured(stage):
+        yield
+
+
+@contextmanager
+def measured(stage: str) -> Iterator[None]:
+    """Observe elapsed time without changing a deadline or the failure stage."""
     started = time.monotonic()
     try:
         yield
@@ -169,6 +179,46 @@ def timed(stage: str) -> Iterator[None]:
         if context:
             with context._lock:
                 context.timings_ms[stage] = context.timings_ms.get(stage, 0) + int((time.monotonic() - started) * 1000)
+
+
+def update_copy_progress(**values):
+    context = current()
+    if context:
+        with context._lock:
+            context.copy_progress.update(values)
+
+
+def count_copy(name, amount=1):
+    context = current()
+    if context and context.copy_progress:
+        with context._lock:
+            context.copy_progress[name] = context.copy_progress.get(name, 0) + amount
+
+
+def copy_diagnostics(context=None):
+    """Bounded, allow-listed observations; no paths, IDs, hashes or payloads."""
+    context = context or current()
+    if not context:
+        return {}
+    integers = {'file_size_bytes', 'blocks_total', 'blocks_verified', 'bytes_verified',
+                'block_index', 'offset_bytes', 'length_bytes', 'steps_started',
+                'step_budget_ms', 'step_elapsed_ms', 'max_step_elapsed_ms',
+                'request_publications', 'published_budget_ms', 'response_reads',
+                'empty_response_reads', 'read_timeouts', 'connection_losses',
+                'state_reads', 'response_bytes_received'}
+    labels = {'direction': {'push', 'pull'}, 'action': {'push_part', 'push_commit', 'pull_info', 'pull_part'},
+              'control_kind': {'qga', 'other'}}
+    stages = {'vfs.preflight', 'attestation', 'vfs.publish', 'vfs.upload_slot',
+              'vfs.erase', 'vfs.stream_exchange', 'vfs.response_read', 'vfs.state_read', 'vfs.poll_sleep'}
+    with context._lock:
+        if not context.copy_progress:
+            return {}
+        progress = {k: v for k, v in context.copy_progress.items()
+                    if (k in integers and type(v) is int and v >= 0)
+                    or (k in labels and isinstance(v, str) and v in labels[k])
+                    or (k == 'destination_committed' and type(v) is bool)}
+        timings = {k: v for k, v in context.timings_ms.items() if k in stages and type(v) is int and v >= 0}
+    return {'copy_progress': progress, 'timings_ms': timings}
 
 
 def bind_context(function):

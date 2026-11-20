@@ -2,7 +2,15 @@
 
 ## Unreleased
 
-Working package version: `0.4.0.dev0`. No release is published by these changes.
+Working package version: `0.4.0rc1`. No release is published by these changes.
+
+- Prepare an unpublished Standard operator candidate with bounded copy progress
+  and Host-side read timings. Retain observations with success and error results.
+  Preserve original observations when a transaction is queried again.
+- Add local late-read and late-download regressions without extending deadlines
+  or replaying requests. Add an offline ledger-offset analyzer. Keep effective
+  RDP policy and historical counter reconciliation as external evidence gates.
+  See [transfer diagnostics](docs/MCP_TRANSFER_DIAGNOSTICS.md).
 
 - Record operator-reported functional **PASS / УСПЕХ** for installed development
   commit `363d8f72dc2c3ab1eebf9d60a3a95215cba468b3`. Fresh MCP initialization and

@@ -20,7 +20,7 @@ from typing import Any
 
 from enclave_gateway.security.quoting import validate_endpoint, ps_quote
 from enclave_gateway.operations.request import PowerShellRequest
-from enclave_gateway.operations.context import budget, checkpoint, current, mark_dispatched, timed, bind_context, limit_deadline, OperationError
+from enclave_gateway.operations.context import budget, checkpoint, current, mark_dispatched, timed, measured, bind_context, limit_deadline, OperationError, count_copy, update_copy_progress
 from enclave_gateway.transports.listener import TcpListener
 from enclave_gateway.config import BastionSpec
 from enclave_gateway.control.qga_client import ControlChannel, ExecResult, QgaClient, QgaCommandError
@@ -737,6 +737,10 @@ exit 124
         return self._exchange_stream(req, frame, limit, envelope, info, deadline, started, download=download)
 
     def _exchange_stream(self, req, frame, limit, envelope, info, deadline, started, *, download=None):
+        with measured('vfs.stream_exchange'):
+            return self._exchange_stream_impl(req, frame, limit, envelope, info, deadline, started, download=download)
+
+    def _exchange_stream_impl(self, req, frame, limit, envelope, info, deadline, started, *, download=None):
         from enclave_gateway.transports.stream_frames import BLOCK, Decoder, DownloadFrame
         root = self.spec.appliance_spool_dir.rstrip("\\/")
         cursor = 0
@@ -744,6 +748,10 @@ exit 124
         if time.monotonic() >= deadline:
             raise OperationError("deadline_exceeded", "vfs.publish")
         mark_dispatched()
+        if envelope.get('op') == 'ssh_copy':
+            count_copy('request_publications')
+            update_copy_progress(published_budget_ms=envelope['timeout_ms'],
+                                 control_kind='qga' if isinstance(self.control, QgaClient) else 'other')
         with timed("vfs.publish"):
             position = self.control.stream_append(req, frame, limit=limit)
         res = root + "\\ipc_res_" + info["instance"] + "_" + str(position // BLOCK) + ".bin"
@@ -754,16 +762,26 @@ exit 124
             # Local QGA exchange limits must leave room for a fresh observation
             # within this request's original deadline. Other controls retain
             # their own bounded local file implementations.
-            if isinstance(self.control,QgaClient):
-                remaining=deadline-time.monotonic()
-                if remaining<=0:raise TimeoutError('Worker response deadline expired')
-                kwargs['timeout_sec']=min(3.0,remaining)
+            phase = kwargs.pop('_phase', 'vfs.response_read')
+            count_copy('state_reads' if phase == 'vfs.state_read' else 'response_reads')
+            with measured(phase):
                 try:
-                    with limit_deadline(remaining):return method(*args,**kwargs)
-                except OperationError as error:
-                    if error.code in ('cancelled','deadline_exceeded'):error.indeterminate=True
+                    if isinstance(self.control,QgaClient):
+                        remaining=deadline-time.monotonic()
+                        if remaining<=0:raise TimeoutError('Worker response deadline expired')
+                        kwargs['timeout_sec']=min(3.0,remaining)
+                        try:
+                            with limit_deadline(remaining):return method(*args,**kwargs)
+                        except OperationError as error:
+                            if error.code in ('cancelled','deadline_exceeded'):error.indeterminate=True
+                            raise
+                    return method(*args,**kwargs)
+                except TimeoutError:
+                    count_copy('read_timeouts')
                     raise
-            return method(*args,**kwargs)
+                except ConnectionError:
+                    count_copy('connection_losses')
+                    raise
         while time.monotonic() < deadline:
             checkpoint("vfs.response")
             completed=[];matched=[]
@@ -777,6 +795,7 @@ exit 124
                 return result
 
             def validate(data):
+                count_copy('response_bytes_received', len(data))
                 for offset,size,value in decoder.feed(data):
                     if value.get('tx_id')!=envelope['tx_id']:
                         if download is not None:
@@ -813,6 +832,8 @@ exit 124
                                          tx_id=envelope['tx_id'],indeterminate=True) from error
                 data = b""
             cursor += len(data)
+            if not combined: count_copy('response_bytes_received', len(data))
+            if not data: count_copy('empty_response_reads')
             if completed:
                 if download is not None: download.extend(decoder.payload)
                 return completed[0]
@@ -855,9 +876,11 @@ exit 124
                     try:
                         state_path = root + "\\worker_state.json"
                         if callable(read_snapshot):
-                            state_raw, stamp = read_snapshot(self.control, state_path)
+                            count_copy('state_reads')
+                            with measured('vfs.state_read'):
+                                state_raw, stamp = read_snapshot(self.control, state_path)
                         else:
-                            state_raw = read(self.control.try_read_bytes,state_path,truncate_after_read=False)
+                            state_raw = read(self.control.try_read_bytes,state_path,truncate_after_read=False,_phase='vfs.state_read')
                             stamp = None
                         state = json.loads(state_raw.decode("utf-8-sig")) if state_raw and len(state_raw) <= 65536 else {}
                     except (ValueError, RecursionError):
@@ -877,7 +900,8 @@ exit 124
                                              "vfs.response", tx_id=envelope["tx_id"], node="@bastion",
                                              indeterminate=not read_only,
                                              message="Operator OpenSSH worker stopped while waiting for a response.")
-                time.sleep(min(.015, max(0, deadline-time.monotonic())))
+                with measured('vfs.poll_sleep'):
+                    time.sleep(min(.015, max(0, deadline-time.monotonic())))
         if self.spec.structured_backend != "operator":
             self.request_cancel(envelope["tx_id"])
         raise OperationError("worker_response_timeout", "vfs.response", tx_id=envelope["tx_id"], node="@bastion", indeterminate=True)

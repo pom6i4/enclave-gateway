@@ -8,7 +8,7 @@ Its [Standard operator release cycle](STANDARD_OPERATOR_CANDIDATE.md#release-cyc
 is complete for the exercised route. Historical acceptance remains bound to its
 exact package and deployment scope. The original tag and assets are immutable.
 
-The working version is `0.4.0.dev0`. It is unpublished development code.
+The working version is `0.4.0rc1`. It is an unpublished Standard operator candidate.
 Installing it is not required for continued operation of the accepted release.
 Confirmed maintenance defects can be addressed separately in `0.3.x`.
 
@@ -91,6 +91,13 @@ avoids qualifying that cell with an older ARM64 patch.
 
 ## Later priorities
 
+The candidate adds [Host-side transfer observations](MCP_TRANSFER_DIAGNOSTICS.md).
+Local late-read regressions preserve deadlines and no-replay behavior. The
+[offline analyzer](../scripts/qualification/copy_ledger.py) maps ledger counts
+to data offsets without a deployment connection. These tools do not establish
+the cause of the old real-channel delay. Its counter discrepancy remains
+unresolved without the private traces.
+
 ### P2: operator transfer performance
 
 The development field report leaves specific follow-up work:
@@ -139,5 +146,7 @@ at `363d8f7` covers a 128 MiB push and pull through the changed tool. It include
 controlled cancellation and no-replay checks. Preserve all failed attempts and
 the qualified acceptance scope. New runtime changes require their own regression.
 Broaden the lifecycle regression when deployment components or runtime behavior
-change. The field receipt alone does not close stable promotion. No next release
+change. The [targeted candidate field prompt](../contrib/qualification/MCP_RELIABILITY_FIELD_PROMPT_RU.md)
+requires approved session-continuity evidence and the new observations.
+The old field receipt alone does not close stable promotion. No next release
 is authorized by this roadmap alone.

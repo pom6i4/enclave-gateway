@@ -11,6 +11,7 @@ from tempfile import NamedTemporaryFile
 from enclave_gateway.operations.context import (
     OperationContext, OperationError, activate, budget, checkpoint, current, limit_deadline, principal,
     read_only_preflight, timed,
+    update_copy_progress, count_copy,
 )
 from enclave_gateway.transports.rdp_vfs import RdpVfsTransport, generate_tx_id
 from enclave_gateway.transports.ssh_hop import SshHopExecutor
@@ -153,6 +154,8 @@ class StructuredSshExecutor(SshHopExecutor):
             raise ValueError("Chunked copy direction must be push or pull")
         if not remote_path.startswith("/") or remote_path.endswith("/") or any(c in remote_path for c in "\r\n\0"):
             raise ValueError("Chunked copy requires an absolute remote file path")
+        update_copy_progress(direction=direction, blocks_verified=0, bytes_verified=0,
+                             steps_started=0, request_publications=0, destination_committed=False)
         with limit_deadline(timeout_sec):
             evidence = self.transport._verify_dispatch("ssh_copy",force=True)
             if not evidence or evidence.get("chunked_copy_slots_v1") is not True:
@@ -166,12 +169,27 @@ class StructuredSshExecutor(SshHopExecutor):
                 return copy(local_path, node, remote_path, timeout_sec, as_root, step_timeout)
 
     def _copy_step(self, node, remote_path, timeout_sec, as_root, action, token, *, step_timeout=15, **fields):
-        with limit_deadline(min(timeout_sec, step_timeout)):
-            result = self.transport.request(
-                "ssh_copy", min(timeout_sec, step_timeout), target=node.name, remote_path=remote_path,
-                as_root=as_root, transfer_id=token, copy_action=action, **self._identity(node), **fields,
-            )
-            checkpoint("ssh." + action)
+        maximum = min(timeout_sec, step_timeout)
+        update_copy_progress(action=action, block_index=(fields.get('copy_offset', 0)//UPLOAD_PART_BYTES+1)
+                             if action in ('push_part', 'pull_part') else 0,
+                             offset_bytes=fields.get('copy_offset', 0), length_bytes=fields.get('copy_length', 0),
+                             step_budget_ms=int(budget(maximum)*1000), response_bytes_received=0)
+        count_copy('steps_started')
+        started = time.monotonic()
+        try:
+            with limit_deadline(maximum):
+                result = self.transport.request(
+                    "ssh_copy", maximum, target=node.name, remote_path=remote_path,
+                    as_root=as_root, transfer_id=token, copy_action=action, **self._identity(node), **fields,
+                )
+                checkpoint("ssh." + action)
+        finally:
+            elapsed = int((time.monotonic()-started)*1000)
+            context = current()
+            if context:
+                with context._lock:
+                    context.copy_progress['step_elapsed_ms'] = elapsed
+                    context.copy_progress['max_step_elapsed_ms'] = max(elapsed, context.copy_progress.get('max_step_elapsed_ms', 0))
         if result.exit_code:
             raise OperationError(
                 "structured_transfer_failed", "ssh." + action,
@@ -190,6 +208,7 @@ class StructuredSshExecutor(SshHopExecutor):
             size = initial.st_size
             if size > MAX_CHUNKED_COPY_BYTES:
                 raise ValueError("Chunked copy limit is 512 MiB")
+            update_copy_progress(file_size_bytes=size, blocks_total=max(1, (size+UPLOAD_PART_BYTES-1)//UPLOAD_PART_BYTES))
             for offset in range(0, max(size, 1), UPLOAD_PART_BYTES):
                 checkpoint("ssh.push_part")
                 count = min(UPLOAD_PART_BYTES, size - offset)
@@ -203,6 +222,8 @@ class StructuredSshExecutor(SshHopExecutor):
                 if reply != f"PART:{part_hash}":
                     raise OperationError("structured_transfer_failed", "ssh.push_part", indeterminate=True,
                                          message=f"Upload block receipt is invalid ({token}). Reconcile before retrying.")
+                count_copy('blocks_verified')
+                count_copy('bytes_verified', count)
             final = os.fstat(stream.fileno())
             if (initial.st_size, initial.st_mtime_ns, initial.st_ctime_ns) != (
                     final.st_size, final.st_mtime_ns, final.st_ctime_ns):
@@ -213,6 +234,7 @@ class StructuredSshExecutor(SshHopExecutor):
         if reply != f"VERIFIED:{expected}":
             raise OperationError("structured_transfer_failed", "ssh.push_commit", indeterminate=True,
                                  message=f"Upload commit receipt is invalid ({token}). Reconcile before retrying.")
+        update_copy_progress(destination_committed=True)
         return expected
 
     def _pull_chunked(self, destination, node, remote_path, timeout_sec, as_root, step_timeout):
@@ -223,6 +245,7 @@ class StructuredSshExecutor(SshHopExecutor):
         size, expected = int(metadata[1]), metadata[2]
         if size > MAX_CHUNKED_COPY_BYTES:
             raise ValueError("Chunked copy limit is 512 MiB")
+        update_copy_progress(file_size_bytes=size, blocks_total=(size+DOWNLOAD_PART_BYTES-1)//DOWNLOAD_PART_BYTES)
         digest = hashlib.sha256()
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = None
@@ -240,10 +263,13 @@ class StructuredSshExecutor(SshHopExecutor):
                         raise ValueError("Download block checksum or length mismatch")
                     stream.write(part)
                     digest.update(part)
+                    count_copy('blocks_verified')
+                    count_copy('bytes_verified', count)
             if digest.hexdigest() != expected:
                 raise ValueError("Download checksum mismatch: remote file may have changed")
             checkpoint("ssh.pull_commit")
             temporary.replace(destination)
+            update_copy_progress(destination_committed=True)
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
