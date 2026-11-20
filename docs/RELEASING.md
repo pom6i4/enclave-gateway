@@ -82,6 +82,16 @@ round-trip acceptance.
 
 ## Unpublished 0.4.0rc2 clock candidate
 
+Exact candidate source is `18b43df51ca7360534447bde67953a819e5cb8cc`.
+Its installed clock field program passed according to the
+[operator report](../contrib/qualification/FIELD_ACCEPTANCE.md#accepted-clock-verification-040rc2).
+One `heal` corrected the initial −17539 ms offset. Independent checks through
+300 seconds passed the interval gate. The worker and RDP connection were
+retained. Final stop released the lease without respawn. Protection stayed
+active. This acceptance does not close the required 128 MiB round trip.
+The candidate manifest and original artifacts retain their build-time bytes.
+The result is recorded separately in documentation. No release is published.
+
 Build this candidate from a clean committed source export. Its private
 `candidate-manifest.json` must identify the full source commit and wheel SHA-256.
 Deliver the filled `FIELD_PROMPT_RU.md` from the same bundle. The tracked clock

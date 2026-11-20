@@ -12,6 +12,13 @@ The working version is `0.4.0rc2`. It is an unpublished Standard operator clock 
 Installing it is not required for continued operation of the accepted release.
 Confirmed maintenance defects can be addressed separately in `0.3.x`.
 
+Clock field verification of the exact RC2 at
+`18b43df51ca7360534447bde67953a819e5cb8cc` passed according to the operator's
+[source-bound report](../contrib/qualification/FIELD_ACCEPTANCE.md#accepted-clock-verification-040rc2).
+One `heal` corrected the measured offset. Checks through 300 seconds passed.
+The worker and its RDP session were retained. This closes the clock program
+for that candidate, while 128 MiB round-trip acceptance remains incomplete.
+
 ## First 0.4.0 block
 
 The following changes are implemented at
@@ -112,11 +119,10 @@ transfer-runtime correction is justified until the delay boundary is isolated.
 The later bounded 8 MiB probe passed without completing long-transfer acceptance.
 Its calibrated Appliance offset was approximately 17 seconds behind Host.
 A separate local clock review found implicit timestamps sampled before QGA
-lock waiting. The working source corrects that ordering and verifies the clock
-after QGA-backed `heal`. This defect has not been established as the cause of
-the field offset or pull delay. Qualify the correction with the
-[short clock program](../contrib/qualification/MCP_CLOCK_HEAL_FIELD_PROMPT_RU.md)
-before another full transfer run.
+lock waiting. RC2 corrects that ordering and verifies the clock after QGA-backed
+`heal`. Its short clock field program passed through 300 seconds. This does
+not establish the defect as the cause of the earlier pull delay. Preserve that
+remaining investigation separately from the completed clock program.
 
 ### P2: operator transfer performance
 

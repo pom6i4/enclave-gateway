@@ -4,6 +4,15 @@
 
 Working package version: `0.4.0rc2`. No release is published by these changes.
 
+- Record operator-reported **PASS / УСПЕХ** for clock verification of exact
+  candidate `18b43df51ca7360534447bde67953a819e5cb8cc`. One `heal` corrected a
+  −17539 ms Appliance offset. Independent checks immediately afterward and at
+  60 seconds and 300 seconds passed the ±2000 ms interval gate. The final
+  reported offset was −3 ms. Worker identity and RDP continuity were preserved.
+  Acknowledged stop took 40.84843 seconds without respawn. Protection remained
+  active with zero new events. Preserve incomplete 128 MiB acceptance and the
+  original candidate artifacts. See the
+  [clock field record](contrib/qualification/FIELD_ACCEPTANCE.md#accepted-clock-verification-040rc2).
 - Prepare a distinct unpublished clock candidate from committed source.
   Bind its wheel to the candidate manifest and fill the operator prompt from
   that manifest. Preserve the original RC1 bundle and stable release artifacts.

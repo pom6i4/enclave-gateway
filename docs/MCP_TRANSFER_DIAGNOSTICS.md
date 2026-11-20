@@ -128,6 +128,13 @@ for the measured uncertainty and interpretation limits. A separate clock fix
 in the working source does not establish a transfer fix or qualify the original
 candidate again.
 
+The exact RC2 subsequently passed its
+[clock field program](../contrib/qualification/FIELD_ACCEPTANCE.md#accepted-clock-verification-040rc2).
+One `heal` corrected the initial −17539 ms offset. The independent 300-second
+sample reported −3 ms with a 1 ms uncertainty. RDP continuity was preserved.
+This closes the measured clock gate for that source. It does not close the
+128 MiB transfer gate or establish a cause for the earlier reverse-path delay.
+
 ## Approved RDP session continuity
 
 Read the effective idle-session limit and active-session limit before a long

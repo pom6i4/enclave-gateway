@@ -7,6 +7,95 @@ reviewed against the immutable source hashes. Except where an entry explicitly
 records a later saved-evidence review, underlying private logs were not
 independently inspected.
 
+## Accepted clock verification: 0.4.0rc2
+
+- Result: **PASS / УСПЕХ** for the clock field program.
+- Exact source: `18b43df51ca7360534447bde67953a819e5cb8cc`.
+- Installed package: `0.4.0rc2`.
+- Wheel SHA-256:
+  `6828c271a91a0305dd0413aa094ebdc36d297d6d43e94c2aa05030cfe6416871`.
+- Worker attestation version: `0.3.0`.
+- Adapter SHA-256:
+  `9e74e6d3574be53610bdce46c4d8182036630fbf4455183219c97572bd25f046`.
+- Required 128 MiB round-trip acceptance: **INCOMPLETE / ПРОВЕРКА НЕ ЗАВЕРШЕНА**.
+
+This entry records the operator's anonymized field report. The package identity
+matches the retained private candidate manifest. The underlying deployment logs
+were not independently inspected for this entry. Raw measurements remain in
+private storage. No deployment identities or private policy hashes are published.
+Staging-bundle identifiers are omitted.
+
+### Installed identity and preconditions
+
+The operator verified the manifest and bundle checksums before installation.
+The offline candidate verifier passed without Python optimization. All 65
+installed runtime files matched the exact wheel after a noneditable update.
+There were no unexpected runtime files. `QgaClient.guest_clock_status()` was
+present. A fresh owned stdio MCP server reported `serverInfo.version: 0.4.0rc2`.
+Existing IDE processes were untouched.
+
+An online SQLite backup passed its integrity check before the update. The
+working journal namespace was preserved. No older database was restored over
+new transactions. Approved deployment pins were retained without restaging.
+Appliance network settings already matched the approved configuration before
+the full `heal` call. Bastion kept its domain time source. No synthetic input
+was used. No background supervisor was launched.
+
+### One heal and bounded clock measurements
+
+The operator issued exactly one MCP `enclave_heal` without credential refresh.
+It returned exit code zero with `APPLIANCE_INIT_OK` and `SESSION_ACTIVE`.
+The internal `APPLIANCE_CLOCK_CHECK` passed. Independent read-only QGA samples
+were then taken immediately after completion and at the two later checkpoints.
+Lock waiting and stream synchronization were excluded from each sample window.
+
+All values below use Appliance minus Host. The acceptance gate requires the
+entire offset interval to fit inside ±2000 ms. Host clock stability passed for
+every sample. Each reported uncertainty was 1 ms. Each reported RTT was 1 ms.
+
+| Sample | Actual elapsed after heal | Offset | Lower bound | Upper bound | Verified |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Before heal | Before call | −17539 ms | −17539 ms | −17538 ms | false |
+| Internal heal check | During call | −2 ms | −2 ms | −1 ms | true |
+| Immediate independent check | 0.000 s | −9 ms | −9 ms | −8 ms | true |
+| 60-second check | 60.002 s | −3 ms | −3 ms | −2 ms | true |
+| 300-second check | 300.002 s | −3 ms | −3 ms | −2 ms | true |
+
+The original approximately 17.5-second offset was correctly rejected. After
+the one repair, every independent interval remained within the gate throughout
+the five-minute program. This is acceptance of the exercised clock correction
+and its verification, not a claim of indefinite time stability.
+
+### Session continuity and final state
+
+Fresh worker attestation passed before `heal` and after the 300-second hold.
+The worker instance was unchanged. Operator identity was unchanged. Loaded
+adapter bytes were unchanged. The approved policy binding was unchanged.
+The challenges were fresh. No RDP disconnect or reconnect event appeared.
+The same client process and established connection were retained.
+
+The owned test MCP server closed through stdin EOF with exit code zero.
+Acknowledged worker stop took 40.84843 seconds. Fresh `stopped` telemetry and
+exclusive lease access confirmed termination. A second check after 10.5 seconds
+found no respawn. No residual owned SSH process remained.
+
+Protection stayed active with 28 running components. Both protection event logs
+had zero new entries. The Bastion time source was unchanged. Host remained on
+installed `0.4.0rc2`. Journal integrity passed afterward. The indeterminate
+record count stayed unchanged. No prior ambiguous copy operation was replayed.
+
+### Qualification boundary
+
+The clock field program is complete for this exact candidate and tested route.
+No 128 MiB transfer was attempted in this program. The reverse-path delay is
+not explained or declared fixed by successful clock verification. Stable
+promotion remains blocked by the incomplete long-transfer acceptance.
+
+The original RC1 bundle remains immutable. The RC2 candidate bundle also keeps
+its build-time bytes and manifest. This later report does not rewrite them.
+Stable `v0.3.0` retains its tag and release artifacts. Recording this result
+does not publish a new release.
+
 ## Incomplete candidate acceptance: 0.4.0rc1
 
 - Result: **INCOMPLETE / ПРОВЕРКА НЕ ЗАВЕРШЕНА**.
