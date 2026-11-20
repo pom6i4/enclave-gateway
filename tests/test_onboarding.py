@@ -267,14 +267,17 @@ class AgentDeploymentTests(unittest.TestCase):
             engine.hypervisor = Mock()
             engine.hypervisor.is_running.return_value = (False, None)
             channel.exec_powershell.return_value = ExecResult(0, 'SESSION_ACTIVE', '', 0)
+            channel.sync_guest_clock.return_value = True
+            channel.guest_clock_status.return_value = dict(verified=True, offset_ms=0, uncertainty_ms=100)
             sequence = Mock()
             sequence.attach_mock(engine.hypervisor.start, 'start')
             sequence.attach_mock(channel.wait_until_ready, 'ready')
             sequence.attach_mock(channel.exec_powershell, 'repair')
+            sequence.attach_mock(channel.guest_clock_status, 'clock')
             with patch.object(engine, 'stage_agents') as stage:
                 result = engine.heal()
             self.assertEqual(result.exit_code, 0)
-            self.assertEqual([call[0] for call in sequence.mock_calls], ['start', 'ready', 'repair'])
+            self.assertEqual([call[0] for call in sequence.mock_calls], ['start', 'ready', 'repair', 'clock'])
             stage.assert_not_called()
             self.assertTrue(channel.exec_powershell.call_args.args[0].strip().endswith('-ObserveOnly'))
 

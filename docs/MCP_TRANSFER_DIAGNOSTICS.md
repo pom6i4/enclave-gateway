@@ -58,14 +58,19 @@ no data parts. No deployment paths or identities are added to this structure.
 - `vfs.erase`: acknowledged-span cleanup.
 
 These measurements are inclusive and nested. Do not sum them as disjoint phases.
+`vfs.upload_slot` precedes `vfs.stream_exchange`; it is not inside that timer.
 QGA committed reads can include validation and erasure. Their duration does not
 isolate QGA wire latency from a blocked guest filesystem read. Response waiting
 does not independently measure the VPN or RDP network. Ordinary `timings_ms`
 may contain additional operation timings.
 
-Local fixtures use a controlled clock to model a 61.7-second read. They verify
-deadline retention and no replay, not WAN performance. A late download must
-preserve its previous destination and remove only its own temporary file.
+Local fixtures use a controlled clock to model late reads. They verify deadline
+retention and no replay, not WAN performance. A two-part download fixture also
+exercises an interrupted partial frame through the actual QGA file algorithms.
+Read recovery retains the cursor without another publication. Stopped-worker
+and late-frame cases preserve the prior destination and remove the owned
+temporary download. A fresh read-only probe uses its own response slot after
+the late outcome without consuming the retained failed frame.
 
 ## Offline block reconciliation
 
@@ -88,9 +93,40 @@ adding a data block. An IPC response filename uses the aligned request-stream
 position divided by 4096. That slot number is not a data ordinal. Neither record
 count nor highest observed offset alone proves which block failed. The
 [saved field observations](../contrib/qualification/FIELD_ACCEPTANCE.md#follow-up-review-of-saved-attempt-3-evidence)
-have now been reviewed. They distinguish 75 ledger records from 74 pull parts.
-They do not retain the exact failing offset. The earlier block-123 annotation
-must not be promoted to a measured block ordinal.
+now include the raw ledger snapshot. Matching the error's exact inner request
+identity establishes data block 74 at offset 76546048. Its target request
+completed in 400 ms. The earlier block-123 annotation is incorrect.
+
+## Current field boundary
+
+The [RC1 field record](../contrib/qualification/FIELD_ACCEPTANCE.md#incomplete-candidate-acceptance-040rc1)
+retains six incomplete pulls. Last successful SSH replies were received in
+394–2243 ms. Five last worker outcomes were indeterminate. One was completed
+with a response observed after the step cap and no reported RDP disconnect.
+Thus a stopped-worker case and a late-response case require separate analysis.
+Host read-stage errors alone do not prove a QGA defect. Transport events do not
+prove which network component caused an interruption. The earlier idle-policy
+attribution is withdrawn; recorded policy limits were zero and the operator
+reported more than 60 minutes of input-free connection continuity.
+
+The [bounded investigation prompt](../contrib/qualification/MCP_REVERSE_PATH_PROBE_RU.md)
+starts from existing evidence before allowing a small diagnostic transfer.
+Do not repeat full acceptance blindly or extend budgets without isolating the
+delay. No transfer-runtime fix is established by the current observations.
+
+Worker `failure_stage: ssh` also covers final durable-record writing and
+response sending after SSH returns. A completed ledger record precedes response
+publication. Neither field independently measures response visibility on
+Appliance. The saved records narrow the five indeterminate failures to after
+the SSH helper returned, without resolving which publication failed.
+
+The subsequent bounded 8 MiB probe completed. Its request-to-response-visible
+intervals do not independently isolate `Send-OperatorFrame`. The calibrated
+Appliance offset was approximately 17 seconds behind Host. See the
+[probe record](../contrib/qualification/FIELD_ACCEPTANCE.md#subsequent-bounded-reverse-path-probe)
+for the measured uncertainty and interpretation limits. A separate clock fix
+in the working source does not establish a transfer fix or qualify the original
+candidate again.
 
 ## Approved RDP session continuity
 

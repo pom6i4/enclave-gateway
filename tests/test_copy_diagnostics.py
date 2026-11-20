@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -157,6 +158,128 @@ class CopyDiagnosticsTests(unittest.TestCase):
             self.assertEqual(destination.read_bytes(),b'keep prior destination')
             self.assertEqual(transport.request.call_count,2)
             self.assertEqual({p.name for p in root.iterdir()},{'destination','state'})
+
+    def pull_fixture(self, root, clock, failure):
+        engine, control, server, args, actions = self.fixture(root, clock, 0)
+        payload = bytes(range(256)) * 8192
+        destination = root/'destination'
+        destination.write_bytes(b'prior destination')
+        args.update(direction='pull', local_path=str(destination), tx_id='partial_pull')
+        info = dict(revision=3, block_bytes=BLOCK, instance='a'*32, worker_sha256='b'*64)
+        responses = {}
+        failed_slot = []
+
+        def append(path, frame, **options):
+            position = FileQga.stream_append(control, path, frame, **options)
+            envelope = Decoder().feed(frame)[0][2]
+            action = envelope.get('copy_action', envelope['op'])
+            actions.append(action)
+            body = b''
+            if action == 'pull_info':
+                output = f'FILE:{len(payload)}:{hashlib.sha256(payload).hexdigest()}'
+            elif action == 'pull_part':
+                offset = envelope['copy_offset']
+                body = payload[offset:offset+envelope['copy_length']]
+                output = 'SHA256:'+hashlib.sha256(body).hexdigest()
+            else:
+                self.assertEqual(action, 'ping')
+                output = 'fresh probe'
+            value = dict(tx_id=envelope['tx_id'], exit_code=0, state='completed',
+                         stdout_b64=base64.b64encode(output.encode()).decode(), stderr_b64='',
+                         worker_instance=info['instance'], worker_sha256=info['worker_sha256'])
+            response = control.local(f"ipc_res_{info['instance']}_{position//BLOCK}.bin")
+            responses[response] = encode_frame(value)+body
+            response.write_bytes(responses[response])
+            if action == 'pull_part' and envelope['copy_offset'] == 1048576:
+                failed_slot.append(response)
+            return position
+
+        control.stream_append = append
+        original_read = control._stream_read_on_connection
+        offsets = []
+
+        def read(sock, reader, path, offset, count):
+            if failed_slot and control.local(path) == failed_slot[0]:
+                offsets.append(offset)
+                if len(offsets) == 1:
+                    count = 1000
+                elif len(offsets) == 2:
+                    if failure == 'connection':
+                        raise ConnectionResetError('interrupted response read')
+                    clock[0] += 55.14 if failure == 'late' else 1.1
+                    if failure == 'stopped':
+                        return b''
+            return original_read(sock, reader, path, offset, count)
+
+        control._stream_read_on_connection = read
+        control.try_read_bytes = Mock(return_value=json.dumps(dict(
+            instance_id=info['instance'], worker_sha256=info['worker_sha256'],
+            status='stopped' if failure == 'stopped' else 'ready')).encode())
+        return engine, control, server, args, actions, destination, payload, failed_slot, responses, offsets, info
+
+    def test_partial_pull_connection_loss_recovers_cursor_without_republishing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            clock = [100.0]
+            fixture = self.pull_fixture(Path(directory), clock, 'connection')
+            engine, control, server, args, actions, destination, payload, slots, responses, offsets, info = fixture
+            with patch('time.monotonic', side_effect=lambda: clock[0]):
+                response = call(server, **args)
+            result = json.loads(response['result']['content'][0]['text'])
+            self.assertEqual(destination.read_bytes(), payload)
+            self.assertEqual(offsets, [0, 1000, 1000])
+            self.assertEqual(actions, ['pull_info', 'pull_part', 'pull_part'])
+            self.assertEqual((control.append_count, control.fill_count), (3, 0))
+            progress = result['diagnostics']['copy_progress']
+            self.assertEqual(progress['connection_losses'], 1)
+            self.assertEqual(progress['blocks_verified'], 2)
+            self.assertTrue(progress['destination_committed'])
+            self.assertFalse(any(slots[0].read_bytes()))
+            self.assertFalse(control.handles)
+
+    def test_partial_pull_stop_or_late_frame_preserves_destination_and_rejects_replay(self):
+        for failure in ('stopped', 'late'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                clock = [100.0]
+                fixture = self.pull_fixture(root, clock, failure)
+                engine, control, server, args, actions, destination, payload, slots, responses, offsets, info = fixture
+                with patch('time.monotonic', side_effect=lambda: clock[0]):
+                    error = call(server, **args)['error']['data']
+                    self.assertTrue(error['indeterminate'])
+                    self.assertEqual(error['code'], 'remote_indeterminate' if failure == 'stopped' else 'deadline_exceeded')
+                    progress = error['diagnostics']['copy_progress']
+                    self.assertEqual(progress['blocks_verified'], 1)
+                    self.assertEqual(progress['bytes_verified'], 1048576)
+                    self.assertEqual(progress['block_index'], 2)
+                    self.assertEqual(progress['offset_bytes'], 1048576)
+                    self.assertEqual(progress['request_publications'], 3)
+                    self.assertEqual(progress['step_budget_ms'], 45000)
+                    self.assertFalse(progress['destination_committed'])
+                    retained = engine.transaction_status(args['tx_id'])
+                    self.assertEqual(retained['state'], 'indeterminate')
+                    self.assertEqual(retained['error']['diagnostics'], error['diagnostics'])
+                    self.assertEqual(destination.read_bytes(), b'prior destination')
+                    self.assertEqual({p.name for p in root.iterdir() if p.is_file() and not p.name.startswith('ipc_')},
+                                     {'source', 'destination', 'qga.sock.stream-producer.lock'})
+                    before = {p: p.read_bytes() for p in root.glob('ipc_*.bin')}
+                    repeat = call(server, **args)['error']['data']
+                    self.assertEqual(repeat['code'], 'transaction_indeterminate')
+                    self.assertEqual(repeat['diagnostics'], error['diagnostics'])
+                    self.assertEqual(before, {p: p.read_bytes() for p in before})
+                    self.assertEqual(actions, ['pull_info', 'pull_part', 'pull_part'])
+                    self.assertEqual((control.append_count, control.fill_count), (3, 0))
+                    self.assertEqual(slots[0].read_bytes(), responses[slots[0]])
+                    if failure == 'late':
+                        transport = StructuredTransport(control, engine.config.bastion)
+                        ready = dict(_stream_descriptor=info, _heartbeat_expires_unix=time.time()+30)
+                        envelope = dict(tx_id='probe_fresh', op='ping', timeout_ms=45000)
+                        result = transport._dispatch_stream(envelope, None, clock[0]+45, clock[0], ready)
+                        self.assertEqual(result.stdout, 'fresh probe')
+                        self.assertEqual(actions[-1], 'ping')
+                        self.assertEqual((control.append_count, len(actions)), (4, 4))
+                        self.assertEqual(slots[0].read_bytes(), responses[slots[0]])
+                        self.assertEqual(engine.transaction_status(args['tx_id']), retained)
+                    self.assertFalse(control.handles)
 
 if __name__ == '__main__':
     unittest.main()

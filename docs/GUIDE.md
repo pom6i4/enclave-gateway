@@ -890,6 +890,18 @@ reports the configured value and compares it with the managed adapter MTUs.
 When QGA clock synchronization succeeds, `heal` leaves that time in place during
 PowerShell initialization. The timestamp-based `Set-Date` fallback is used only
 when QGA synchronization is unavailable or fails.
+QGA synchronization samples Host UTC only after acquiring the control lock and
+completing stream synchronization. A queued caller must not install its old
+pre-wait timestamp. After initialization, QGA-backed `heal` reads
+[`guest-get-time`](https://www.qemu.org/docs/master/interop/qemu-ga-ref.html)
+and prints `APPLIANCE_CLOCK_CHECK` as JSON. The entire measured offset interval
+must fit within ±2000 ms for `verified: true`. The interval includes read-time
+uncertainty. A detected Host wall-clock discontinuity invalidates the observation.
+An unavailable read or an excessive offset makes `heal` return a nonzero exit
+code even when initialization succeeded. The clock check never replays a
+time-setting command. This verification applies to QGA; Windows Direct mode
+retains its existing timestamp fallback without this QGA receipt.
+The broad clock check in `doctor` is not this stricter post-repair gate.
 For the foreground operator, `heal` observes the session and leaves the
 existing bundle in place. Use `egw heal --policy-source ./worker-policy.json`
 to explicitly stage the approved policy and worker.

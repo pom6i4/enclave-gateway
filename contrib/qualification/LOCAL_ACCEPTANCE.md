@@ -53,6 +53,37 @@ server's stdin and requires exit zero. Failure cleanup may kill that newly
 created test child only. No existing IDE process is inspected or stopped.
 The bounded private receipt retains failure status and protocol output.
 
+## QGA clock repair verification
+
+`tests/test_qga_clock.py` models delayed lock acquisition before time setting.
+It verifies that an implicit timestamp is sampled after that wait. An explicitly
+supplied timestamp retains its exact value. Read-only guest time observations
+exclude lock waiting from their uncertainty window. An excessive offset cannot
+pass verification. Excessive uncertainty also fails. A Host wall-clock step
+invalidates the sample. Malformed guest timestamps are rejected.
+
+QGA-backed `heal` verifies the clock after initialization. Failed verification
+returns a nonzero exit code with a structural receipt. Repeating that same
+transaction returns its retained result without another repair. Cancellation
+remains observable. These are controlled local regressions, not proof that the
+field Appliance has been synchronized or that transfer delays are fixed.
+
+## Partial download and late-response regressions
+
+`tests/test_copy_diagnostics.py` exercises a two-part MCP download through the
+actual QGA file algorithms against local files. One injected connection loss
+after a partial frame recovers at the original cursor. No copy request is
+republished. The completed download matches its full content hash.
+
+Separate cases model stopped-worker telemetry and a read crossing the original
+step deadline after the first block was verified. Both retain indeterminate
+state with the original diagnostics. The prior destination is preserved. Only
+the owned temporary download is removed. An unchanged repeated transaction
+cannot publish again. After a late result, a fresh read-only probe receives its
+own response without consuming the failed response or changing the retained
+journal outcome. These checks do not run a real Windows guest or contact a
+deployment. They do not reproduce the field RDP fault or qualify network timing.
+
 ## Installed v0.3.0 local MCP verification
 
 Result: **PASS / УСПЕХ** for a newly launched local stdio server from the

@@ -695,13 +695,45 @@ if($name -match '^(req|cancel)_[A-Za-z0-9_-]{1,128}\.json$'){
         return data or None
 
     def sync_guest_clock(self, epoch_ns: int | None = None) -> bool:
-        ns = epoch_ns if epoch_ns is not None else time.time_ns()
         try:
             with self._connect_synced(10.0) as (sock, reader):
+                # Lock contention and stream synchronization can take seconds.
+                # Sample now only after both, immediately before publication.
+                ns = epoch_ns if epoch_ns is not None else time.time_ns()
                 self._request(sock, reader, "guest-set-time", {"time": ns})
             return True
         except (OSError, RuntimeError, ValueError):
             return False
+
+    def guest_clock_status(self, *, timeout_sec: float = 5.0) -> dict:
+        """Bracket guest UTC on the Host clock without including lock wait.
+
+        A valid result bounds the entire possible offset to two seconds.
+        A slow read or a Host wall-clock step cannot certify synchronization.
+        This is a read-only observation, not another time-setting attempt.
+        """
+        with self._connect_synced(timeout_sec) as (sock, reader):
+            start_ns = time.time_ns()
+            start_mono = time.monotonic_ns()
+            guest_ns = self._request(sock, reader, "guest-get-time")
+            end_mono = time.monotonic_ns()
+            end_ns = time.time_ns()
+        if type(guest_ns) is not int or not 0 < guest_ns < 2**63:
+            raise ValueError("Invalid QGA guest time")
+        elapsed_ns = end_ns - start_ns
+        rtt_ns = end_mono - start_mono
+        stable = rtt_ns >= 0 and elapsed_ns >= 0 and abs(elapsed_ns-rtt_ns) <= 100_000_000
+        lower_ns, upper_ns = guest_ns-end_ns, guest_ns-start_ns
+        return dict(
+            verified=stable and max(abs(lower_ns), abs(upper_ns)) <= 2_000_000_000,
+            offset_ms=(lower_ns+upper_ns)//2_000_000,
+            offset_lower_ms=lower_ns//1_000_000,
+            offset_upper_ms=-(-upper_ns//1_000_000),
+            uncertainty_ms=(max(0, elapsed_ns)+1_999_999)//2_000_000,
+            rtt_ms=(max(0, rtt_ns)+999_999)//1_000_000,
+            tolerance_ms=2000,
+            host_clock_stable=stable,
+        )
 
 
 class DirectHostControlChannel:

@@ -514,6 +514,19 @@ ConvertTo-Json $out -Compress -Depth 8
 }} -BastionHost {ps_quote(self.config.bastion.host)} -BastionPort {self.config.bastion.port} -SpoolDir {ps_quote(self.config.bastion.appliance_spool_dir)} -ScheduledTaskName {ps_quote(self.config.bastion.scheduled_task_name)} -HeartbeatMaxAgeSec {self.config.bastion.heartbeat_max_age_sec} -SpoolProtocol {self.config.bastion.spool_protocol.title()} {supervisor_mode}
 """
         res = self._scrub_result(self.control.exec_powershell(combined_ps, timeout_sec=60.0))
+        if isinstance(self.control, QgaClient) and not res.exit_code:
+            try:
+                clock_status = self.control.guest_clock_status()
+            except OperationError:
+                raise
+            except (OSError, RuntimeError, ValueError):
+                clock_status = dict(verified=False, reason='control_error')
+            res.stdout += '\nAPPLIANCE_CLOCK_CHECK:'+json.dumps(clock_status, separators=(',', ':'))
+            if clock_status.get('verified') is not True:
+                res.exit_code = 1
+                res.stderr += ('\nAppliance clock synchronization is unverified. '
+                               'Inspect APPLIANCE_CLOCK_CHECK and measure the clock again; '
+                               'no time-setting command was replayed.')
         if deployment:
             res.stdout+='\nBastion worker staged. In the Bastion RDP session run:\n'
             if 'bastion_copy_command' in deployment:

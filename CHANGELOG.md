@@ -2,8 +2,30 @@
 
 ## Unreleased
 
-Working package version: `0.4.0rc1`. No release is published by these changes.
+Working package version: `0.4.0rc2`. No release is published by these changes.
 
+- Prepare a distinct unpublished clock candidate from committed source.
+  Bind its wheel to the candidate manifest and fill the operator prompt from
+  that manifest. Preserve the original RC1 bundle and stable release artifacts.
+
+- Sample implicit QGA clock-setting timestamps after control-lock acquisition
+  and stream synchronization. Verify QGA-backed `heal` with a read-only guest
+  time bracket after initialization. Report offset uncertainty and fail the
+  clock gate instead of treating a command acknowledgement as measured success.
+  Preserve explicit timestamps and avoid automatic time-setting retries.
+- Record a successful bounded 8 MiB diagnostic pull on the original RC1.
+  Preserve incomplete 128 MiB acceptance. Verify the reported clock arithmetic
+  without attributing the observed drift to the newly identified clock defect.
+- Record **INCOMPLETE / ПРОВЕРКА НЕ ЗАВЕРШЕНА** for installed candidate
+  `a8d9cf0fa60219220e5363d33bd2423ec90e2818`. One 128 MiB push completed;
+  none of six pulls completed. Reconcile exact failed offsets with worker
+  records. Preserve passed diagnostics and no-replay checks without claiming
+  a completed round trip or an established code defect.
+- Withdraw the unsupported 25-minute idle-policy diagnosis. Reconcile historical
+  development block 74 from the raw ledger and exact request identity.
+  Add partial-frame recovery regressions through the QGA file algorithms.
+  Verify late/stopped-worker outcomes preserve the destination and reject replay.
+  Add a bounded reverse-path investigation prompt before another full field run.
 - Prepare an unpublished Standard operator candidate with bounded copy progress
   and Host-side read timings. Retain observations with success and error results.
   Preserve original observations when a transaction is queried again.
@@ -17,9 +39,9 @@ Working package version: `0.4.0rc1`. No release is published by these changes.
   a 128 MiB round trip passed. Completed and interrupted transaction checks
   showed zero new copy-dispatch after MCP restart.
   The round trip passed on attempt four; three failed pulls remain recorded.
-  Session continuity depended on external test activity. Saved evidence review
-  distinguishes 75 ledger records from 74 pull parts. The earlier block-123
-  annotation is unsubstantiated; the exact failed offset remains unknown.
+  The successful run used external test activity; its causal benefit is unproven.
+  Raw ledger review distinguishes 75 records from 74 pull parts and establishes
+  the failed wait at offset 76546048. The earlier block-123 annotation is incorrect.
   The measured 61.7018-second file-timestamp interval is not network RTT.
   This does not establish unattended
   reliability or authorize stable promotion. See the

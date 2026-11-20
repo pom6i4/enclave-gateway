@@ -7,6 +7,198 @@ reviewed against the immutable source hashes. Except where an entry explicitly
 records a later saved-evidence review, underlying private logs were not
 independently inspected.
 
+## Incomplete candidate acceptance: 0.4.0rc1
+
+- Result: **INCOMPLETE / ПРОВЕРКА НЕ ЗАВЕРШЕНА**.
+- Exact source: `a8d9cf0fa60219220e5363d33bd2423ec90e2818`.
+- Package version: `0.4.0rc1`, unpublished candidate.
+- Wheel size: 279944 bytes.
+- Wheel SHA-256:
+  `42017e2b4045da9d8dbd0fe70b7c05c53a6b3519509a890ee0d34dc4e322e0c3`.
+- Sdist size: 245291 bytes.
+- Sdist SHA-256:
+  `c1569bda6d6214e44d050318c5a523b4d3dade07c7c4d547b4cf772ed1ece13f`.
+- Worker attestation version: `0.3.0`.
+- Agent bytes: unchanged from stable `v0.3.0`.
+
+The operator supplied a completed observation report. A subsequent offline
+review inspected copied MCP traces and worker ledger records. Root JSON
+observations were also inspected. Original evidence stayed private and unchanged.
+Observer scripts were not executed. No live deployment was contacted by this
+review. This record distinguishes raw trace/ledger comparisons from the
+operator's policy and filesystem observations.
+
+### Installation and scope
+
+The tested route retained the Standard operator profile described in the
+development entry below. Host used macOS ARM64 with Python `3.14.5`.
+The noneditable installed runtime matched all 65 wheel files. The isolated
+installed-package checker passed. Fresh live MCP initialization reported
+`serverInfo.version: 0.4.0rc1`. Fresh worker attestation passed with a 45-second
+copy-step capability. Approved pins were preserved without restaging agents.
+The existing Host journal namespace was retained after a SQLite online backup.
+
+### Policy evidence corrects the old idle-timeout attribution
+
+The operator's read-only policy observations reported no configured idle limit.
+No active-session duration limit was reported. The disconnected-session limit
+was also zero. Computer and user Terminal Services policy keys were absent.
+The RDP-Tcp limits were zero. The user AD override was absent. Computer
+`gpresult` was unavailable to the non-administrator account; the corresponding
+registry policy key was readable. These are retained observations from that
+window, not a guarantee against future domain-policy changes.
+
+The operator additionally reported an RDP connection surviving more than
+60 minutes without keyboard or pointer input. RC1 used no synthetic input.
+The previous approximately 25-minute idle-policy explanation is withdrawn.
+The successful development run's pointer activity remains a historical test
+condition; its causal benefit was not established.
+
+Transport disconnect events were recorded during reverse-transfer testing.
+Client event 1105 accompanied event 1026 with reason 267. The report also
+records server event 40 with reason `0x80070040`. Native client reconnect took
+approximately 13–23 seconds. Redirected-drive loss caused the foreground worker
+to exit in affected cases. Those events do not identify the failing network
+component or prove that every timeout had the same cause.
+
+### Transfer results and exact failed offsets
+
+One 128 MiB push completed on its second attempt. All 128 data receipts were
+verified. The target's independent size and SHA-256 matched the Host source.
+Its 129 worker records matched the 129 request publications, including commit.
+The first push failed while waiting for block 4 and remained indeterminate.
+
+None of the six 128 MiB pulls completed. The following measurements were
+independently reconciled between Host traces and private worker ledger records.
+Each failed request was matched by its inner request identity. Offsets and
+publication counts agreed. Each pull includes one metadata request.
+
+| Pull attempt | Host duration | Failed data block | Offset bytes | Verified blocks | Publications | Last worker state | Target SSH reply |
+| --- | ---: | ---: | ---: | ---: | ---: | --- | ---: |
+| 1 | 539.8793 s | 64 | 66060288 | 63 | 65 | indeterminate | 445 ms |
+| 2 | 233.2142 s | 18 | 17825792 | 17 | 19 | indeterminate | 2243 ms |
+| 3 | 601.6665 s | 69 | 71303168 | 68 | 70 | completed | 578 ms |
+| 4 | 644.0819 s | 69 | 71303168 | 68 | 70 | indeterminate | 394 ms |
+| 5 | 1042.6262 s | 105 | 109051904 | 104 | 106 | indeterminate | 1350 ms |
+| 6 | 127.7360 s | 6 | 5242880 | 5 | 7 | indeterminate | 573 ms |
+
+Every matched last target request had exit code zero. The observed error stages
+included `control.receive`. Other errors occurred at `qga.guest-file-seek` or
+`qga.guest-file-read`. The remaining stage was `vfs.response`. These stages
+identify where Host observed failure; they do not isolate its origin.
+
+All five indeterminate last worker records retain `exit_code: 0` and a
+`MethodInvocationException`. Their `failure_stage` is `ssh`. Source review
+shows that this broad phase remains selected while the worker writes the final
+durable record and sends the response. These records contain no
+`operator_failure_phase` from the SSH helper's catch boundary. The evidence
+therefore narrows those failures to after the SSH result returned, but cannot
+distinguish durable-record publication from response publication. The phase
+label alone must not be interpreted as failed target execution.
+
+The worker writes a completed durable record before sending the response.
+Consequently `completed` does not by itself timestamp response visibility on
+Appliance. No independent worker response-publication duration is retained.
+
+Attempt 3 differs from the worker-indeterminate cases. Its worker ledger records
+all 70 requests as completed. The operator observed a complete 1049120-byte response
+after approximately 55.14 seconds, beyond the 45-second step cap. The worker
+remained alive and passed subsequent fresh attestation without an RDP break.
+The precise delay boundary is still unresolved. Increasing the whole-operation
+budget would not extend this step cap.
+
+Saved UTC timestamps associate client events with attempts 4–6. Cross-machine
+clock error was not independently bounded in this review, so these differences
+are approximate associations rather than precise causal ordering. For attempt 4,
+the disconnect event was about 15 seconds after the Host error. For attempt 5,
+it was about 6.5 seconds before the error. For attempt 6, it was about 20.9
+seconds before. This is not evidence that the recorded disconnect caused attempt
+4's timeout. The other attempts cannot be assigned that same
+event correlation from the available timestamped summary.
+
+### Integrity and no replay
+
+All seven failed operations retained indeterminate outcomes. Each unchanged
+request was repeated exactly once after reconciliation. Every repeat returned
+`transaction_indeterminate` with the original diagnostics. The report records
+zero new worker copy-dispatch for each repeat. No incomplete Host download was
+published. Owned temporary downloads were removed. Historical journal records
+were not cleared.
+
+The completed push returned its identical retained result after a test MCP
+restart with the local source absent. No new worker copy-dispatch appeared.
+Only owned test processes were closed through stdin EOF.
+
+Acknowledged worker stop took 31.63069 seconds. The operator confirmed fresh
+`stopped` telemetry and a free session lease. A second check after 10.5 seconds
+found no respawn. Protection stayed active without new events. Host remained on
+`0.4.0rc1` with the stable rollback wheel retained. No active operations remained.
+
+### Subsequent bounded reverse-path probe
+
+The operator reported **PASS / УСПЕХ** for the diagnostic program on the same
+original RC1 wheel. The probe did not reinstall Host. A single 8388608-byte
+pull completed in 67.1973 seconds. All eight parts were verified and committed.
+The Host hash matched the synthetic Target source. Nine completed worker
+records were reported, including metadata. The longest observed step was
+16.563 seconds. No RDP disconnect was reported in that probe window.
+Acknowledged final stop took 28.80414 seconds without respawn.
+
+Selected saved JSON observations were inspected offline afterward. The clock
+measurement source was read without executing it. The copied source inputs
+were hash-recorded. This review recalculated the two Appliance calibration
+windows; it did not independently re-execute the field program or inspect every
+one of its 6404 retained input files.
+
+- Appliance minus Host before the probe: −16.4830 seconds.
+- Before-probe half-window uncertainty: ±1.1758 seconds.
+- Appliance minus Host after the probe: −17.0717 seconds.
+- After-probe half-window uncertainty: ±0.6483 seconds.
+
+The windows overlap. The readings establish an approximately 17-second offset
+in that window, not a demonstrated rate of increasing drift. Bastion's much
+wider observation windows do not establish a precise change in its offset.
+The new calibration cannot be applied retroactively to the earlier six attempts.
+
+An independent local Appliance metadata observer sampled every 250 ms without
+competing QGA reads. The report records 272 samples. The retained event list
+was also inspected. Reported intervals from request publication to full-sized
+response visibility ranged from 4.674 to 15.434 seconds. Those intervals include
+work before `Send-OperatorFrame`, including durable-record publication.
+They do not isolate the data write or `Dispose()` duration. Absence of a sampled
+intermediate size does not establish that such a state never existed.
+Zero bytes read on Host alone also does not prove a live RDP session or an
+exclusively held descriptor throughout the wait.
+
+The 55.1375-second historical measurement is now explicitly defined as the
+interval between the previous slot's erase timestamp and the next slot's
+response timestamp on Appliance. It is not a direct duration of one response
+write. The broad reverse-path boundary remains the main investigation area.
+The concrete transport mechanism is unresolved. A product defect causing the
+pull failure is not established.
+
+A separate local review identified a clock-setting defect: implicit Host UTC
+was sampled before QGA lock waiting and stream synchronization. Working-source
+regressions cover the correction and post-`heal` verification. No retained
+measurement proves that this defect caused the field offset or transfer delay.
+The [short clock field prompt](MCP_CLOCK_HEAL_FIELD_PROMPT_RU.md) applies only
+after preparing an exact new source-bound wheel containing that correction.
+The original RC1 bundle is not replaced by the working-source change.
+
+### Remaining gate
+
+The required 128 MiB round trip is incomplete. Diagnostic consistency passed.
+No-replay checks passed. No product defect causing the reverse-path delay is
+established by these observations. Stable promotion remains blocked pending
+reverse-path investigation and a complete acceptance run. Local controlled
+regressions cover partial-frame recovery and late/stopped-worker outcomes;
+they do not reproduce the real RDP transport fault.
+
+Use the [bounded reverse-path investigation](MCP_REVERSE_PATH_PROBE_RU.md)
+before another full acceptance run. Do not change the adapter or increase
+timeouts to conceal the failure. This entry creates no tag or release.
+The original candidate bundle and stable release assets remain immutable.
+
 ## Accepted development block: 0.4.0.dev0
 
 - Operator-reported result: **PASS / УСПЕХ** for the tested MCP functionality.
@@ -95,13 +287,14 @@ as first-attempt end-to-end success.
 | 3 | 1061.7158 s | 646.1164 s | Response timeout at the 45-second step budget |
 | 4 | 1098.7722 s | 1168.3885 s | Completed with matching size and SHA-256 |
 
-The report associates the first two disconnects with an approximately 25-minute
-RDP input-idle policy. It records client event 1026 with reason 267. Subsequent
-tests used periodic synthetic pointer activity from an external observer.
-No further RDP disconnects were reported after that intervention. The product
-and agent bytes were unchanged. This is an explicit test condition, not proof
-of unattended operation or a recommendation to bypass an endpoint policy.
-Normal session continuity must be established within the approved policy.
+The original observer associated the first two disconnects with an approximately
+25-minute RDP input-idle policy. That attribution was withdrawn after the
+[RC1 policy observations](#policy-evidence-corrects-the-old-idle-timeout-attribution).
+The development test did use periodic synthetic pointer activity from an external
+observer. No further RDP disconnects were reported after that intervention.
+Its causal benefit is unproven. The product and agent bytes were unchanged.
+Keep this historical test condition visible without recommending it as a policy
+bypass or treating it as proof of unattended operation.
 
 For attempt 3, the observer reported a complete 1 MiB response arriving at an
 interval of approximately 61.7 seconds, beyond the 45-second step budget.
@@ -118,23 +311,22 @@ The observer scripts were read, not executed. No live enclave was contacted.
 The trace contains one publication of the main pull tool call. Its recorded
 monotonic duration is 646.1164 seconds. Its error is `worker_response_timeout`
 with an indeterminate result. The saved final ledger-query output contains 75
-matching operation records. Of these, 74 are `pull_part` records. The observer
-query used operation identity and a time filter. It is not a retained full ledger
-listing with every data offset.
-
-The earlier block-123 statement appears in a free-text observer classification.
-It is not substantiated by a `copy_offset` in the saved trace or query output.
-The visible IPC response slot number 258 is based on aligned request-stream
-position, not data-block ordinal. Do not infer a failing data block from either
-that filename or the count of ledger records. Neither block 123 nor a different
-exact failing block is established by these saved observations.
+matching operation records. Of these, 74 are `pull_part` records. That first
+review did not have the full raw ledger listing. A later offline review of the
+retained raw snapshot matched the exact inner request identity in the trace
+to one completed `pull_part` record. Its `copy_offset` is 76546048 bytes.
+The failed wait therefore concerned data block 74. Its target SSH reply took
+400 ms with exit code zero. The 75 records consist of one `pull_info` plus
+74 distinct data parts. The earlier free-text block-123 annotation is withdrawn
+as incorrect. The visible IPC response slot 258 comes from aligned request-stream
+position and does not identify a data-block ordinal.
 
 The saved file timestamps independently show a 61.7018-second interval between
 response slots 257 and 258. This confirms the timestamp interval stated in the
 report. It is not a measurement from request dispatch to response, or a direct
 measurement of network delay. Keep the VPN/RDP explanation as an inference.
-The original exact failing-offset attribution remains unverified; a fresh full
-field run would not reconstruct that historical offset.
+The exact historical offset is now reconciled from retained evidence. The
+timestamp interval still does not isolate where the response was delayed.
 
 ### Retained failed outcomes and successful round trip
 

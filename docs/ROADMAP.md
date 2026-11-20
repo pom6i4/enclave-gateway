@@ -8,7 +8,7 @@ Its [Standard operator release cycle](STANDARD_OPERATOR_CANDIDATE.md#release-cyc
 is complete for the exercised route. Historical acceptance remains bound to its
 exact package and deployment scope. The original tag and assets are immutable.
 
-The working version is `0.4.0rc1`. It is an unpublished Standard operator candidate.
+The working version is `0.4.0rc2`. It is an unpublished Standard operator clock candidate.
 Installing it is not required for continued operation of the accepted release.
 Confirmed maintenance defects can be addressed separately in `0.3.x`.
 
@@ -95,24 +95,45 @@ The candidate adds [Host-side transfer observations](MCP_TRANSFER_DIAGNOSTICS.md
 Local late-read regressions preserve deadlines and no-replay behavior. The
 [offline analyzer](../scripts/qualification/copy_ledger.py) maps ledger counts
 to data offsets without a deployment connection. These tools do not establish
-the cause of the old real-channel delay. A
+the cause of the real-channel delay. A
 [saved-evidence review](../contrib/qualification/FIELD_ACCEPTANCE.md#follow-up-review-of-saved-attempt-3-evidence)
 verified the field wheel against all 65 Git runtime files. It distinguishes the
-ledger counts from the unsubstantiated block-123 annotation. The exact failed
-data offset was not retained in the available observations.
+ledger counts from the earlier block-123 annotation. The later raw ledger
+snapshot establishes block 74 at offset 76546048 through exact request identity.
+The old annotation is incorrect.
+
+The [RC1 field program](../contrib/qualification/FIELD_ACCEPTANCE.md#incomplete-candidate-acceptance-040rc1)
+is **INCOMPLETE / ПРОВЕРКА НЕ ЗАВЕРШЕНА**. One 128 MiB push completed on its
+second attempt. None of six pulls completed. Diagnostics and no-replay checks
+passed. Agent bytes remain unchanged. A completed late response without RDP
+loss must be investigated separately from worker-indeterminate outcomes. No
+transfer-runtime correction is justified until the delay boundary is isolated.
+
+The later bounded 8 MiB probe passed without completing long-transfer acceptance.
+Its calibrated Appliance offset was approximately 17 seconds behind Host.
+A separate local clock review found implicit timestamps sampled before QGA
+lock waiting. The working source corrects that ordering and verifies the clock
+after QGA-backed `heal`. This defect has not been established as the cause of
+the field offset or pull delay. Qualify the correction with the
+[short clock program](../contrib/qualification/MCP_CLOCK_HEAL_FIELD_PROMPT_RU.md)
+before another full transfer run.
 
 ### P2: operator transfer performance
 
-The development field report leaves specific follow-up work:
+The current field evidence leaves specific follow-up work:
 
-- Use observed data offsets for future block attribution.
-- Retain the old exact failing ordinal as unknown instead of inferring it.
-- Isolate the source of the reported late response before changing timeout gates.
-- Establish session continuity within the approved RDP idle policy.
+- Preserve the reconciled historical offset and all six RC1 failed outcomes.
+- Separate target execution from worker publication and Host response visibility.
+- Correlate disconnect events without assuming they explain every timeout.
+- Isolate the late response without an RDP break before changing timeout gates.
+- Preserve the approved policy; withdraw the unsupported idle-timeout diagnosis.
+- Use the [bounded reverse-path probe](../contrib/qualification/MCP_REVERSE_PATH_PROBE_RU.md) before another full run.
 - Measure first-attempt long-transfer reliability under those normal conditions.
 
-The reported 61.7-second response interval exceeded the attested 45-second step
-budget. Increasing the whole-copy timeout does not extend that step budget.
+The historical 61.7018-second interval comes from response-file timestamps;
+it does not independently measure request latency. The RC1 operator also
+reported a late response beyond the attested 45-second step budget.
+Increasing the whole-copy timeout does not extend that step budget.
 Do not add automatic mutating retries to conceal an indeterminate result.
 
 Measure time spent at each boundary on the accepted route before optimizing.
@@ -151,5 +172,6 @@ the qualified acceptance scope. New runtime changes require their own regression
 Broaden the lifecycle regression when deployment components or runtime behavior
 change. The [targeted candidate field prompt](../contrib/qualification/MCP_RELIABILITY_FIELD_PROMPT_RU.md)
 requires approved session-continuity evidence and the new observations.
-The old field receipt alone does not close stable promotion. No next release
-is authorized by this roadmap alone.
+The RC1 program did not complete its required round trip. Existing functional
+acceptance alone does not close stable promotion. No next release is authorized
+by this roadmap alone.

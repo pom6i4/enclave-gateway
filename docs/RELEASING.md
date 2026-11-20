@@ -51,11 +51,43 @@ trip. Deduplication across MCP restart passed. An intentionally cancelled copy
 was retained as indeterminate and could not dispatch again.
 
 The first three pulls failed and remain in the record. The successful program
-used external RDP input activity. The delay attribution and an inconsistent
-block counter remain explicitly qualified. This is not unattended reliability
+used external RDP input activity. The old idle-timeout attribution is withdrawn.
+Raw ledger reconciliation establishes historical block 74; the earlier block-123
+annotation is incorrect. This is not unattended reliability
 acceptance or a stable release. Keep the field-built wheel identity separate
 from published release materials. No version or agent bytes change as part of
 recording the report. Stable `v0.3.0` remains unchanged.
+
+## Unpublished 0.4.0rc1 field gate
+
+The exact candidate at `a8d9cf0fa60219220e5363d33bd2423ec90e2818` remains
+**INCOMPLETE / ПРОВЕРКА НЕ ЗАВЕРШЕНА**. Its installed runtime matched the wheel.
+Fresh MCP initialization passed. One 128 MiB push completed on its second
+attempt, but none of six pulls completed. Diagnostic reconciliation passed.
+No-replay checks passed. Final worker stop released the lease without respawn.
+Protection remained active. See the
+[RC1 record](../contrib/qualification/FIELD_ACCEPTANCE.md#incomplete-candidate-acceptance-040rc1).
+
+No code defect causing the reverse-path delay is established. The next step is
+bounded observation of the delayed boundary, not publication or increased
+timeouts. Do not rewrite the original RC1 candidate bundle with later evidence.
+This documentation and its local regression tests do not create a new candidate
+build or move stable `v0.3.0`.
+
+The `0.4.0rc2` clock changes are outside the original RC1 wheel identity.
+Their local package checks do not replace that bundle. Assemble the exact new
+source-bound candidate before running the short clock field program. Neither
+the successful bounded 8 MiB probe nor the clock correction closes 128 MiB
+round-trip acceptance.
+
+## Unpublished 0.4.0rc2 clock candidate
+
+Build this candidate from a clean committed source export. Its private
+`candidate-manifest.json` must identify the full source commit and wheel SHA-256.
+Deliver the filled `FIELD_PROMPT_RU.md` from the same bundle. The tracked clock
+prompt is a preparation template and must not be sent directly to an operator.
+Verify every bundle checksum before delivery. Keep original RC1 artifacts
+unchanged. No Git tag or GitHub Release is created by candidate assembly.
 
 ## Beta release history
 
