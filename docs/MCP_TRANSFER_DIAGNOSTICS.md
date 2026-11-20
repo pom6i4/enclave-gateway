@@ -86,8 +86,11 @@ structural `result.json` before sharing it.
 Data ordinal is `copy_offset / 1048576 + 1`. Metadata adds a ledger record without
 adding a data block. An IPC response filename uses the aligned request-stream
 position divided by 4096. That slot number is not a data ordinal. Neither record
-count nor highest observed offset alone proves which block failed. The old
-field discrepancy remains unresolved until its private records are examined.
+count nor highest observed offset alone proves which block failed. The
+[saved field observations](../contrib/qualification/FIELD_ACCEPTANCE.md#follow-up-review-of-saved-attempt-3-evidence)
+have now been reviewed. They distinguish 75 ledger records from 74 pull parts.
+They do not retain the exact failing offset. The earlier block-123 annotation
+must not be promoted to a measured block ordinal.
 
 ## Approved RDP session continuity
 

@@ -17,8 +17,11 @@ Working package version: `0.4.0rc1`. No release is published by these changes.
   a 128 MiB round trip passed. Completed and interrupted transaction checks
   showed zero new copy-dispatch after MCP restart.
   The round trip passed on attempt four; three failed pulls remain recorded.
-  Session continuity depended on external test activity. An exact failing-block
-  counter discrepancy remains unresolved. This does not establish unattended
+  Session continuity depended on external test activity. Saved evidence review
+  distinguishes 75 ledger records from 74 pull parts. The earlier block-123
+  annotation is unsubstantiated; the exact failed offset remains unknown.
+  The measured 61.7018-second file-timestamp interval is not network RTT.
+  This does not establish unattended
   reliability or authorize stable promotion. See the
   [development field record](contrib/qualification/FIELD_ACCEPTANCE.md#accepted-development-block-040dev0).
 - Add explicit MCP `node_transfer` chunked mode through the existing operator

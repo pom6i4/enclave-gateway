@@ -3,8 +3,9 @@
 This register summarizes operator-supplied anonymized field reports. Each entry
 applies to its exact source revision and the deployment profile described below.
 The operator retains raw evidence in private storage. The public summary was
-reviewed against the immutable source hashes; raw private logs were not
-independently inspected for this record.
+reviewed against the immutable source hashes. Except where an entry explicitly
+records a later saved-evidence review, underlying private logs were not
+independently inspected.
 
 ## Accepted development block: 0.4.0.dev0
 
@@ -23,10 +24,11 @@ independently inspected for this record.
 
 The supplied report binds these field-built artifacts to a clean detached
 checkout of the source above. It reports successful installed-package acceptance.
-The field-built archives and underlying private traces were not independently
-retrieved for this documentation update. Their hashes identify this field cohort;
-they are not published release checksums. Source agent identities were checked
-against the immutable Git source. The
+A later read-only local review found the original field-built archives through
+the installed distribution's wheel-origin metadata. Both archive hashes matched
+the report. All 65 wheel runtime files were independently compared byte-for-byte
+with this exact Git source. These are field-cohort identities, not published
+release checksums. Source agent identities also matched the immutable source. The
 [15-job CI run](https://github.com/pom6i4/enclave-gateway/actions/runs/44612440164)
 passed for that exact source.
 
@@ -107,12 +109,34 @@ The RDP session and worker reportedly remained active. The proposed VPN/RDP
 throughput explanation is an observer inference; the delayed boundary was not
 independently isolated in this record.
 
-There is an unresolved counter discrepancy in the supplied narrative: an early
-update names block 123, while the final report lists 75 operation ledger records.
-These observations are not treated as equivalent counters. The exact failing
-block is not established here. Resolve the mapping from the retained private
-traces before publishing an exact block attribution; another full field run is
-not required merely to correct that narrative.
+### Follow-up review of saved attempt-3 evidence
+
+Selected saved JSON observations and the original attempt-3 MCP trace were
+reviewed offline after the field report. The original files were preserved.
+The observer scripts were read, not executed. No live enclave was contacted.
+
+The trace contains one publication of the main pull tool call. Its recorded
+monotonic duration is 646.1164 seconds. Its error is `worker_response_timeout`
+with an indeterminate result. The saved final ledger-query output contains 75
+matching operation records. Of these, 74 are `pull_part` records. The observer
+query used operation identity and a time filter. It is not a retained full ledger
+listing with every data offset.
+
+The earlier block-123 statement appears in a free-text observer classification.
+It is not substantiated by a `copy_offset` in the saved trace or query output.
+The visible IPC response slot number 258 is based on aligned request-stream
+position, not data-block ordinal. Do not infer a failing data block from either
+that filename or the count of ledger records. Neither block 123 nor a different
+exact failing block is established by these saved observations.
+
+The saved file timestamps independently show a 61.7018-second interval between
+response slots 257 and 258. This confirms the timestamp interval stated in the
+report. It is not a measurement from request dispatch to response, or a direct
+measurement of network delay. Keep the VPN/RDP explanation as an inference.
+The original exact failing-offset attribution remains unverified; a fresh full
+field run would not reconstruct that historical offset.
+
+### Retained failed outcomes and successful round trip
 
 Each failed pull left its Host destination unpublished. Before any new attempt,
 the operator reports reconciling the prior journal and filesystem evidence.

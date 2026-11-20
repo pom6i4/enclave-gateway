@@ -95,15 +95,18 @@ The candidate adds [Host-side transfer observations](MCP_TRANSFER_DIAGNOSTICS.md
 Local late-read regressions preserve deadlines and no-replay behavior. The
 [offline analyzer](../scripts/qualification/copy_ledger.py) maps ledger counts
 to data offsets without a deployment connection. These tools do not establish
-the cause of the old real-channel delay. Its counter discrepancy remains
-unresolved without the private traces.
+the cause of the old real-channel delay. A
+[saved-evidence review](../contrib/qualification/FIELD_ACCEPTANCE.md#follow-up-review-of-saved-attempt-3-evidence)
+verified the field wheel against all 65 Git runtime files. It distinguishes the
+ledger counts from the unsubstantiated block-123 annotation. The exact failed
+data offset was not retained in the available observations.
 
 ### P2: operator transfer performance
 
 The development field report leaves specific follow-up work:
 
-- Reconcile the attempt-3 block attribution against retained traces.
-- Keep the reported block-123 versus 75-ledger-record discrepancy visible.
+- Use observed data offsets for future block attribution.
+- Retain the old exact failing ordinal as unknown instead of inferring it.
 - Isolate the source of the reported late response before changing timeout gates.
 - Establish session continuity within the approved RDP idle policy.
 - Measure first-attempt long-transfer reliability under those normal conditions.
