@@ -173,7 +173,8 @@ class StructuredSshExecutor(SshHopExecutor):
         update_copy_progress(action=action, block_index=(fields.get('copy_offset', 0)//UPLOAD_PART_BYTES+1)
                              if action in ('push_part', 'pull_part') else 0,
                              offset_bytes=fields.get('copy_offset', 0), length_bytes=fields.get('copy_length', 0),
-                             step_budget_ms=int(budget(maximum)*1000), response_bytes_received=0)
+                             step_budget_ms=int(budget(maximum)*1000), response_bytes_received=0,
+                             response_read_outcome='not_observed')
         count_copy('steps_started')
         started = time.monotonic()
         try:

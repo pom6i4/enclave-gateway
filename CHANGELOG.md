@@ -2,7 +2,21 @@
 
 ## Unreleased
 
-Working package version: `0.4.0rc3`. No release is published by these changes.
+Working package version: `0.4.0rc4`. No release is published by these changes.
+
+- Bound each QGA binary-response poll to 64 KiB so a later wire-read timeout
+  cannot discard an entire accumulated MiB. Retain the decoder cursor across
+  polls. Require EOF before erasing a complete binary response. Preserve the
+  original step deadline and all receipt checks without replaying requests.
+- Add a local 128 MiB MCP pull regression with delayed visibility at block 30
+  and a slow QGA reader. Verify failure on the previous implementation and
+  completion after the correction. Reject trailing data and untrusted receipts.
+  Add an allow-listed last-read outcome to distinguish open failures from
+  interrupted reads without exposing raw QGA errors.
+- Record incomplete RC3 field acceptance. The 128 MiB push passed. Pull stopped
+  after 29 verified MiB with no response bytes for block 30. Saved diagnostics
+  report no QGA read timeout, so the local slow-reader defect does not establish
+  the cause of that field stop. Preserve the original candidate artifacts.
 
 - Recover one transient timeout of periodic Standard operator copy attestation
   with a new read-only challenge. Each challenge retains its ten-second budget.

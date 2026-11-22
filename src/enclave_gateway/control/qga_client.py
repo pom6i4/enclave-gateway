@@ -509,12 +509,14 @@ class QgaClient:
         with self._connect_synced(timeout_sec) as (sock, reader):
             return self._stream_read_on_connection(sock, reader, path, offset, count)
 
-    def stream_read_committed(self, path, offset, validate, *, count=65536, timeout_sec=30.0):
+    def stream_read_committed(self, path, offset, validate, *, count=65536, timeout_sec=30.0, require_eof=False):
         """Read, validate, then erase acknowledged spans without another sync.
 
         The callback performs no control-channel IO. Empty/incomplete and legacy
         delivery markers return no spans. After validation only pending erasure
         is retried; the validator and the worker request are never replayed.
+        Binary response slots require an EOF check before any acknowledged
+        erasure, including when the payload ends exactly at a read boundary.
         """
         pending=[]
         try:
@@ -522,6 +524,8 @@ class QgaClient:
                 data=self._stream_read_on_connection(sock, reader, path, offset, count)
                 spans=validate(data)
                 if spans:
+                    if require_eof and self._stream_read_on_connection(sock, reader, path, offset+len(data), 1):
+                        raise ValueError('Unexpected trailing download response bytes')
                     pending=self._validate_stream_spans(spans)
                     # The short observation budget ends at validation. Erasure
                     # has its own bounded budget within the operation deadline.

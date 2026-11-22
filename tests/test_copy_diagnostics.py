@@ -116,7 +116,8 @@ class CopyDiagnosticsTests(unittest.TestCase):
         with patch('time.monotonic', side_effect=lambda: clock[0]), activate(context):
             update_copy_progress(direction='pull', block_index=75, offset_bytes=74*1024*1024,
                                  remote_path='/private/fixture', tx_id='private-id', policy_sha256='a'*64,
-                                 command='private command', file_size_bytes=-1)
+                                 command='private command', file_size_bytes=-1,
+                                 response_read_outcome='unfiltered private error')
             with measured('vfs.response_read'):
                 clock[0]+=1
             diagnostics = copy_diagnostics()
@@ -226,7 +227,8 @@ class CopyDiagnosticsTests(unittest.TestCase):
                 response = call(server, **args)
             result = json.loads(response['result']['content'][0]['text'])
             self.assertEqual(destination.read_bytes(), payload)
-            self.assertEqual(offsets, [0, 1000, 1000])
+            self.assertEqual(offsets[:3], [0, 1000, 1000])
+            self.assertEqual(offsets[2:], sorted(set(offsets[2:])))
             self.assertEqual(actions, ['pull_info', 'pull_part', 'pull_part'])
             self.assertEqual((control.append_count, control.fill_count), (3, 0))
             progress = result['diagnostics']['copy_progress']

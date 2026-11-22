@@ -207,7 +207,8 @@ def copy_diagnostics(context=None):
                 'empty_response_reads', 'read_timeouts', 'connection_losses',
                 'state_reads', 'response_bytes_received', 'attestation_attempts', 'attestation_retries'}
     labels = {'direction': {'push', 'pull'}, 'action': {'push_part', 'push_commit', 'pull_info', 'pull_part'},
-              'control_kind': {'qga', 'other'}}
+              'control_kind': {'qga', 'other'},
+              'response_read_outcome': {'not_observed', 'open_failed', 'empty', 'data', 'complete', 'timeout', 'connection_lost'}}
     stages = {'vfs.preflight', 'attestation', 'vfs.publish', 'vfs.upload_slot',
               'vfs.erase', 'vfs.stream_exchange', 'vfs.response_read', 'vfs.state_read', 'vfs.poll_sleep'}
     with context._lock:

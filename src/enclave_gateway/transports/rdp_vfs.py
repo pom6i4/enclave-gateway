@@ -775,6 +775,9 @@ exit 124
         operator = self.spec.structured_backend == "operator"
         next_state_check = time.monotonic() + 1.0
         read_snapshot = getattr(type(self.control), "read_file_snapshot", None)
+        def record_read_outcome(value):
+            if envelope.get('op') == 'ssh_copy':
+                update_copy_progress(response_read_outcome=value)
         def read(method,*args,**kwargs):
             # Local QGA exchange limits must leave room for a fresh observation
             # within this request's original deadline. Other controls retain
@@ -827,12 +830,20 @@ exit 124
             try:
                 if download is not None:
                     count = decoder.read_limit - cursor
-                    data = (read(self.control.stream_read_committed,res,cursor,validate,count=count)
+                    options = {}
+                    if combined and isinstance(self.control, QgaClient):
+                        # Return each bounded wire read to the decoder. Reading
+                        # an entire MiB inside one three-second exchange loses
+                        # its accumulated prefix if a later wire read times out.
+                        count = min(count, QgaClient.CHUNK_SIZE)
+                        options['require_eof'] = True
+                    data = (read(self.control.stream_read_committed,res,cursor,validate,count=count,**options)
                             if combined else read(self.control.stream_read,res,cursor,count))
                 else:
                     data = (read(self.control.stream_read_committed,res,cursor,validate) if combined
                             else read(self.control.stream_read,res,cursor))
             except (TimeoutError,ConnectionError) as error:
+                record_read_outcome('timeout' if isinstance(error, TimeoutError) else 'connection_lost')
                 checkpoint('vfs.response')
                 if completed:
                     raise OperationError('worker_result_cleanup_failed','vfs.erase',
@@ -844,10 +855,14 @@ exit 124
                 # never republish the request.
                 if error.command != "guest-file-open":
                     raise
+                record_read_outcome('open_failed')
                 if completed:
                     raise OperationError('worker_result_cleanup_failed','vfs.erase',
                                          tx_id=envelope['tx_id'],indeterminate=True) from error
                 data = b""
+            else:
+                record_read_outcome('complete' if completed else 'data' if data else 'empty')
+            checkpoint('vfs.response')
             cursor += len(data)
             if not combined: count_copy('response_bytes_received', len(data))
             if not data: count_copy('empty_response_reads')

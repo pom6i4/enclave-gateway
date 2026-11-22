@@ -41,6 +41,7 @@ observations without publishing another copy request.
 | `connection_losses` | Connection errors propagated by observed read calls |
 | `state_reads` | Worker-state observations |
 | `response_bytes_received` | Frame bytes observed for the last action |
+| `response_read_outcome` | Last copy-response read outcome from a fixed label set |
 | `destination_committed` | Final receipt accepted or Host download atomically published |
 
 Missing fields mean that boundary was not observed. A verified part is not a
@@ -53,6 +54,27 @@ one new challenge within the original part budget. Each has at most ten seconds.
 No data request is published until verification succeeds. Both counters remain
 visible in the retained result. Trust failures and cancellation are not retried.
 This behavior is outside the original RC2 wheel identity.
+
+The last-read label is reset for each copy action. Its possible values are:
+
+- `not_observed`: no copy-response observation finished.
+- `open_failed`: QGA rejected opening the response slot.
+- `empty`: the read returned no bytes.
+- `data`: a read returned frame bytes without asserting completion.
+- `complete`: a complete receipt passed validation and cleanup.
+- `timeout`: the response read raised a timeout.
+- `connection_lost`: the response read raised a connection error.
+
+An open failure alone cannot distinguish an absent file from an exclusive
+writer or a permissions error. Raw QGA errors are not copied into diagnostics.
+Read counters accumulate across the copy. The last-read label applies to the
+current action. A worker-state observation does not overwrite that label.
+
+QGA binary-response polls in the working source read at most 64 KiB before
+returning progress to the decoder. Each poll retains its three-second cap.
+A final EOF observation precedes acknowledged erasure. This prevents a bounded
+read ending on the payload boundary from accepting trailing response bytes.
+The original part deadline still applies to every read and to cleanup.
 
 `diagnostics.timings_ms` contains cumulative Host observations:
 
@@ -121,7 +143,7 @@ reported more than 60 minutes of input-free connection continuity.
 The [bounded investigation prompt](../contrib/qualification/MCP_REVERSE_PATH_PROBE_RU.md)
 starts from existing evidence before allowing a small diagnostic transfer.
 Do not repeat full acceptance blindly or extend budgets without isolating the
-delay. No transfer-runtime fix is established by the current observations.
+delay. The original observations alone do not establish a transfer-runtime fix.
 
 Worker `failure_stage: ssh` also covers final durable-record writing and
 response sending after SSH returns. A completed ledger record precedes response
@@ -143,6 +165,21 @@ One `heal` corrected the initial −17539 ms offset. The independent 300-second
 sample reported −3 ms with a 1 ms uncertainty. RDP continuity was preserved.
 This closes the measured clock gate for that source. It does not close the
 128 MiB transfer gate or establish a cause for the earlier reverse-path delay.
+
+The subsequent [RC3 field record](../contrib/qualification/FIELD_ACCEPTANCE.md#incomplete-transfer-verification-040rc3)
+includes a successful first-attempt push and an incomplete pull. At block 30
+the Host observed no response bytes before the 45-second deadline. The exact
+worker record was completed with an SSH reply time of 372 ms. That record
+precedes response publication and does not establish when the slot was readable.
+There were no reported QGA read timeouts or connection losses. Earlier counters
+did not distinguish open failures from empty files. The saved evidence therefore
+does not isolate the physical delay further.
+
+A separate local regression exposes an additional Host-side defect: reading
+an entire MiB inside one three-second QGA exchange can discard an accumulated
+prefix when a later wire read times out. Bounded polls correct that defect.
+This synthetic failure includes QGA timeouts, unlike the saved field result.
+It must not be presented as a confirmed explanation or field fix for block 30.
 
 ## Approved RDP session continuity
 

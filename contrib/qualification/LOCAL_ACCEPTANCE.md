@@ -96,6 +96,24 @@ field Appliance has been synchronized or that transfer delays are fixed.
 
 ## Partial download and late-response regressions
 
+`tests/test_pull_read_budget.py` runs a 128 MiB MCP pull through the QGA file
+algorithms against local files. The block-30 response remains exclusively
+unavailable for 38 simulated seconds. Subsequent wire reads take more than
+three seconds in total. The previous whole-MiB poll loses its prefix on each
+local timeout and exhausts the unchanged 45-second step budget after 29 parts.
+Bounded reads retain progress and complete all 128 parts without republishing
+any request. A new MCP server reopens the journal and returns the saved result
+with the destination absent and no dispatch. A response unavailable beyond the
+original deadline preserves the prior destination and rejects replay.
+
+`tests/test_stream_poll_recovery.py` also rejects a byte after a binary frame
+ending exactly at a QGA read boundary. An EOF-read timeout preserves the
+unacknowledged response. Invalid receipt identity is rejected. A transaction
+mismatch is rejected. A block-hash mismatch is rejected. These failures do not
+erase evidence or return download bytes. The fixtures do not qualify real RDP
+publication latency. The saved RC3 field result reported no QGA read timeout;
+the slow-reader reproduction cannot establish its physical cause.
+
 `tests/test_copy_diagnostics.py` exercises a two-part MCP download through the
 actual QGA file algorithms against local files. One injected connection loss
 after a partial frame recovers at the original cursor. No copy request is

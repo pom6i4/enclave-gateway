@@ -7,6 +7,51 @@ reviewed against the immutable source hashes. Except where an entry explicitly
 records a later saved-evidence review, underlying private logs were not
 independently inspected.
 
+## Incomplete transfer verification: 0.4.0rc3
+
+- Result: **INCOMPLETE / ПРОВЕРКА НЕ ЗАВЕРШЕНА**.
+- Exact source: `2558e125df2f8d8ddd5748c920753da5961aea7e`.
+- Installed package: `0.4.0rc3`.
+- Wheel SHA-256:
+  `df5ee88d1d7031b9f3bfdedbaa43fda56d68b5a34d05a6818e7b41d478b21986`.
+- Worker contract version: `0.3.0`.
+- Adapter SHA-256:
+  `9e74e6d3574be53610bdce46c4d8182036630fbf4455183219c97572bd25f046`.
+
+The operator reported an exact noneditable installation with all 65 runtime
+files matched to the wheel. An owned fresh MCP server initialized successfully.
+The saved structured report was inspected alongside the matching worker ledger.
+Raw evidence remains private. Deployment identities are omitted. Private policy
+hashes are omitted. Staging-bundle identifiers are omitted.
+
+The first 128 MiB push completed in 1019.6634 seconds. All 128 data parts were
+verified and the destination was committed. The ledger contained 128 unique
+data offsets and one commit. There were 30 attestation attempts with no retry.
+
+Pull stopped after 29 verified MiB at offset 30408704 while waiting for data
+block 30. Elapsed whole-copy time was 261.8697 seconds. The last step reached
+45001 ms against its 45000 ms cap with zero response bytes. The error was
+`worker_response_timeout` at `vfs.response`, with an indeterminate outcome.
+The ledger held one metadata request and 30 completed data requests. The exact
+inner request identity matched block 30. Its SSH reply took 372 ms with exit
+status zero. There were seven attestation attempts with no retry.
+
+Completed worker records precede response publication. They do not prove
+delivery to Host. The saved diagnostics reported no read timeout or connection
+loss. The earlier empty-read counter also included response-open failures;
+it cannot distinguish missing files from exclusively held slots. No retained
+per-read trace resolves that boundary. A separately reproduced QGA slow-reader
+defect includes local read timeouts and is not an established field cause.
+
+RDP continuity was reported throughout. After a fresh owned MCP session, the
+same push transaction returned its retained result. The same indeterminate
+pull transaction was rejected without another copy dispatch. The destination
+was not committed. No new worker copy records appeared in the repeat window.
+The worker stopped normally in 32.18034 seconds without observed respawn.
+Endpoint protection remained active with zero new reported events. The RC3
+attestation-retry branch was not exercised. Full round-trip acceptance remains
+incomplete. The original RC3 bundle is preserved without modification.
+
 ## Accepted clock verification: 0.4.0rc2
 
 - Result: **PASS / УСПЕХ** for the clock field program.

@@ -8,7 +8,7 @@ Its [Standard operator release cycle](STANDARD_OPERATOR_CANDIDATE.md#release-cyc
 is complete for the exercised route. Historical acceptance remains bound to its
 exact package and deployment scope. The original tag and assets are immutable.
 
-The working version is `0.4.0rc3`. It is an unpublished Standard operator transfer candidate.
+The working version is `0.4.0rc4`. It is an unpublished Standard operator transfer candidate.
 Installing it is not required for continued operation of the accepted release.
 Confirmed maintenance defects can be addressed separately in `0.3.x`.
 
@@ -26,6 +26,14 @@ within the original part deadline. Each challenge retains the ten-second limit.
 Local regressions preserve pinned identity checks and no-replay behavior. This
 correction requires a new exact candidate before field qualification. It does
 not establish the physical cause of the real-channel delay.
+
+The exact RC3 subsequently completed its first 128 MiB MCP upload. Pull remained
+incomplete after 29 verified MiB while waiting for block 30. No QGA read timeout
+was reported. See the [source-bound record](../contrib/qualification/FIELD_ACCEPTANCE.md#incomplete-transfer-verification-040rc3).
+The working source now corrects a separately reproduced QGA slow-reader defect
+by retaining progress between bounded reads. Its local 128 MiB regression does
+not close the unresolved field response-publication boundary. Qualify any new
+candidate separately and preserve all earlier artifacts.
 
 ## First 0.4.0 block
 
@@ -121,8 +129,8 @@ The [RC1 field program](../contrib/qualification/FIELD_ACCEPTANCE.md#incomplete-
 is **INCOMPLETE / ПРОВЕРКА НЕ ЗАВЕРШЕНА**. One 128 MiB push completed on its
 second attempt. None of six pulls completed. Diagnostics and no-replay checks
 passed. Agent bytes remain unchanged. A completed late response without RDP
-loss must be investigated separately from worker-indeterminate outcomes. No
-transfer-runtime correction is justified until the delay boundary is isolated.
+loss must be investigated separately from worker-indeterminate outcomes. Those
+reports alone do not establish a correction of the real-channel delay.
 
 The later bounded 8 MiB probe passed without completing long-transfer acceptance.
 Its calibrated Appliance offset was approximately 17 seconds behind Host.

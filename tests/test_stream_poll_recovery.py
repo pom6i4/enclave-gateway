@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 
 from enclave_gateway.config import BastionSpec
 from enclave_gateway.control.qga_client import QgaClient
-from enclave_gateway.operations.context import OperationContext, OperationError, activate
+from enclave_gateway.operations.context import OperationContext, OperationError, activate, copy_diagnostics
 from enclave_gateway.transports.rdp_vfs import RdpVfsTransport
 from enclave_gateway.transports.stream_frames import BLOCK, encode_frame
 
@@ -97,6 +97,16 @@ class StreamPollRecoveryTests(unittest.TestCase):
                 self.assertFalse(any(req.read_bytes()) or any(res.read_bytes()) or any(upload.read_bytes()))
                 self.assertIn(('connect',3.0),control.calls)
                 self.assertFalse(control.handles)
+
+    def test_read_only_probe_does_not_create_copy_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            control,transport,envelope,ready,req,upload,res=self.fixture(Path(directory))
+            envelope['op']='ping'
+            started=time.monotonic()
+            context=OperationContext('probe','@bastion','local',started+45)
+            with activate(context):
+                self.assertEqual(transport._dispatch_stream(envelope,None,started+45,started,ready).exit_code,0)
+            self.assertEqual(copy_diagnostics(context),{})
 
     def test_erasure_disconnect_retries_only_zeroing_and_releases_upload(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -238,9 +248,43 @@ class StreamPollRecoveryTests(unittest.TestCase):
             result=transport._dispatch_stream(envelope,None,started+45,started,ready,download=download)
             self.assertEqual(result.exit_code,0)
             self.assertEqual(download,payload)
-            self.assertEqual(offsets,[0,1000,1000])
+            self.assertEqual(offsets[:3],[0,1000,1000])
+            self.assertEqual(offsets[2:],sorted(set(offsets[2:])))
             self.assertEqual((control.append_count,control.fill_count),(1,0))
             self.assertFalse(any(req.read_bytes()) or any(res.read_bytes()))
+
+    def test_bounded_download_rejects_trailing_bytes_and_untrusted_receipts_without_erasure(self):
+        from enclave_gateway.transports.stream_frames import Decoder
+        for fault in ('trailing', 'instance', 'transaction', 'hash', 'eof_timeout'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                control,transport,envelope,ready,req,upload,res=self.fixture(Path(directory))
+                value=Decoder().feed(res.read_bytes())[0][2]
+                value['stdout_b64']=base64.b64encode(('SHA256:'+'0'*64).encode()).decode()
+                # End the good frame exactly on a QGA chunk boundary. A bounded
+                # reader must still reject even one byte after that boundary.
+                payload=b'x'*(QgaClient.CHUNK_SIZE-len(encode_frame(value)))
+                value['stdout_b64']=base64.b64encode(('SHA256:'+hashlib.sha256(payload).hexdigest()).encode()).decode()
+                if fault=='instance':value['worker_instance']='d'*32
+                elif fault=='transaction':value['tx_id']='other_id'
+                elif fault=='hash':value['stdout_b64']=base64.b64encode(('SHA256:'+'0'*64).encode()).decode()
+                raw=encode_frame(value)+payload+(b'!' if fault=='trailing' else b'')
+                res.write_bytes(raw)
+                if fault=='eof_timeout':
+                    original=control._stream_read_on_connection
+                    def read(sock,reader,path,offset,count):
+                        if offset==len(raw) and count==1:
+                            raise TimeoutError('EOF observation stalled')
+                        return original(sock,reader,path,offset,count)
+                    control._stream_read_on_connection=read
+                envelope.update(copy_action='pull_part',copy_length=len(payload))
+                download=bytearray();started=time.monotonic()
+                with self.assertRaises((ValueError,OperationError)):
+                    transport._dispatch_stream(envelope,None,started+45,started,ready,download=download)
+                self.assertEqual(download,b'')
+                self.assertEqual(res.read_bytes(),raw)
+                self.assertTrue(any(req.read_bytes()))
+                self.assertEqual((control.append_count,control.fill_count),(1,0))
+                self.assertFalse(control.handles)
 
     def test_confirmed_cleanup_cannot_extend_the_step_deadline_without_context(self):
         from enclave_gateway.operations.context import budget
