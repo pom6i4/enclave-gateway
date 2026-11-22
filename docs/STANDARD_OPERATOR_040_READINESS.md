@@ -47,6 +47,13 @@ Earlier failed candidates retain their original outcomes.
 - Configuration-free MCP schema exports retain the explicit chunked arguments.
 - GitHub Private Vulnerability Reporting was confirmed enabled during this review.
 
+The [local rollback receipt](../contrib/qualification/LOCAL_ACCEPTANCE.md#local-rollback-between-v030-and-040rc4)
+records **PASS / УСПЕХ** for the exact-wheel cycle between `v0.3.0` and RC4.
+The same test journal retained completed and indeterminate outcomes. Its
+archived payload remained readable. Repeated transaction identities caused no
+additional dispatch. The older MCP schema rejected the RC4 chunked requests
+before dispatch. This qualifies the local Host package and journal boundary.
+
 The local optional portable PowerShell launch did not complete in the RC4
 candidate run. Its log remains unqualified. Final source runs retained explicit
 skips. This limitation is recorded in the immutable candidate's `LOCAL_CHECKS.md`.
@@ -56,9 +63,11 @@ It must not be relabelled as a passing optional test.
 
 ### 1. Complete the applicable field lifecycle program
 
-The RC4 transfer program retained uninterrupted RDP. It did not demonstrate
-recovery after actual disconnection. Earlier `0.3.0rc1` lifecycle acceptance
-belongs to different Host runtime bytes and does not automatically close this gate.
+Field RDP reconnect remains open. The RC4 transfer program retained
+uninterrupted RDP. The local rollback exercise used a synthetic journal and a
+transport fixture. The field lifecycle still needs evidence from the exercised
+route and its live worker. Earlier `0.3.0rc1` lifecycle acceptance applies to
+its own Host runtime.
 
 - Interrupt only an owned approved RDP test connection during an owned operation.
 - Preserve the interrupted operation's transaction identity and original arguments.

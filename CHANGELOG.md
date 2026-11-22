@@ -4,6 +4,13 @@
 
 Working package version: `0.4.0rc4`. No release is published by these changes.
 
+- Record **PASS / УСПЕХ** for the local RC4 upgrade and rollback cycle against
+  exact `v0.3.0`. The same SQLite journal retained completed outcomes, archived
+  results and indeterminate states through the downgrade and return to RC4.
+  Repeated MCP requests caused zero additional dispatches. The `v0.3.0` schema
+  rejected RC4 chunked requests before dispatch. Field RDP reconnect remains
+  open. See the
+  [local rollback receipt](contrib/qualification/LOCAL_ACCEPTANCE.md#local-rollback-between-v030-and-040rc4).
 - Record operator-reported **PASS / УСПЕХ** for exact installed RC4
   `a46529825a87e80e6e218d39cfa2a40089d5fb68`. First-attempt 128 MiB MCP push
   completed in 944.574 seconds. Pull completed in 366.294 seconds. All three

@@ -202,11 +202,12 @@ Use `v0.3.0` as the stable upgrade/rollback baseline. RC4 transfer acceptance is
 complete for its exercised route. The RC1 and RC3 failures retain their original
 outcomes. The historical root cause is not a newly imposed stable gate.
 
-The applicable [candidate checklist](STANDARD_OPERATOR_CANDIDATE.md#qualification-checklist-for-future-candidates)
-still requires current lifecycle evidence. Actual RDP reconnect was absent
-from the uninterrupted RC4 transfer program. Explicit baseline rollback was not
-demonstrated by preserving a wheel. Confirm the controlled lifecycle against
-the candidate with the same journal namespace and no repeated effect.
+The [local exact-wheel lifecycle](../contrib/qualification/LOCAL_ACCEPTANCE.md#local-rollback-between-v030-and-040rc4)
+passed upgrade, rollback and return to RC4. The same test journal and its
+archive were preserved. Repeated identities caused zero new dispatches.
+Field RDP reconnect remains open. The applicable
+[candidate checklist](STANDARD_OPERATOR_CANDIDATE.md#qualification-checklist-for-future-candidates)
+retains the separate field lifecycle checks on the live route.
 
 Then prepare exact final `0.4.0` artifacts in a new output directory. Compare
 their runtime with accepted RC4 before selecting further field regression.

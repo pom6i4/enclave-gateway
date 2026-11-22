@@ -128,6 +128,44 @@ own response without consuming the failed response or changing the retained
 journal outcome. These checks do not run a real Windows guest or contact a
 deployment. They do not reproduce the field RDP fault or qualify network timing.
 
+## Local rollback between v0.3.0 and 0.4.0rc4
+
+**PASS / УСПЕХ** for the installed package and Host journal cycle on macOS
+arm64 with Python 3.14.5. One isolated environment ran the full sequence
+`v0.3.0 → 0.4.0rc4 → v0.3.0 → 0.4.0rc4` using verified offline wheels.
+
+| Package | Source commit | Wheel SHA-256 |
+| --- | --- | --- |
+| `v0.3.0` | `29dad2ea643e5eed7fffc1a795827aa485ab1b85` | `23f0d4852749ec587ce16c589a76b55802183042961c49836266fae7c9a00fbd` |
+| `0.4.0rc4` | `a46529825a87e80e6e218d39cfa2a40089d5fb68` | `a8697dee4e8ff770ae8ffa79d9a89ffba4ac5f965fc66d2d49014d03d8b682fd` |
+
+Each installation matched all 65 runtime files in its wheel. The CLI and
+fresh stdio MCP servers reported the expected version. The installed MCP and
+journal code ran against a local transport fixture. A Python audit hook denied
+socket operations and subprocess launches inside the server and passed its
+denial probes. The journal and all test payloads were synthetic.
+
+- The same SQLite file, configuration and journal namespace persisted through
+  the cycle. No backup was restored. All four online backups passed SQLite
+  `integrity_check`.
+- The final journal contained eight entries. Six were completed. Two were
+  indeterminate. One completed result was stored in the archive. Existing rows
+  and the archived payload stayed unchanged across version changes.
+- Completed requests returned retained results after MCP restart and version
+  changes. Indeterminate requests stayed blocked. The fixture recorded zero
+  additional dispatches for repeated transaction identities. RC4 diagnostics
+  were still available after returning from `v0.3.0`.
+- After rollback, `v0.3.0` rejected both RC4 chunked requests as invalid
+  arguments before dispatch. An ordinary 64 KiB round trip matched SHA-256.
+- An injected lost reply after 1 MiB of verified pull progress preserved the
+  previous destination and removed the partial download file.
+
+This result covers installed package compatibility and Host journal behavior
+in the local fixture. Field RDP reconnect, the deployment journal and live
+worker behavior remain within the separate field program. Raw fixture receipts
+are retained privately. See the
+[0.4.0 readiness review](../../docs/STANDARD_OPERATOR_040_READINESS.md).
+
 ## Installed v0.3.0 local MCP verification
 
 Result: **PASS / УСПЕХ** for a newly launched local stdio server from the

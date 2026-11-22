@@ -126,6 +126,12 @@ It verifies EOF before acknowledging a complete response. The successful field
 cycle does not establish the physical cause of earlier RC3 delays. Its result
 also does not qualify actual RDP disconnection or baseline rollback.
 
+The separate [local rollback exercise](../contrib/qualification/LOCAL_ACCEPTANCE.md#local-rollback-between-v030-and-040rc4)
+passed the cycle from `v0.3.0` to RC4, back to `v0.3.0` and then to RC4 again.
+The installed packages preserved one test journal and its archived result.
+Repeated MCP requests caused zero additional dispatches. Field RDP reconnect
+remains open.
+
 The [0.4.0 readiness review](STANDARD_OPERATOR_040_READINESS.md) separates
 closed transfer gates from remaining lifecycle qualification and final artifact
 checks. Package version stays `0.4.0rc4` for this documentation update.
