@@ -8,8 +8,8 @@ Its [Standard operator release cycle](STANDARD_OPERATOR_CANDIDATE.md#release-cyc
 is complete for the exercised route. Historical acceptance remains bound to its
 exact package and deployment scope. The original tag and assets are immutable.
 
-The working version is `0.4.0rc4`. It is an unpublished Standard operator transfer candidate.
-Installing it is not required for continued operation of the accepted release.
+The preparation branch declares `0.4.0` for the unpublished Standard operator
+package. The accepted release remains the operational baseline.
 Confirmed maintenance defects can be addressed separately in `0.3.x`.
 
 Clock field verification of the exact RC2 at
@@ -209,8 +209,9 @@ Field RDP reconnect remains open. The applicable
 [candidate checklist](STANDARD_OPERATOR_CANDIDATE.md#qualification-checklist-for-future-candidates)
 retains the separate field lifecycle checks on the live route.
 
-Then prepare exact final `0.4.0` artifacts in a new output directory. Compare
-their runtime with accepted RC4 before selecting further field regression.
+Prepare exact final `0.4.0` artifacts in a new output directory while the
+field reconnect check remains open. Compare their runtime with accepted RC4
+before selecting further field regression.
 Require final-commit checks and exact final-wheel qualification. Complete the
 publication checks in the [readiness review](STANDARD_OPERATOR_040_READINESS.md).
 No next release is authorized by this roadmap alone.

@@ -134,11 +134,22 @@ remains open.
 
 The [0.4.0 readiness review](STANDARD_OPERATOR_040_READINESS.md) separates
 closed transfer gates from remaining lifecycle qualification and final artifact
-checks. Package version stays `0.4.0rc4` for this documentation update.
-The accepted bundle's build-time manifest remains unchanged. Its pending field
+checks. Final `0.4.0` preparation uses a separate source commit and bundle.
+The accepted RC4 bundle retains its build-time manifest. Its pending field
 status is superseded by the separate source-bound receipt, not by rewriting
 that manifest. Previous tags and artifacts retain their original bytes.
 No final tag or GitHub Release is created by recording this acceptance.
+
+## Prepared Standard operator 0.4.0 artifacts
+
+The unpublished `0.4.0` package is prepared from a local source commit. The
+prepared bundle contains the source export, sdist and pure Python wheel. The
+manifest identifies the source and records comparisons with accepted RC4.
+The release notes describe the tested Standard operator scope.
+
+Field reconnect and hosted CI for the final commit remain separate publication
+gates. The original `v0.3.0` release remains the rollback baseline. See the
+[0.4.0 readiness review](STANDARD_OPERATOR_040_READINESS.md).
 
 ## Beta release history
 

@@ -2,7 +2,12 @@
 
 ## Unreleased
 
-Working package version: `0.4.0rc4`. No release is published by these changes.
+Prepared package version `0.4.0` for the documented Standard operator scope.
+Publication is pending.
+
+- Set the final package version and maturity metadata. Runtime code differs
+  from the accepted RC4 only in its version declaration. Field RDP reconnect
+  remains open.
 
 - Record **PASS / УСПЕХ** for the local RC4 upgrade and rollback cycle against
   exact `v0.3.0`. The same SQLite journal retained completed outcomes, archived

@@ -5,8 +5,9 @@
 The operator reported **PASS / УСПЕХ** for installed `0.4.0rc4` at
 `a46529825a87e80e6e218d39cfa2a40089d5fb68`.
 Its [source-bound receipt](../contrib/qualification/FIELD_ACCEPTANCE.md#accepted-transfer-verification-040rc4)
-closes the 128 MiB MCP round trip on the exercised route. Stable `0.4.0` has
-not been prepared or published. Stable `v0.3.0` remains the rollback baseline.
+closes the 128 MiB MCP round trip on the exercised route. The local preparation
+branch declares `0.4.0` for the final Standard operator artifacts. Publication
+is pending. Stable `v0.3.0` remains the rollback baseline.
 Its source is `29dad2ea643e5eed7fffc1a795827aa485ab1b85`.
 
 The proposed stable scope remains limited to:
@@ -92,7 +93,8 @@ profile does not require or permit implicit supervisor recovery for this gate.
 ### 2. Prepare and qualify exact final 0.4.0 bytes
 
 Do not rebuild or edit the accepted RC4 bundle in place. Prepare final artifacts
-in a new private output directory after the lifecycle result is recorded.
+in a new private output directory. Field reconnect remains a release gate
+while local artifact preparation proceeds.
 
 - Set the final package version in both declarations.
 - Review package maturity metadata against the limited stable scope.
@@ -113,10 +115,10 @@ in a new private output directory after the lifecycle result is recorded.
 - Verify configuration-free schema exports from the final package.
 - Bind the accepted field evidence and runtime comparison to the final manifest.
 
-The version remains `0.4.0rc4` in this documentation-only update. No final
-artifact identity is claimed yet. A fresh full transfer is not required solely
-because the final package version string changes; the source comparison must
-establish equivalence before selecting the regression scope.
+The final source declares version `0.4.0`. The private artifact manifest records
+the exact source comparison and checks on the final wheel. A version-only
+runtime difference allows the previous 128 MiB result to be cited for RC4.
+Field reconnect and hosted CI for the final commit remain separate gates.
 
 ### 3. Complete final publication checks
 
