@@ -1,10 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 — Standard operator
 
-Prepared package version `0.4.0` for the documented Standard operator scope.
-Publication is pending.
+Published as [`v0.4.0`](https://github.com/pom6i4/enclave-gateway/releases/tag/v0.4.0)
+at `aee21a5ffc1a3aa6a303e6eb06b98dc1b44524f5` for the documented Standard
+operator scope.
 
+- Record the operator-confirmed installation of the published wheel. All 65
+  runtime files matched and a fresh MCP server reported `0.4.0`. All 803
+  journal records and both result archives were preserved. The run stopped
+  before transfer dispatch. The 128 MiB round trip, transfer no-replay check
+  and field RDP reconnect remain open. See the
+  [installation record](contrib/qualification/FIELD_ACCEPTANCE.md#confirmed-installation-of-v040).
 - Set the final package version and maturity metadata. Runtime code differs
   from the accepted RC4 only in its version declaration. Field RDP reconnect
   remains open.

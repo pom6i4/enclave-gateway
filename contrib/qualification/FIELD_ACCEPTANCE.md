@@ -7,6 +7,36 @@ reviewed against the immutable source hashes. Except where an entry explicitly
 records a later saved-evidence review, underlying private logs were not
 independently inspected.
 
+## Confirmed installation of v0.4.0
+
+- Installation and journal preservation confirmed by the operator.
+- Transfer program result: **INCOMPLETE / ПРОВЕРКА НЕ ЗАВЕРШЕНА**.
+- Published tag: `v0.4.0`.
+- Exact source: `aee21a5ffc1a3aa6a303e6eb06b98dc1b44524f5`.
+- Wheel SHA-256:
+  `23c2d136c6c30bef29fca08d2459aaa5263978abdb58beb24559c2dc5a2c3e92`.
+
+The operator verified the published package and installed `0.4.0` over
+`0.4.0rc4` in the same Host environment. The wheel identity matches the
+post-publication download verification. The installation was noneditable.
+All 65 runtime files matched the wheel. No extra runtime files were reported.
+The CLI and package metadata reported `0.4.0`. A fresh stdio MCP server
+reported `serverInfo.version: 0.4.0` using protocol `2025-03-26`.
+
+SQLite online backups before and after the update passed `integrity_check`.
+All 803 existing records were preserved, including all 33 historical
+`indeterminate` records. Both result archives were preserved. The operator
+retained the same configuration, journal namespace and principal. No backup
+was restored over the working journal. The read-only clock check passed.
+
+The approved interactive RDP desktop was unavailable and the foreground worker
+was stopped. The fresh MCP server reported `session_pending_worker` during
+preflight with zero published requests. Neither 128 MiB transfer was attempted.
+The retained-result check after MCP restart was not exercised. Field RDP
+reconnect was outside this program and remains open. The Host retained the
+verified `0.4.0` installation. The accepted RC4 transfer result applies to
+its own package. Raw field evidence stays in private operator storage.
+
 ## Accepted transfer verification: 0.4.0rc4
 
 - Result: **PASS / УСПЕХ** for the reported transfer program.

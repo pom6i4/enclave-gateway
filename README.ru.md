@@ -17,12 +17,13 @@
 
 **Область Standard operator.** Standard предполагает доверие к оператору, RDP-сеансу и всем процессам с правом записи в спул. Enterprise требует проверенных подписей, закреплённых хешей и SID, свежей аттестации и нативной модели исполнения. В обоих режимах действуют политики Windows и правила доступа организации.
 
-Последний релиз — [**0.3.0 — Standard operator**](https://github.com/pom6i4/enclave-gateway/releases/tag/v0.3.0) (`0.3.0`).
-Установленная версия прошла полевую приёмку на указанном маршруте под KES
-`21.3.10.1001`. Согласование политики конечных точек остаётся обязательным.
-Другие профили имеют отдельные границы квалификации. См.
-[приёмку установленного релиза](contrib/qualification/FIELD_ACCEPTANCE.md#accepted-installed-release-v030)
-и [границы выпуска](docs/STANDARD_OPERATOR_CANDIDATE.md).
+Текущий релиз — [**0.4.0 — Standard operator**](https://github.com/pom6i4/enclave-gateway/releases/tag/v0.4.0).
+Оператор подтвердил установку опубликованного wheel, запуск свежего MCP и
+сохранность журнала Host. Передача 128 МиБ в обе стороны и полевой RDP reconnect
+для установленного релиза остаются открытыми. Согласование политики конечных
+точек остаётся обязательным. См.
+[отчёт об установке](contrib/qualification/FIELD_ACCEPTANCE.md#confirmed-installation-of-v040)
+и [границы выпуска](docs/STANDARD_OPERATOR_040_READINESS.md).
 
 ## Возможности
 

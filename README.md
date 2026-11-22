@@ -35,12 +35,12 @@ The diagram shows the RDP route. When policy permits SSH, use the
 Enterprise adds signed native isolation and verified identities. Neither mode
 replaces the organization's endpoint policy, VPN entitlement or host-key approval.
 
-The latest release is [**0.3.0 — Standard operator**](https://github.com/pom6i4/enclave-gateway/releases/tag/v0.3.0) (`0.3.0`).
-Installed-release field acceptance passed on the recorded Standard operator route
-under KES `21.3.10.1001`. Endpoint approval remains explicit. Other execution
-profiles retain their separate qualification boundaries. See the
-[installed-release record](contrib/qualification/FIELD_ACCEPTANCE.md#accepted-installed-release-v030)
-and [release scope](docs/STANDARD_OPERATOR_CANDIDATE.md).
+The current release is [**0.4.0 — Standard operator**](https://github.com/pom6i4/enclave-gateway/releases/tag/v0.4.0).
+The operator confirmed the published wheel installation, fresh MCP initialization
+and Host journal preservation. The 128 MiB field round trip and RDP reconnect
+remain open for the installed release. Endpoint approval remains explicit.
+See the [installation record](contrib/qualification/FIELD_ACCEPTANCE.md#confirmed-installation-of-v040)
+and [release scope](docs/STANDARD_OPERATOR_040_READINESS.md).
 
 ## Key capabilities
 
@@ -154,8 +154,8 @@ Standard; migrating an existing deployment is an operator decision.
 
 ## Documentation
 
-- [Post-0.3.0 roadmap](docs/ROADMAP.md): unpublished development scope and next
-  candidate gates.
+- [Post-0.3.0 roadmap](docs/ROADMAP.md) covers development scope and remaining
+  field checks.
 - [Engineer and administrator guide](docs/GUIDE.md): installation, first connection,
   keys, CLI recipes, existing VM prerequisites and troubleshooting.
 - [Security architecture and Enterprise deployment](docs/SECURITY.md): trust

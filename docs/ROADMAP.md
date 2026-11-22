@@ -8,8 +8,10 @@ Its [Standard operator release cycle](STANDARD_OPERATOR_CANDIDATE.md#release-cyc
 is complete for the exercised route. Historical acceptance remains bound to its
 exact package and deployment scope. The original tag and assets are immutable.
 
-The preparation branch declares `0.4.0` for the unpublished Standard operator
-package. The accepted release remains the operational baseline.
+Published `v0.4.0` is available for Standard operator. Its installation and
+Host journal preservation are confirmed in the
+[field report](../contrib/qualification/FIELD_ACCEPTANCE.md#confirmed-installation-of-v040).
+The earlier `v0.3.0` release remains the rollback baseline.
 Confirmed maintenance defects can be addressed separately in `0.3.x`.
 
 Clock field verification of the exact RC2 at
@@ -196,7 +198,7 @@ exact-artifact Windows x64 execution and Windows ARM64 execution. Exercise the
 production metadata trust lifecycle separately from disposable laboratory PKI.
 Keep native Windows-host managed TPM unsupported until its backend is qualified.
 
-## Stable 0.4.0 gate
+## Remaining v0.4.0 field checks
 
 Use `v0.3.0` as the stable upgrade/rollback baseline. RC4 transfer acceptance is
 complete for its exercised route. The RC1 and RC3 failures retain their original
@@ -209,9 +211,9 @@ Field RDP reconnect remains open. The applicable
 [candidate checklist](STANDARD_OPERATOR_CANDIDATE.md#qualification-checklist-for-future-candidates)
 retains the separate field lifecycle checks on the live route.
 
-Prepare exact final `0.4.0` artifacts in a new output directory while the
-field reconnect check remains open. Compare their runtime with accepted RC4
-before selecting further field regression.
-Require final-commit checks and exact final-wheel qualification. Complete the
-publication checks in the [readiness review](STANDARD_OPERATOR_040_READINESS.md).
-No next release is authorized by this roadmap alone.
+The final source passed hosted CI and the published assets passed SHA-256
+verification. The field run on installed `v0.4.0` confirmed installation,
+fresh MCP initialization and journal preservation. It stopped before transfer
+dispatch at the worker readiness check. The installed release's 128 MiB
+round trip and transfer no-replay check remain open. Field RDP reconnect
+remains open separately. See the [verification status](STANDARD_OPERATOR_040_READINESS.md).

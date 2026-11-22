@@ -1,16 +1,21 @@
 # Standard operator 0.4.0 readiness
 
-## Accepted candidate and scope
+## Published release and scope
+
+[`v0.4.0`](https://github.com/pom6i4/enclave-gateway/releases/tag/v0.4.0) is
+published at `aee21a5ffc1a3aa6a303e6eb06b98dc1b44524f5`. All 15 hosted CI jobs
+passed for that commit. The operator confirmed the exact wheel installation,
+fresh MCP initialization and preservation of the Host journal. See the
+[installation record](../contrib/qualification/FIELD_ACCEPTANCE.md#confirmed-installation-of-v040).
 
 The operator reported **PASS / УСПЕХ** for installed `0.4.0rc4` at
 `a46529825a87e80e6e218d39cfa2a40089d5fb68`.
 Its [source-bound receipt](../contrib/qualification/FIELD_ACCEPTANCE.md#accepted-transfer-verification-040rc4)
-closes the 128 MiB MCP round trip on the exercised route. The local preparation
-branch declares `0.4.0` for the final Standard operator artifacts. Publication
-is pending. Stable `v0.3.0` remains the rollback baseline.
+closes the 128 MiB MCP round trip for that candidate. Stable `v0.3.0` remains
+the rollback baseline.
 Its source is `29dad2ea643e5eed7fffc1a795827aa485ab1b85`.
 
-The proposed stable scope remains limited to:
+The release scope is limited to:
 
 - Source and pure Python distribution.
 - Standard security mode.
@@ -21,9 +26,10 @@ The proposed stable scope remains limited to:
 - One approved Linux Target.
 - Independently approved deployment pins.
 
-No product correction is identified by the successful RC4 report. The remaining
-work is qualification and final packaging, subject to any newly found defect.
-Earlier failed candidates retain their original outcomes.
+The installed release's 128 MiB round trip and transfer no-replay check remain
+open. The field run stopped before dispatch because the interactive session
+was unavailable and the foreground worker was stopped. Field RDP reconnect
+remains a separate open check. Earlier candidates retain their own outcomes.
 
 ## Gates already supported for exact RC4
 
@@ -60,7 +66,7 @@ candidate run. Its log remains unqualified. Final source runs retained explicit
 skips. This limitation is recorded in the immutable candidate's `LOCAL_CHECKS.md`.
 It must not be relabelled as a passing optional test.
 
-## Required before stable promotion
+## Field lifecycle and release checks
 
 ### 1. Complete the applicable field lifecycle program
 
@@ -90,11 +96,10 @@ Keeping the rollback wheel on disk is not a rollback test. Existing pending
 transactions must not be bypassed using new identities. The manual operator
 profile does not require or permit implicit supervisor recovery for this gate.
 
-### 2. Prepare and qualify exact final 0.4.0 bytes
+### 2. Qualify exact final 0.4.0 bytes
 
-Do not rebuild or edit the accepted RC4 bundle in place. Prepare final artifacts
-in a new private output directory. Field reconnect remains a release gate
-while local artifact preparation proceeds.
+The published artifact set was prepared separately from the accepted RC4 bundle.
+The following checklist records the final build and qualification requirements.
 
 - Set the final package version in both declarations.
 - Review package maturity metadata against the limited stable scope.
@@ -118,9 +123,9 @@ while local artifact preparation proceeds.
 The final source declares version `0.4.0`. The private artifact manifest records
 the exact source comparison and checks on the final wheel. A version-only
 runtime difference allows the previous 128 MiB result to be cited for RC4.
-Field reconnect and hosted CI for the final commit remain separate gates.
+All 15 hosted CI jobs passed for the final commit. Field reconnect remains open.
 
-### 3. Complete final publication checks
+### 3. Final publication checklist
 
 - Run repository hygiene on the exact final commit.
 - Run the stored-history audit with individually reviewed findings.
