@@ -4,6 +4,22 @@
 
 Working package version: `0.4.0rc4`. No release is published by these changes.
 
+- Record operator-reported **PASS / УСПЕХ** for exact installed RC4
+  `a46529825a87e80e6e218d39cfa2a40089d5fb68`. First-attempt 128 MiB MCP push
+  completed in 944.574 seconds. Pull completed in 366.294 seconds. All three
+  copies matched in size and SHA-256. Each ledger contained 129 completed
+  copy records with no repeated data offsets. Fresh MCP sessions returned
+  retained outcomes without new copy dispatch. Clock checks passed. Worker
+  stop released the lease without respawn. Protection remained active with
+  zero new reported events. See the
+  [RC4 field record](contrib/qualification/FIELD_ACCEPTANCE.md#accepted-transfer-verification-040rc4).
+- Close the RC4 round-trip field gate for the exercised Standard operator route.
+  Retain historical failed attempts without attributing their physical cause
+  to the local QGA slow-reader defect. Document the remaining
+  [stable 0.4.0 gates](docs/STANDARD_OPERATOR_040_READINESS.md).
+  Preserve candidate manifests and all original artifacts. No runtime or
+  package-version change accompanies this documentation update.
+
 - Bound each QGA binary-response poll to 64 KiB so a later wire-read timeout
   cannot discard an entire accumulated MiB. Retain the decoder cursor across
   polls. Require EOF before erasing a complete binary response. Preserve the

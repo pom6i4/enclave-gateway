@@ -7,6 +7,132 @@ reviewed against the immutable source hashes. Except where an entry explicitly
 records a later saved-evidence review, underlying private logs were not
 independently inspected.
 
+## Accepted transfer verification: 0.4.0rc4
+
+- Result: **PASS / УСПЕХ** for the reported transfer program.
+- Exact source: `a46529825a87e80e6e218d39cfa2a40089d5fb68`.
+- Installed package: `0.4.0rc4`.
+- Wheel SHA-256:
+  `a8697dee4e8ff770ae8ffa79d9a89ffba4ac5f965fc66d2d49014d03d8b682fd`.
+- Worker attestation version: `0.3.0`.
+- Adapter SHA-256:
+  `9e74e6d3574be53610bdce46c4d8182036630fbf4455183219c97572bd25f046`.
+- Release status: unpublished candidate.
+
+This entry records the operator-supplied anonymized report. Its package
+identity was independently compared with the retained candidate manifest and
+wheel. Underlying deployment traces were not independently inspected for this
+entry. Raw evidence remains private. Deployment identifiers are omitted.
+Private policy hashes are omitted. Staging-bundle identifiers are omitted.
+Synthetic payload hashes are not reproduced; their reported equality is retained.
+
+### Installed identity and operating conditions
+
+The operator verified the bundle checksum set before installation. The offline
+candidate verifier passed without Python optimization. The installation was
+noneditable. All 65 runtime files matched the wheel with no extra runtime files.
+The owned stdio MCP server reported `serverInfo.version: 0.4.0rc4` and protocol
+`2025-03-26`. Fresh worker attestation verified the pinned adapter. It advertised
+`chunked_copy_slots_v1: true` and `operator_copy_max_sec: 45`.
+
+The exercised route used the Standard operator profile through QGA and RDP to
+one approved Linux Target. No agent restaging was reported. Existing protection
+remained enabled. Network policy was unchanged. No supervisor was started.
+No synthetic user input was used. Foreign processes were untouched. No new
+RDP disconnect event was reported during the transfers or repeat window.
+
+The whole-copy budget was 1800 seconds per direction. The client budget was
+2400 seconds per call. The outer observer budget was 7800 seconds. The original
+45-second step cap was retained. Automatic client retries were disabled.
+
+Reported read-only clock intervals remained inside the ±2000 ms tolerance.
+The final atomic sample reported an offset of −329 ms. Its lower bound was
+−330 ms. Its upper bound was −328 ms. Reported uncertainty was 1 ms.
+`host_clock_stable` and `verified` were true. This is a read-only clock gate;
+it does not repeat the separate RC2 clock-repair program.
+
+### First-attempt 128 MiB transfers
+
+The source contained 134217728 bytes of synthetic, practically incompressible
+data. Pull started only after push completed and the Target file was checked
+independently. Both operations used explicit chunked mode without root access.
+
+| Observation | Push | Pull |
+| --- | ---: | ---: |
+| Attempts | 1 | 1 |
+| Client monotonic duration, seconds | 944.574 | 366.294 |
+| Verified data blocks | 128 | 128 |
+| Verified bytes | 134217728 | 134217728 |
+| Copy request publications | 129 | 129 |
+| Completed worker copy records | 129 | 129 |
+| Repeated data offsets | 0 | 0 |
+| Highest step duration, ms | 16798 | 7020 |
+| Attestation attempts | 28 | 12 |
+
+Both Host journal outcomes were `completed`. Both destinations were committed.
+Independent checks reported equal sizes and SHA-256 for all three copies.
+The final response-read outcome was `complete` in both directions.
+
+The offline ledger analyzer reported 128 unique push parts and one push commit.
+Pull had one metadata request and 128 unique pull parts. There were no missing
+data offsets. There were no failed copy records. No indeterminate copy record
+was reported for this program.
+
+The raw diagnostic objects omitted `attestation_retries`. They omitted
+`read_timeouts`. They omitted `connection_losses`. No corresponding fault was
+reported. Missing fields are retained as absent observations rather than
+invented measurements. This program does not exercise those recovery branches.
+
+Pull reported 8482 response-read API calls with 6305 empty observations. Their
+difference is 2177: one metadata response plus 17 data-bearing API calls per
+block. The final call also performs the separate EOF observation internally.
+That internal read is not an additional `response_reads` increment. These
+counters do not independently measure RDP write latency.
+
+### Retained outcomes after MCP restart
+
+The operator renamed both owned Host files so their original paths were absent.
+The Target file remained unchanged. The first owned MCP server closed through
+stdin EOF with exit status zero. A fresh server reopened the same journal
+namespace under the same principal and initialized as `0.4.0rc4`.
+
+Each original call was repeated once with its unchanged transaction identity
+and original arguments. New JSON-RPC message identities were used. Both calls
+returned their retained result with unchanged diagnostics. The absent source
+was not required. The original download path was not recreated.
+
+The operator reported zero new copy dispatches in the repeat window. The worker
+ledger gained no copy records. Relevant spool observations were unchanged.
+Flight-recorder observations were unchanged. Journal update timestamps were
+unchanged. Target file metadata was unchanged. Equal payload hashes alone are
+not used as the no-replay proof.
+
+### Stop and preservation
+
+Acknowledged worker stop completed in 29.97657 seconds with exit status zero.
+The reported worker state was fresh `stopped` and its exclusive lease was free.
+The follow-up observation after 10.5 seconds found no respawn. Endpoint
+protection remained active with zero new reported events. No residual owned
+MCP process was reported. No owned transfer remained active.
+
+Only this program's synthetic files were removed after reconciliation. Global
+spool cleanup was not run. Historical indeterminate transactions were retained.
+Journal integrity verification passed. The rollback wheel remained unchanged.
+The original RC4 bundle remains immutable with field acceptance still marked
+pending in its build-time manifest. This separate record supplies the later
+field outcome; it does not rewrite the old manifest or checksum set.
+
+### Acceptance boundary
+
+This closes the 128 MiB round-trip gate for the exact RC4 on the exercised
+Standard operator route. It does not establish the cause of the earlier RC3
+block-30 delay. Historical failures remain recorded. One successful cycle does
+not establish indefinite unattended reliability or another deployment cohort.
+Actual RDP disconnection and reconnection were not exercised by this program.
+Preserving a rollback wheel does not prove an executed rollback. Remaining
+stable-promotion gates are tracked in the
+[0.4.0 readiness review](../../docs/STANDARD_OPERATOR_040_READINESS.md).
+
 ## Incomplete transfer verification: 0.4.0rc3
 
 - Result: **INCOMPLETE / ПРОВЕРКА НЕ ЗАВЕРШЕНА**.

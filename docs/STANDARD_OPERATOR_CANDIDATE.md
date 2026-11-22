@@ -75,6 +75,11 @@ options described in the [roadmap](ROADMAP.md#first-040-block).
 
 ## Qualification checklist for future candidates
 
+For the current post-0.3.0 candidate, the
+[0.4.0 readiness review](STANDARD_OPERATOR_040_READINESS.md) records accepted
+RC4 transfer gates and the remaining stable-promotion work. The completed
+0.3.0 lifecycle program above remains bound to its own source.
+
 Publication requires a source-bound result for every applicable gate. Historical
 reports do not become acceptance of new artifacts solely through a version bump.
 Select and record the stable upgrade/rollback baseline before running a new

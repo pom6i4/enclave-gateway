@@ -181,6 +181,16 @@ prefix when a later wire read times out. Bounded polls correct that defect.
 This synthetic failure includes QGA timeouts, unlike the saved field result.
 It must not be presented as a confirmed explanation or field fix for block 30.
 
+The exact RC4 later passed the
+[operator-reported 128 MiB round trip](../contrib/qualification/FIELD_ACCEPTANCE.md#accepted-transfer-verification-040rc4)
+on the first attempt in each direction. Both outcomes were retained without
+new copy dispatch after MCP restart. The final response-read label was
+`complete`. Read-fault counters were absent in that reported program. This
+closes the transfer gate for RC4's exercised route while preserving the
+unresolved physical cause of the earlier RC3 delay. It does not qualify a
+forced RDP reconnect. Remaining stable gates are in the
+[0.4.0 readiness review](STANDARD_OPERATOR_040_READINESS.md).
+
 ## Approved RDP session continuity
 
 Read the effective idle-session limit and active-session limit before a long

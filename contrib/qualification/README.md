@@ -12,6 +12,8 @@ qualification plans nor historical reports.
 - [Extended runtime profile](EXTENDED_ACCEPTANCE.md)
 - [Backend isolation and release procedure](HARDENING_AND_QUALIFICATION.md)
 - [Source-bound field acceptance](FIELD_ACCEPTANCE.md)
+- [Accepted RC4 128 MiB MCP field program](FIELD_ACCEPTANCE.md#accepted-transfer-verification-040rc4)
+- [Remaining stable 0.4.0 gates](../../docs/STANDARD_OPERATOR_040_READINESS.md)
 - [Development 0.4.0 MCP field acceptance and limits](FIELD_ACCEPTANCE.md#accepted-development-block-040dev0)
 - [Copy diagnostics and offline offset analysis](../../docs/MCP_TRANSFER_DIAGNOSTICS.md)
 - [Targeted 0.4.0rc1 field prompt](MCP_RELIABILITY_FIELD_PROMPT_RU.md)

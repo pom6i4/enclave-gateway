@@ -17,7 +17,8 @@ Clock field verification of the exact RC2 at
 [source-bound report](../contrib/qualification/FIELD_ACCEPTANCE.md#accepted-clock-verification-040rc2).
 One `heal` corrected the measured offset. Checks through 300 seconds passed.
 The worker and its RDP session were retained. This closes the clock program
-for that candidate, while 128 MiB round-trip acceptance remains incomplete.
+for RC2. Its incomplete transfer program remains a historical outcome; later
+RC4 transfer acceptance is recorded separately below.
 
 A subsequent RC2 MCP field upload stopped after 38 verified MiB during periodic
 attestation, before publishing part 39. RDP stayed connected. RC3
@@ -30,10 +31,21 @@ not establish the physical cause of the real-channel delay.
 The exact RC3 subsequently completed its first 128 MiB MCP upload. Pull remained
 incomplete after 29 verified MiB while waiting for block 30. No QGA read timeout
 was reported. See the [source-bound record](../contrib/qualification/FIELD_ACCEPTANCE.md#incomplete-transfer-verification-040rc3).
-The working source now corrects a separately reproduced QGA slow-reader defect
-by retaining progress between bounded reads. Its local 128 MiB regression does
-not close the unresolved field response-publication boundary. Qualify any new
-candidate separately and preserve all earlier artifacts.
+RC4 corrects a separately reproduced QGA slow-reader defect by retaining
+progress between bounded reads. Its local regression does not establish the
+physical cause of the earlier field delay.
+
+The operator subsequently reported **PASS / УСПЕХ** for exact installed RC4 at
+`a46529825a87e80e6e218d39cfa2a40089d5fb68`. First-attempt 128 MiB MCP push took
+944.574 seconds. Pull took 366.294 seconds. Integrity matched across all three
+copies. A new MCP session returned retained outcomes without new copy dispatch.
+Clock checks passed. Stop released the lease without respawn. Protection stayed
+active with zero new reported events. The
+[RC4 receipt](../contrib/qualification/FIELD_ACCEPTANCE.md#accepted-transfer-verification-040rc4)
+closes that candidate's round-trip gate on the exercised Standard operator route.
+The [stable 0.4.0 readiness review](STANDARD_OPERATOR_040_READINESS.md)
+tracks the remaining lifecycle checks and exact final artifact preparation.
+No release is published by recording this result. Earlier artifacts stay immutable.
 
 ## First 0.4.0 block
 
@@ -60,8 +72,9 @@ The ordinary source suite includes a 128 MiB MCP/engine/journal wrapper test wit
 a local backend substitute. The opt-in portable PowerShell fixture exercises
 MCP through the worker and persistent Python peer using local pipes. Neither
 test establishes real RDP or endpoint-policy compatibility. The separate field
-receipt covers the exercised real route. Its full round trip passed on attempt
-four. Failed attempts remain part of the evidence.
+receipt covers the exercised real route. The development source's full round
+trip passed on attempt four. Later RC4 passed both directions on the first
+attempt in its own program. Failed earlier attempts remain part of the evidence.
 
 ### P1: installed-package MCP acceptance
 
@@ -150,7 +163,7 @@ The current field evidence leaves specific follow-up work:
 - Isolate the late response without an RDP break before changing timeout gates.
 - Preserve the approved policy; withdraw the unsupported idle-timeout diagnosis.
 - Use the [bounded reverse-path probe](../contrib/qualification/MCP_REVERSE_PATH_PROBE_RU.md) before another full run.
-- Measure first-attempt long-transfer reliability under those normal conditions.
+- Extend first-attempt reliability observations beyond the single successful RC4 window.
 
 The historical 61.7018-second interval comes from response-file timestamps;
 it does not independently measure request latency. The RC1 operator also
@@ -183,17 +196,20 @@ exact-artifact Windows x64 execution and Windows ARM64 execution. Exercise the
 production metadata trust lifecycle separately from disposable laboratory PKI.
 Keep native Windows-host managed TPM unsupported until its backend is qualified.
 
-## Next candidate gate
+## Stable 0.4.0 gate
 
-Use `v0.3.0` as the stable upgrade/rollback baseline for the first 0.4.0 candidate.
-Run the [candidate checklist](STANDARD_OPERATOR_CANDIDATE.md#qualification-checklist-for-future-candidates)
-against the new source and exact wheel. Field acceptance of the MCP addition
-at `363d8f7` covers a 128 MiB push and pull through the changed tool. It includes
-controlled cancellation and no-replay checks. Preserve all failed attempts and
-the qualified acceptance scope. New runtime changes require their own regression.
-Broaden the lifecycle regression when deployment components or runtime behavior
-change. The [targeted candidate field prompt](../contrib/qualification/MCP_RELIABILITY_FIELD_PROMPT_RU.md)
-requires approved session-continuity evidence and the new observations.
-The RC1 program did not complete its required round trip. Existing functional
-acceptance alone does not close stable promotion. No next release is authorized
-by this roadmap alone.
+Use `v0.3.0` as the stable upgrade/rollback baseline. RC4 transfer acceptance is
+complete for its exercised route. The RC1 and RC3 failures retain their original
+outcomes. The historical root cause is not a newly imposed stable gate.
+
+The applicable [candidate checklist](STANDARD_OPERATOR_CANDIDATE.md#qualification-checklist-for-future-candidates)
+still requires current lifecycle evidence. Actual RDP reconnect was absent
+from the uninterrupted RC4 transfer program. Explicit baseline rollback was not
+demonstrated by preserving a wheel. Confirm the controlled lifecycle against
+the candidate with the same journal namespace and no repeated effect.
+
+Then prepare exact final `0.4.0` artifacts in a new output directory. Compare
+their runtime with accepted RC4 before selecting further field regression.
+Require final-commit checks and exact final-wheel qualification. Complete the
+publication checks in the [readiness review](STANDARD_OPERATOR_040_READINESS.md).
+No next release is authorized by this roadmap alone.

@@ -112,6 +112,28 @@ wheel hash and a filled 128 MiB field prompt. The preparation template is
 do not establish real-route acceptance. Keep earlier candidate artifacts intact.
 No Git tag or public Release is created by preparation.
 
+## Accepted unpublished 0.4.0rc4 transfer candidate
+
+Exact RC4 at `a46529825a87e80e6e218d39cfa2a40089d5fb68` passed the
+[operator-reported 128 MiB MCP field program](../contrib/qualification/FIELD_ACCEPTANCE.md#accepted-transfer-verification-040rc4).
+Both directions completed on their first attempt. Size and SHA-256 matched
+across three copies. A new MCP session returned retained outcomes with no
+new copy dispatch. Clock checks passed. Stop released the lease without
+respawn. Protection remained active with zero new reported events.
+
+RC4 uses bounded QGA binary-response reads with retained decoder progress.
+It verifies EOF before acknowledging a complete response. The successful field
+cycle does not establish the physical cause of earlier RC3 delays. Its result
+also does not qualify actual RDP disconnection or baseline rollback.
+
+The [0.4.0 readiness review](STANDARD_OPERATOR_040_READINESS.md) separates
+closed transfer gates from remaining lifecycle qualification and final artifact
+checks. Package version stays `0.4.0rc4` for this documentation update.
+The accepted bundle's build-time manifest remains unchanged. Its pending field
+status is superseded by the separate source-bound receipt, not by rewriting
+that manifest. Previous tags and artifacts retain their original bytes.
+No final tag or GitHub Release is created by recording this acceptance.
+
 ## Beta release history
 
 The last Beta package version was `0.3.0b7`. Its Git release tag is
